@@ -47,7 +47,7 @@ func (g *Client) Login(user, pwd string) error {
 
 	domain := strings.Split(g.Host, ":")[0]
 
-	g.tpkt = tpkt.New(core.NewSocketLayer(conn, nla.NewNTLMv2(domain, user, pwd)))
+	g.tpkt = tpkt.New(core.NewSocketLayer(conn), nla.NewNTLMv2(domain, user, pwd))
 	g.x224 = x224.New(g.tpkt)
 	g.mcs = t125.NewMCSClient(g.x224)
 	g.sec = sec.NewClient(g.mcs)
