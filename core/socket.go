@@ -5,10 +5,10 @@ import (
 	"math/big"
 
 	"github.com/huin/asn1ber"
+	"github.com/icodeface/grdp/glog"
 
-	//"crypto/tls"
+	"crypto/tls"
 	"errors"
-	"github.com/icodeface/tls"
 	"net"
 )
 
@@ -50,6 +50,7 @@ func (s *SocketLayer) Close() error {
 }
 
 func (s *SocketLayer) StartTLS() error {
+	glog.Info("StartTLS")
 	config := &tls.Config{
 		InsecureSkipVerify:       true,
 		MinVersion:               tls.VersionTLS10,
