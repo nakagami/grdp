@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/icodeface/grdp"
-	"github.com/icodeface/grdp/glog"
+	"github.com/icodeface/grdp/protocol/pdu"
 )
 
 var (

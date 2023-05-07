@@ -28,7 +28,8 @@ type Client struct {
 	pdu  *pdu.Client
 }
 
-func NewClient(host string, logLevel glog.LEVEL) *Client {
+func NewClient(host string) *Client {
+	logLevel := glog.DEBUG
 	glog.SetLevel(logLevel)
 	logger := log.New(os.Stdout, "", 0)
 	glog.SetLogger(logger)
