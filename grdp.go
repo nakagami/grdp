@@ -90,3 +90,25 @@ func (g *Client) Login(user, pwd string) error {
 	wg.Wait()
 	return err
 }
+
+func (g *Client) OnError(f func(e error)) {
+	g.pdu.On("error", f)
+}
+func (g *Client) OnClose(f func()) {
+	g.pdu.On("close", f)
+}
+func (g *Client) OnSuccess(f func()) {
+	g.pdu.On("success", f)
+}
+func (g *Client) OnReady(f func()) {
+	g.pdu.On("ready", f)
+}
+func (g *Client) OnUpdate(f func([]pdu.BitmapData)) {
+	g.pdu.On("update", f)
+}
+
+func (g *Client) Close() {
+	if g.tpkt != nil {
+		g.tpkt.Close()
+	}
+}
