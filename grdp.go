@@ -29,7 +29,7 @@ type Client struct {
 }
 
 func NewClient(host string) *Client {
-	logLevel := glog.DEBUG
+	logLevel := glog.TRACE
 	glog.SetLevel(logLevel)
 	logger := log.New(os.Stdout, "", 0)
 	glog.SetLogger(logger)
