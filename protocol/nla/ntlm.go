@@ -8,9 +8,9 @@ import (
 	"encoding/hex"
 	"time"
 
-	"github.com/lunixbochs/struc"
 	"github.com/icodeface/grdp/core"
 	"github.com/icodeface/grdp/glog"
+	"github.com/lunixbochs/struc"
 )
 
 const (
@@ -155,7 +155,7 @@ func NewChallengeMessage() *ChallengeMessage {
 
 // total len - payload len
 func (m *ChallengeMessage) BaseLen() uint32 {
-	return 56
+	return 48
 }
 
 func (m *ChallengeMessage) getTargetInfo() []byte {
@@ -166,12 +166,16 @@ func (m *ChallengeMessage) getTargetInfo() []byte {
 	start := m.TargetInfoBufferOffset - offset
 	return m.Payload[start : start+uint32(m.TargetInfoLen)]
 }
+
 func (m *ChallengeMessage) getTargetName() []byte {
 	if m.TargetNameLen == 0 {
 		return make([]byte, 0)
 	}
-	return m.Payload[:uint32(m.TargetNameLen)]
+	offset := m.BaseLen()
+	start := m.TargetNameBufferOffset - offset
+	return m.Payload[start : start+uint32(m.TargetNameLen)]
 }
+
 func (m *ChallengeMessage) getTargetInfoTimestamp(data []byte) []byte {
 	r := bytes.NewReader(data)
 	for r.Len() > 0 {
@@ -311,7 +315,7 @@ func (n *NTLMv2) GetNegotiateMessage() *NegotiateMessage {
 	return n.negotiateMessage
 }
 
-//  process NTLMv2 Authenticate hash
+// process NTLMv2 Authenticate hash
 func (n *NTLMv2) ComputeResponse(respKeyNT, respKeyLM, serverChallenge, clientChallenge,
 	timestamp, serverInfo []byte) (ntChallResp, lmChallResp, SessBaseKey []byte) {
 
@@ -350,13 +354,13 @@ func MIC(exportedSessionKey []byte, negotiateMessage, challengeMessage, authenti
 }
 
 func SIGNKEY(exportedSessionKey []byte, isClient bool) []byte {
-    buff := bytes.NewBuffer(exportedSessionKey)
-    if isClient {
-        buff.WriteString("session key to client-to-server signing key magic constant\x00")
-    } else {
-        buff.WriteString("session key to server-to-client signing key magic constant\x00")
-    }
-    return MD5(buff.Bytes())
+	buff := bytes.NewBuffer(exportedSessionKey)
+	if isClient {
+		buff.WriteString("session key to client-to-server signing key magic constant\x00")
+	} else {
+		buff.WriteString("session key to server-to-client signing key magic constant\x00")
+	}
+	return MD5(buff.Bytes())
 }
 
 func concat(bs ...[]byte) []byte {
