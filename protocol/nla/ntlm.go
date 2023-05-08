@@ -314,7 +314,7 @@ func (n *NTLMv2) GetNegotiateMessage() *NegotiateMessage {
 }
 
 //  process NTLMv2 Authenticate hash
-func (n *NTLMv2) ComputeResponseV2(respKeyNT, respKeyLM, serverChallenge, clientChallenge,
+func (n *NTLMv2) ComputeResponse(respKeyNT, respKeyLM, serverChallenge, clientChallenge,
 	timestamp, serverInfo []byte) (ntChallResp, lmChallResp, SessBaseKey []byte) {
 
 	tempBuff := &bytes.Buffer{}
@@ -349,6 +349,16 @@ func MIC(exportedSessionKey []byte, negotiateMessage, challengeMessage, authenti
 	buff.Write(challengeMessage.Serialize())
 	buff.Write(authenticateMessage.Serialize())
 	return HMAC_MD5(exportedSessionKey, buff.Bytes())
+}
+
+func SIGNKEY(exportedSessionKey []byte, isClient bool) []byte {
+    buff := bytes.NewBuffer(exportedSessionKey)
+    if isClient {
+        buff.WriteString("session key to client-to-server signing key magic constant\x00")
+    } else {
+        buff.WriteString("session key to server-to-client signing key magic constant\x00")
+    }
+    return MD5(buff.Bytes())
 }
 
 func concat(bs ...[]byte) []byte {
@@ -398,7 +408,7 @@ func (n *NTLMv2) GetAuthenticateMessage(s []byte) (*AuthenticateMessage, *NTLMv2
 	glog.Infof("serverName=%+v", core.UnicodeDecode(serverName))
 	serverChallenge := challengeMsg.ServerChallenge[:]
 	clientChallenge := core.Random(8)
-	ntChallengeResponse, lmChallengeResponse, SessionBaseKey := n.ComputeResponseV2(
+	ntChallengeResponse, lmChallengeResponse, SessionBaseKey := n.ComputeResponse(
 		n.respKeyNT, n.respKeyLM, serverChallenge, clientChallenge, timestamp, serverInfo)
 
 	exchangeKey := SessionBaseKey
