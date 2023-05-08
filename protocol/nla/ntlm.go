@@ -170,9 +170,7 @@ func (m *ChallengeMessage) getTargetName() []byte {
 	if m.TargetNameLen == 0 {
 		return make([]byte, 0)
 	}
-	offset := m.BaseLen()
-	start := m.TargetNameBufferOffset - offset
-	return m.Payload[start : start+uint32(m.TargetNameLen)]
+	return m.Payload[:uint32(m.TargetNameLen)]
 }
 func (m *ChallengeMessage) getTargetInfoTimestamp(data []byte) []byte {
 	r := bytes.NewReader(data)
