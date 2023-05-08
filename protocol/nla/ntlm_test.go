@@ -3,9 +3,10 @@ package nla_test
 import (
 	"bytes"
 	"encoding/hex"
+	"testing"
+
 	"github.com/icodeface/grdp/protocol/nla"
 	"github.com/lunixbochs/struc"
-	"testing"
 )
 
 func TestNewNegotiateMessage(t *testing.T) {

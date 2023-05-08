@@ -29,7 +29,7 @@ type Client struct {
 }
 
 func NewClient(host string) *Client {
-	logLevel := glog.DEBUG
+	logLevel := glog.TRACE
 	glog.SetLevel(logLevel)
 	logger := log.New(os.Stdout, "", 0)
 	glog.SetLogger(logger)
@@ -47,7 +47,7 @@ func (g *Client) Login(user, pwd string) error {
 
 	domain := strings.Split(g.Host, ":")[0]
 
-	g.tpkt = tpkt.New(core.NewSocketLayer(conn, nla.NewNTLMv2(domain, user, pwd)))
+	g.tpkt = tpkt.New(core.NewSocketLayer(conn), nla.NewNTLMv2(domain, user, pwd))
 	g.x224 = x224.New(g.tpkt)
 	g.mcs = t125.NewMCSClient(g.x224)
 	g.sec = sec.NewClient(g.mcs)
