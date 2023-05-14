@@ -121,6 +121,7 @@ func (m *NegotiateMessage) Serialize() []byte {
 }
 
 type ChallengeMessage struct {
+	totalLen               int
 	Signature              []byte   `struc:"[8]byte"`
 	MessageType            uint32   `struc:"little"`
 	TargetNameLen          uint16   `struc:"little"`
@@ -153,9 +154,8 @@ func NewChallengeMessage() *ChallengeMessage {
 	}
 }
 
-// total len - payload len
 func (m *ChallengeMessage) BaseLen() uint32 {
-	return 48
+	return uint32(m.totalLen - len(m.Payload))
 }
 
 func (m *ChallengeMessage) getTargetInfo() []byte {
@@ -376,6 +376,7 @@ var (
 
 func (n *NTLMv2) GetAuthenticateMessage(s []byte) (*AuthenticateMessage, *NTLMv2Security) {
 	challengeMsg := &ChallengeMessage{}
+	challengeMsg.totalLen = len(s)
 	r := bytes.NewReader(s)
 	err := struc.Unpack(r, challengeMsg)
 	if err != nil {
