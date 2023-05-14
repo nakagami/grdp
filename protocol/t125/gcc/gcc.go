@@ -249,7 +249,7 @@ func NewClientCoreData() *ClientCoreData {
 		RNS_UD_SAS_DEL, US, 3790, [32]byte{'m', 's', 't', 's', 'c'}, KT_IBM_101_102_KEYS,
 		0, 12, [64]byte{}, RNS_UD_COLOR_8BPP, 1, 0, HIGH_COLOR_24BPP,
 		RNS_UD_15BPP_SUPPORT | RNS_UD_16BPP_SUPPORT | RNS_UD_24BPP_SUPPORT | RNS_UD_32BPP_SUPPORT,
-		RNS_UD_CS_SUPPORT_ERRINFO_PDU, [64]byte{}, 0, 0, 0}
+		RNS_UD_CS_SUPPORT_ERRINFO_PDU | RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL, [64]byte{}, 0, 0, 0}
 }
 
 func (data *ClientCoreData) Block() []byte {
