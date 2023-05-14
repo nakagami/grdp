@@ -526,6 +526,15 @@ func (*SurfaceCommandsCapability) Type() CapsType {
 	return CAPSETTYPE_SURFACE_COMMANDS
 }
 
+// see https://docs.microsoft.com/en-us/openspecs/windows_protocols/ms-rdprfx/e4d498fd-822b-408d-b8b3-1c216f21265b
+type FrameAcknowledeCapability struct {
+	MaxUnacknowledgedFrameCount uint32 `struc:"little"`
+}
+
+func (*FrameAcknowledeCapability) Type() CapsType {
+	return CAPSSETTYPE_FRAME_ACKNOWLEDGE
+}
+
 func readCapability(r io.Reader) (Capability, error) {
 	capType, err := core.ReadUint16LE(r)
 	if err != nil {
@@ -593,6 +602,8 @@ func readCapability(r io.Reader) (Capability, error) {
 		c = &DesktopCompositionCapability{}
 	case CAPSETTYPE_SURFACE_COMMANDS:
 		c = &SurfaceCommandsCapability{}
+	case CAPSSETTYPE_FRAME_ACKNOWLEDGE:
+		c = &FrameAcknowledeCapability{}
 	default:
 		err := errors.New(fmt.Sprintf("unsupported Capability type 0x%04x", capType))
 		glog.Error(err)
