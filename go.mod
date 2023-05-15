@@ -1,6 +1,6 @@
 module github.com/icodeface/grdp
 
-go 1.12
+go 1.20
 
 require (
 	github.com/huin/asn1ber v0.0.0-20120622192748-af09f62e6358 // indirect
