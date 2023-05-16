@@ -218,6 +218,7 @@ type ChannelDef struct {
 	Options uint32
 }
 
+// https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/00f1da4a-ee9c-421a-852f-c19f92343d73
 type ClientCoreData struct {
 	RdpVersion             VERSION        `struc:"uint32,little"`
 	DesktopWidth           uint16         `struc:"little"`

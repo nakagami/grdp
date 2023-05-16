@@ -221,14 +221,14 @@ func (x *X224) Connect() error {
 	message.ProtocolNeg.Type = TYPE_RDP_NEG_REQ
 	message.ProtocolNeg.Result = uint32(x.requestedProtocol)
 
-	glog.Debug("x224 sendConnectionRequest", hex.EncodeToString(message.Serialize()))
+	glog.Debug("x224 Connection Request PDU", hex.EncodeToString(message.Serialize()))
 	_, err := x.transport.Write(message.Serialize())
 	x.transport.Once("data", x.recvConnectionConfirm)
 	return err
 }
 
 func (x *X224) recvConnectionConfirm(s []byte) {
-	glog.Debug("x224 recvConnectionConfirm ", hex.EncodeToString(s))
+	glog.Debug("x224 Connection Confirm PDU ", hex.EncodeToString(s))
 	message := &ServerConnectionConfirm{}
 	if err := struc.Unpack(bytes.NewReader(s), message); err != nil {
 		glog.Error("ReadServerConnectionConfirm err", err)
