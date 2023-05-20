@@ -165,18 +165,20 @@ func (c *Client) recvDemandActivePDU(s []byte) {
 		return
 	}
 	if pdu.ShareCtrlHeader.PDUType != PDUTYPE_DEMANDACTIVEPDU {
-		glog.Info("PDU ignore message during connection sequence, type is", pdu.ShareCtrlHeader.PDUType)
+		glog.Debug("PDU ignore message during connection sequence, type is", pdu.ShareCtrlHeader.PDUType)
 		c.transport.Once("data", c.recvDemandActivePDU)
 		return
 	}
 	c.sharedId = pdu.Message.(*DemandActivePDU).SharedId
 	c.demandActivePDU = pdu.Message.(*DemandActivePDU)
 	for _, caps := range c.demandActivePDU.CapabilitySets {
-		glog.Debugf("serverCapabilities<%s>: %+v", caps.Type(), caps)
+		// glog.Debugf("serverCapabilities<%s>: %+v", caps.Type(), caps)
 		c.serverCapabilities[caps.Type()] = caps
 	}
 
+	glog.Debugf("recvDemandActivePDU() -> sendConfirmActivePDU()")
 	c.sendConfirmActivePDU()
+	glog.Debugf("recvDemandActivePDU() -> sendClientFinalizeSynchronizePDU()")
 	c.sendClientFinalizeSynchronizePDU()
 	c.transport.Once("data", c.recvServerSynchronizePDU)
 }
@@ -243,7 +245,7 @@ func (c *Client) sendConfirmActivePDU() {
 
 	pdu.SharedId = c.sharedId
 	for _, v := range c.clientCapabilities {
-		glog.Debugf("clientCapabilities<%s>: %+v", v.Type(), v)
+		// glog.Debugf("clientCapabilities<%s>: %+v", v.Type(), v)
 		pdu.CapabilitySets = append(pdu.CapabilitySets, v)
 	}
 	pdu.NumberCapabilities = uint16(len(pdu.CapabilitySets))

@@ -692,7 +692,7 @@ func readCapability(r io.Reader) (Capability, error) {
 	}
 	capReader := bytes.NewReader(capBytes)
 	var c Capability
-	glog.Debugf("Capability type 0x%04x", capType)
+	// glog.Debugf("Capability type 0x%04x", capType)
 	switch CapsType(capType) {
 	case CAPSTYPE_GENERAL:
 		c = &GeneralCapability{}
@@ -755,6 +755,6 @@ func readCapability(r io.Reader) (Capability, error) {
 		glog.Error("Capability unpack error", err, fmt.Sprintf("0x%04x", capType), hex.EncodeToString(capBytes))
 		return nil, err
 	}
-	glog.Debugf("Capability<%s>: %+v", c.Type(), c)
+	// glog.Debugf("Capability<%s>: %+v", c.Type(), c)
 	return c, nil
 }
