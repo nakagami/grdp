@@ -5,7 +5,7 @@ import (
 	"crypto/md5"
 	"crypto/rc4"
 	"encoding/binary"
-	"encoding/hex"
+	//	"encoding/hex"
 	"time"
 
 	"github.com/icodeface/grdp/core"
@@ -393,9 +393,9 @@ func (n *NTLMv2) GetAuthenticateMessage(s []byte) (*AuthenticateMessage, *NTLMv2
 	}
 	challengeMsg.Payload, _ = core.ReadBytes(r.Len(), r)
 	n.challengeMessage = challengeMsg
-	glog.Debugf("challengeMsg:%+v", challengeMsg)
+	// glog.Debugf("challengeMsg:%+v", challengeMsg)
 
-	serverName := challengeMsg.getTargetName()
+	// serverName := challengeMsg.getTargetName()
 	serverInfo := challengeMsg.getTargetInfo()
 	timestamp := challengeMsg.getTargetInfoTimestamp(serverInfo)
 	computeMIC := false
@@ -407,7 +407,7 @@ func (n *NTLMv2) GetAuthenticateMessage(s []byte) (*AuthenticateMessage, *NTLMv2
 	} else {
 		computeMIC = true
 	}
-	glog.Infof("serverName=%+v", core.UnicodeDecode(serverName))
+	// glog.Infof("serverName=%+v", core.UnicodeDecode(serverName))
 	serverChallenge := challengeMsg.ServerChallenge[:]
 	clientChallenge := core.Random(8)
 	ntChallengeResponse, lmChallengeResponse, SessionBaseKey := n.ComputeResponse(
@@ -422,7 +422,7 @@ func (n *NTLMv2) GetAuthenticateMessage(s []byte) (*AuthenticateMessage, *NTLMv2
 	if challengeMsg.NegotiateFlags&NTLMSSP_NEGOTIATE_UNICODE != 0 {
 		n.enableUnicode = true
 	}
-	glog.Infof("user: %s, passwd:%s", n.user, n.password)
+	// glog.Infof("user: %s, passwd:%s", n.user, n.password)
 	domain, user, _ := n.GetEncodedCredentials()
 
 	n.authenticateMessage = NewAuthenticateMessage(challengeMsg.NegotiateFlags,
@@ -453,10 +453,10 @@ func (n *NTLMv2) GetAuthenticateMessage(s []byte) (*AuthenticateMessage, *NTLMv2
 	md.Write(a)
 	ServerSealingKey := md.Sum(nil)
 
-	glog.Debugf("ClientSigningKey:%s", hex.EncodeToString(ClientSigningKey))
-	glog.Debugf("ServerSigningKey:%s", hex.EncodeToString(ServerSigningKey))
-	glog.Debugf("ClientSealingKey:%s", hex.EncodeToString(ClientSealingKey))
-	glog.Debugf("ServerSealingKey:%s", hex.EncodeToString(ServerSealingKey))
+	// glog.Debugf("ClientSigningKey:%s", hex.EncodeToString(ClientSigningKey))
+	// glog.Debugf("ServerSigningKey:%s", hex.EncodeToString(ServerSigningKey))
+	// glog.Debugf("ClientSealingKey:%s", hex.EncodeToString(ClientSealingKey))
+	// glog.Debugf("ServerSealingKey:%s", hex.EncodeToString(ServerSealingKey))
 
 	encryptRC4, _ := rc4.NewCipher(ClientSealingKey)
 	decryptRC4, _ := rc4.NewCipher(ServerSealingKey)

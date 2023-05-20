@@ -201,7 +201,7 @@ func (x *X224) Write(b []byte) (n int, err error) {
 	}
 	buff.Write(b)
 
-	glog.Trace("x224 write:", hex.EncodeToString(buff.Bytes()))
+	// glog.Trace("x224 write:", hex.EncodeToString(buff.Bytes()))
 	return x.transport.Write(buff.Bytes())
 }
 
@@ -288,7 +288,7 @@ func (x *X224) recvConnectionConfirm(s []byte) {
 }
 
 func (x *X224) recvData(s []byte) {
-	glog.Trace("x224 recvData", hex.EncodeToString(s), "emit data")
+	// glog.Trace("x224 recvData", hex.EncodeToString(s), "emit data")
 	// x224 header takes 3 bytes
 	x.Emit("data", s[3:])
 }

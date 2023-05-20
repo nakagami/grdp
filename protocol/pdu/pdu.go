@@ -374,7 +374,7 @@ func (c *Client) recvPDU(s []byte) {
 }
 
 func (c *Client) RecvFastPath(secFlag byte, s []byte) {
-	glog.Trace("PDU RecvFastPath", hex.EncodeToString(s))
+	// glog.Trace("PDU RecvFastPath", hex.EncodeToString(s))
 	r := bytes.NewReader(s)
 	for r.Len() > 0 {
 		updateHeader, err := core.ReadUInt8(r)

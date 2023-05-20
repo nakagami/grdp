@@ -197,7 +197,7 @@ func (s *SEC) Close() error {
 }
 
 func (s *SEC) sendFlagged(flag uint16, data []byte) {
-	glog.Debug("sendFlagged", hex.EncodeToString(data))
+	//	glog.Debug("sendFlagged", hex.EncodeToString(data))
 	buff := &bytes.Buffer{}
 	core.WriteUInt16LE(flag, buff)
 	core.WriteUInt16LE(0, buff)
@@ -310,15 +310,15 @@ retry:
 }
 
 func (c *Client) sendClientNewLicenseRequest() {
-	glog.Debug("sec sendClientNewLicenseRequest todo")
+	//	glog.Debug("sec sendClientNewLicenseRequest todo")
 
 }
 
 func (c *Client) sendClientChallengeResponse() {
-	glog.Debug("sec sendClientChallengeResponse todo")
+	// glog.Debug("sec sendClientChallengeResponse todo")
 }
 
 func (c *Client) recvData(s []byte) {
-	glog.Debug("sec recvData", hex.EncodeToString(s))
+	//	glog.Debug("sec recvData", hex.EncodeToString(s))
 	c.Emit("data", s)
 }
