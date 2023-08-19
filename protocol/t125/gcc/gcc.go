@@ -2,9 +2,9 @@ package gcc
 
 import (
 	"bytes"
-	"github.com/icodeface/grdp/core"
-	"github.com/icodeface/grdp/glog"
-	"github.com/icodeface/grdp/protocol/t125/per"
+	"github.com/nakagami/grdp/core"
+	"github.com/nakagami/grdp/glog"
+	"github.com/nakagami/grdp/protocol/t125/per"
 	"github.com/lunixbochs/struc"
 )
 

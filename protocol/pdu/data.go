@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/icodeface/grdp/core"
-	"github.com/icodeface/grdp/glog"
+	"github.com/nakagami/grdp/core"
+	"github.com/nakagami/grdp/glog"
 	"github.com/lunixbochs/struc"
 )
 

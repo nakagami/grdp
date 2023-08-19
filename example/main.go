@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/icodeface/grdp"
-	"github.com/icodeface/grdp/protocol/pdu"
+	"github.com/nakagami/grdp"
+	"github.com/nakagami/grdp/protocol/pdu"
 )
 
 var (

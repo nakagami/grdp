@@ -2,7 +2,7 @@ package per
 
 import (
 	"bytes"
-	"github.com/icodeface/grdp/core"
+	"github.com/nakagami/grdp/core"
 	"io"
 )
 

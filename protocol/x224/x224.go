@@ -6,11 +6,11 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/icodeface/grdp/glog"
+	"github.com/nakagami/grdp/glog"
 
-	"github.com/icodeface/grdp/core"
-	"github.com/icodeface/grdp/emission"
-	"github.com/icodeface/grdp/protocol/tpkt"
+	"github.com/nakagami/grdp/core"
+	"github.com/nakagami/grdp/emission"
+	"github.com/nakagami/grdp/protocol/tpkt"
 	"github.com/lunixbochs/struc"
 )
 

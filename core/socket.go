@@ -5,7 +5,7 @@ import (
 	"math/big"
 
 	"github.com/huin/asn1ber"
-	"github.com/icodeface/grdp/glog"
+	"github.com/nakagami/grdp/glog"
 
 	"crypto/tls"
 	"errors"

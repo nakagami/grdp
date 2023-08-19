@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/icodeface/grdp/glog"
+	"github.com/nakagami/grdp/glog"
 
-	"github.com/icodeface/grdp/core"
+	"github.com/nakagami/grdp/core"
 )
 
 type ControlFlag uint8

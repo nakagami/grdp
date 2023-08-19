@@ -4,7 +4,7 @@ import (
 	"encoding/hex"
 	"testing"
 
-	"github.com/icodeface/grdp/protocol/nla"
+	"github.com/nakagami/grdp/protocol/nla"
 )
 
 func TestEncodeDERTRequest(t *testing.T) {

@@ -3,7 +3,7 @@ package ber
 import (
 	"errors"
 	"fmt"
-	"github.com/icodeface/grdp/core"
+	"github.com/nakagami/grdp/core"
 	"io"
 )
 

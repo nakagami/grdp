@@ -5,10 +5,10 @@ import (
 	//	"encoding/hex"
 	"fmt"
 
-	"github.com/icodeface/grdp/core"
-	"github.com/icodeface/grdp/emission"
-	"github.com/icodeface/grdp/glog"
-	"github.com/icodeface/grdp/protocol/nla"
+	"github.com/nakagami/grdp/core"
+	"github.com/nakagami/grdp/emission"
+	"github.com/nakagami/grdp/glog"
+	"github.com/nakagami/grdp/protocol/nla"
 )
 
 // take idea from https://github.com/Madnikulin50/gordp
