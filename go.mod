@@ -1,6 +1,6 @@
 module github.com/nakagami/grdp
 
-go 1.20
+go 1.21
 
 require (
 	github.com/huin/asn1ber v0.0.0-20120622192748-af09f62e6358 // indirect
