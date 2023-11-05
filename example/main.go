@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	"sync"
@@ -43,6 +44,8 @@ func init() {
 func main() {
 	fmt.Printf("Show: Host=%s, User=%s, Password=********\n", Host, User)
 	fmt.Printf("---\n")
+	logLevel := new(slog.LevelVar)
+	logLevel.Set(slog.LevelDebug)
 
 	client := grdp.NewClient(Host)
 	err := client.Login(User, Password)
