@@ -12,6 +12,7 @@ import (
 	"github.com/nakagami/grdp/protocol/tpkt"
 	"github.com/nakagami/grdp/protocol/x224"
 	"log"
+	"log/slog"
 	"net"
 	"os"
 	"strings"
@@ -71,21 +72,20 @@ func (g *Client) Login(user, pwd string) error {
 	wg.Add(1)
 
 	g.pdu.On("error", func(e error) {
-		err = e
-		glog.Error(e)
+		slog.Error(fmt.Sprintf("%v", e))
 		wg.Done()
 	}).On("close", func() {
 		err = errors.New("close")
-		glog.Info("on close")
+		slog.Info("on close")
 		wg.Done()
 	}).On("success", func() {
 		err = nil
-		glog.Info("on success")
+		slog.Info("on success")
 		wg.Done()
 	}).On("ready", func() {
-		glog.Info("on ready")
+		slog.Info("on ready")
 	}).On("update", func(rectangles []pdu.BitmapData) {
-		glog.Info("on update")
+		slog.Info("on update")
 	})
 
 	wg.Wait()

@@ -2,8 +2,8 @@ package nla
 
 import (
 	"encoding/asn1"
-
-	"github.com/nakagami/grdp/glog"
+	"log/slog"
+	"fmt"
 )
 
 type NegoToken struct {
@@ -68,7 +68,7 @@ func EncodeDERTRequest(msgs []Message, authInfo []byte, pubKeyAuth []byte) []byt
 
 	result, err := asn1.Marshal(req)
 	if err != nil {
-		glog.Error(err)
+		slog.Error(fmt.Sprintf("%v", err))
 	}
 	return result
 }
@@ -82,12 +82,12 @@ func EncodeDERTCredentials(domain, username, password []byte) []byte {
 	tpas := TSPasswordCreds{domain, username, password}
 	result, err := asn1.Marshal(tpas)
 	if err != nil {
-		glog.Error(err)
+		slog.Error(fmt.Sprintf("%v", err))
 	}
 	tcre := TSCredentials{1, result}
 	result, err = asn1.Marshal(tcre)
 	if err != nil {
-		glog.Error(err)
+		slog.Error(fmt.Sprintf("%v", err))
 	}
 	return result
 }
