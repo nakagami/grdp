@@ -3,17 +3,15 @@ package grdp
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"github.com/nakagami/grdp/core"
-	"github.com/nakagami/grdp/glog"
 	"github.com/nakagami/grdp/protocol/nla"
 	"github.com/nakagami/grdp/protocol/pdu"
 	"github.com/nakagami/grdp/protocol/sec"
 	"github.com/nakagami/grdp/protocol/t125"
 	"github.com/nakagami/grdp/protocol/tpkt"
 	"github.com/nakagami/grdp/protocol/x224"
-	"log"
 	"net"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -29,10 +27,6 @@ type Client struct {
 }
 
 func NewClient(host string) *Client {
-	logLevel := glog.TRACE
-	glog.SetLevel(logLevel)
-	logger := log.New(os.Stdout, "", 0)
-	glog.SetLogger(logger)
 	return &Client{
 		Host: host,
 	}
@@ -71,21 +65,20 @@ func (g *Client) Login(user, pwd string) error {
 	wg.Add(1)
 
 	g.pdu.On("error", func(e error) {
-		err = e
-		glog.Error(e)
+		slog.Error("%v", e)
 		wg.Done()
 	}).On("close", func() {
 		err = errors.New("close")
-		glog.Info("on close")
+		slog.Info("on close")
 		wg.Done()
 	}).On("success", func() {
 		err = nil
-		glog.Info("on success")
+		slog.Info("on success")
 		wg.Done()
 	}).On("ready", func() {
-		glog.Info("on ready")
+		slog.Info("on ready")
 	}).On("update", func(rectangles []pdu.BitmapData) {
-		glog.Info("on update")
+		slog.Info("on update")
 	})
 
 	wg.Wait()

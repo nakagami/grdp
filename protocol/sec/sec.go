@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"encoding/hex"
 	"errors"
+	"log/slog"
 	"github.com/nakagami/grdp/core"
 	"github.com/nakagami/grdp/emission"
-	"github.com/nakagami/grdp/glog"
 	"github.com/nakagami/grdp/protocol/lic"
 	"github.com/nakagami/grdp/protocol/t125"
 	"github.com/nakagami/grdp/protocol/t125/gcc"
@@ -197,7 +197,6 @@ func (s *SEC) Close() error {
 }
 
 func (s *SEC) sendFlagged(flag uint16, data []byte) {
-	//	glog.Debug("sendFlagged", hex.EncodeToString(data))
 	buff := &bytes.Buffer{}
 	core.WriteUInt16LE(flag, buff)
 	core.WriteUInt16LE(0, buff)
@@ -247,7 +246,7 @@ func (c *Client) SetDomain(domain string) {
 }
 
 func (c *Client) connect(clientData []interface{}, serverData []interface{}, userId uint16, channels []t125.MCSChannelInfo) {
-	glog.Debug("sec on connect")
+	slog.Debug("sec on connect")
 	c.clientData = clientData
 	c.serverData = serverData
 	c.userId = userId
@@ -266,7 +265,7 @@ func (c *Client) sendInfoPkt() {
 }
 
 func (c *Client) recvLicenceInfo(s []byte) {
-	glog.Debug("sec recvLicenceInfo", hex.EncodeToString(s))
+	slog.Debug("sec recvLicenceInfo", hex.EncodeToString(s))
 	r := bytes.NewReader(s)
 	if (readSecurityHeader(r).securityFlag & LICENSE_PKT) <= 0 {
 		c.Emit("error", errors.New("NODE_RDP_PROTOCOL_PDU_SEC_BAD_LICENSE_HEADER"))
@@ -277,11 +276,11 @@ func (c *Client) recvLicenceInfo(s []byte) {
 
 	switch p.BMsgtype {
 	case lic.NEW_LICENSE:
-		glog.Info("sec NEW_LICENSE")
+		slog.Info("sec NEW_LICENSE")
 		c.Emit("success")
 		goto connect
 	case lic.ERROR_ALERT:
-		glog.Info("sec ERROR_ALERT")
+		slog.Info("sec ERROR_ALERT")
 		message := p.LicensingMessage.(*lic.ErrorMessage)
 		if message.DwErrorCode == lic.STATUS_VALID_CLIENT && message.DwStateTransaction == lic.ST_NO_TRANSITION {
 			goto connect
@@ -294,7 +293,7 @@ func (c *Client) recvLicenceInfo(s []byte) {
 		c.sendClientChallengeResponse()
 		goto retry
 	default:
-		glog.Error("Not a valid license packet")
+		slog.Error("Not a valid license packet")
 		c.Emit("error", errors.New("Not a valid license packet"))
 		return
 	}
@@ -310,15 +309,12 @@ retry:
 }
 
 func (c *Client) sendClientNewLicenseRequest() {
-	//	glog.Debug("sec sendClientNewLicenseRequest todo")
 
 }
 
 func (c *Client) sendClientChallengeResponse() {
-	// glog.Debug("sec sendClientChallengeResponse todo")
 }
 
 func (c *Client) recvData(s []byte) {
-	//	glog.Debug("sec recvData", hex.EncodeToString(s))
 	c.Emit("data", s)
 }

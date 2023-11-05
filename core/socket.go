@@ -3,9 +3,9 @@ package core
 import (
 	"crypto/rsa"
 	"math/big"
+	"log/slog"
 
 	"github.com/huin/asn1ber"
-	"github.com/nakagami/grdp/glog"
 
 	"crypto/tls"
 	"errors"
@@ -50,7 +50,7 @@ func (s *SocketLayer) Close() error {
 }
 
 func (s *SocketLayer) StartTLS() error {
-	glog.Info("StartTLS")
+	slog.Info("StartTLS")
 	config := &tls.Config{
 		InsecureSkipVerify:       true,
 		MinVersion:               tls.VersionTLS10,
