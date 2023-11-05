@@ -12,7 +12,6 @@ import (
 	"github.com/nakagami/grdp/protocol/tpkt"
 	"github.com/nakagami/grdp/protocol/x224"
 	"net"
-	"os"
 	"strings"
 	"sync"
 	"time"
