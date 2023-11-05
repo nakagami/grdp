@@ -44,8 +44,8 @@ func init() {
 func main() {
 	fmt.Printf("Show: Host=%s, User=%s, Password=********\n", Host, User)
 	fmt.Printf("---\n")
-	logLevel := new(slog.LevelVar)
-	logLevel.Set(slog.LevelDebug)
+	handler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})
+	slog.SetDefault(slog.New(handler))
 
 	client := grdp.NewClient(Host)
 	err := client.Login(User, Password)
