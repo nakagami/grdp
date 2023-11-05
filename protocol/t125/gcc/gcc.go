@@ -2,8 +2,8 @@ package gcc
 
 import (
 	"bytes"
+	"log/slog"
 	"github.com/nakagami/grdp/core"
-	"github.com/nakagami/grdp/glog"
 	"github.com/nakagami/grdp/protocol/t125/per"
 	"github.com/lunixbochs/struc"
 )
@@ -351,7 +351,7 @@ func MakeConferenceCreateRequest(userData []byte) []byte {
 
 func ReadConferenceCreateResponse(data []byte) []interface{} {
 	// todo
-	glog.Debug("ReadConferenceCreateResponse todo")
+	slog.Debug("ReadConferenceCreateResponse todo")
 	ret := make([]interface{}, 0)
 	return ret
 }

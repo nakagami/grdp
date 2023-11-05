@@ -5,9 +5,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"github.com/nakagami/grdp/core"
 	"github.com/nakagami/grdp/emission"
-	"github.com/nakagami/grdp/glog"
 	"github.com/nakagami/grdp/protocol/t125/ber"
 	"github.com/nakagami/grdp/protocol/t125/gcc"
 	"github.com/nakagami/grdp/protocol/t125/per"
@@ -265,7 +265,7 @@ func NewMCSClient(t core.Transport) *MCSClient {
 }
 
 func (c *MCSClient) connect(selectedProtocol uint32) {
-	glog.Debug("MCS Connect Initial PDU with GCC Conference Create Request: serverSelectedProtocol", selectedProtocol)
+	slog.Debug("MCS Connect Initial PDU with GCC Conference Create Request: serverSelectedProtocol", selectedProtocol)
 	c.clientCoreData.ServerSelectedProtocol = selectedProtocol
 
 	// sendConnectInitial
@@ -287,12 +287,12 @@ func (c *MCSClient) connect(selectedProtocol uint32) {
 		c.Emit("error", errors.New(fmt.Sprintf("mcs sendConnectInitial write error %v", err)))
 		return
 	}
-	glog.Debug("mcs wait for data event")
+	slog.Debug("mcs wait for data event")
 	c.transport.Once("data", c.recvConnectResponse)
 }
 
 func (c *MCSClient) recvConnectResponse(s []byte) {
-	glog.Debug("mcs recvConnectResponse", hex.EncodeToString(s))
+	slog.Debug("mcs recvConnectResponse", hex.EncodeToString(s))
 	cResp, err := ReadConnectResponse(bytes.NewReader(s))
 	if err != nil {
 		c.Emit("error", errors.New(fmt.Sprintf("ReadConnectResponse %v", err)))
@@ -317,16 +317,16 @@ func (c *MCSClient) recvConnectResponse(s []byte) {
 			}
 		default:
 			err := errors.New(fmt.Sprintf("unhandle server gcc block %v %v", v, cResp.userData))
-			glog.Error(err)
+			slog.Error("%v", err)
 			c.Emit("error", err)
 			return
 		}
 	}
 
-	glog.Debug("mcs sendErectDomainRequest")
+	slog.Debug("mcs sendErectDomainRequest")
 	c.sendErectDomainRequest()
 
-	glog.Debug("mcs sendAttachUserRequest")
+	slog.Debug("mcs sendAttachUserRequest")
 	c.sendAttachUserRequest()
 
 	c.transport.Once("data", c.recvAttachUserConfirm)
@@ -347,7 +347,7 @@ func (c *MCSClient) sendAttachUserRequest() {
 }
 
 func (c *MCSClient) recvAttachUserConfirm(s []byte) {
-	glog.Debug("mcs recvAttachUserConfirm", hex.EncodeToString(s))
+	slog.Debug("mcs recvAttachUserConfirm", hex.EncodeToString(s))
 	r := bytes.NewReader(s)
 
 	option, err := core.ReadUInt8(r)
@@ -380,7 +380,7 @@ func (c *MCSClient) recvAttachUserConfirm(s []byte) {
 }
 
 func (c *MCSClient) connectChannels() {
-	glog.Debug("mcs connectChannels")
+	slog.Debug("mcs connectChannels")
 	if c.channelsConnected == len(c.channels) {
 		c.transport.On("data", c.recvData)
 		// send client and sever gcc informations callback to sec
@@ -392,7 +392,7 @@ func (c *MCSClient) connectChannels() {
 		serverData := make([]interface{}, 0)
 		serverData = append(serverData, c.serverCoreData)
 		serverData = append(serverData, c.serverSecurityData)
-		glog.Debug("msc connectChannels callback to sec")
+		slog.Debug("msc connectChannels callback to sec")
 		c.Emit("connect", clientData, serverData, c.userId, c.channels)
 		return
 	}
@@ -404,7 +404,7 @@ func (c *MCSClient) connectChannels() {
 }
 
 func (c *MCSClient) sendChannelJoinRequest(channelId uint16) {
-	glog.Debug("mcs sendChannelJoinRequest")
+	slog.Debug("mcs sendChannelJoinRequest")
 	buff := &bytes.Buffer{}
 	writeMCSPDUHeader(CHANNEL_JOIN_REQUEST, 0, buff)
 	per.WriteInteger16(c.userId-MCS_USERCHANNEL_BASE, buff)
@@ -413,7 +413,7 @@ func (c *MCSClient) sendChannelJoinRequest(channelId uint16) {
 }
 
 func (c *MCSClient) recvData(s []byte) {
-	glog.Debug("msc on data recvData")
+	slog.Debug("msc on data recvData")
 
 	r := bytes.NewReader(s)
 	option, err := core.ReadUInt8(r)
@@ -450,7 +450,7 @@ func (c *MCSClient) recvData(s []byte) {
 		}
 	}
 	if !found {
-		glog.Error("mcs receive data for an unconnected layer")
+		slog.Error("mcs receive data for an unconnected layer")
 		return
 	}
 	left, err := core.ReadBytes(int(size), r)
@@ -458,12 +458,12 @@ func (c *MCSClient) recvData(s []byte) {
 		c.Emit("error", errors.New(fmt.Sprintf("mcs recvData get data error %v", err)))
 		return
 	}
-	glog.Debug("mcs emit channel", channelName)
+	slog.Debug("mcs emit channel", channelName)
 	c.Emit(channelName, left)
 }
 
 func (c *MCSClient) recvChannelJoinConfirm(s []byte) {
-	glog.Debug("mcs recvChannelJoinConfirm", hex.EncodeToString(s))
+	slog.Debug("mcs recvChannelJoinConfirm", hex.EncodeToString(s))
 	r := bytes.NewReader(s)
 	option, err := core.ReadUInt8(r)
 	if err != nil {
