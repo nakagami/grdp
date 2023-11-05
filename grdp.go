@@ -3,16 +3,14 @@ package grdp
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"github.com/nakagami/grdp/core"
-	"github.com/nakagami/grdp/glog"
 	"github.com/nakagami/grdp/protocol/nla"
 	"github.com/nakagami/grdp/protocol/pdu"
 	"github.com/nakagami/grdp/protocol/sec"
 	"github.com/nakagami/grdp/protocol/t125"
 	"github.com/nakagami/grdp/protocol/tpkt"
 	"github.com/nakagami/grdp/protocol/x224"
-	"log"
-	"log/slog"
 	"net"
 	"os"
 	"strings"
@@ -30,10 +28,6 @@ type Client struct {
 }
 
 func NewClient(host string) *Client {
-	logLevel := glog.TRACE
-	glog.SetLevel(logLevel)
-	logger := log.New(os.Stdout, "", 0)
-	glog.SetLogger(logger)
 	return &Client{
 		Host: host,
 	}
