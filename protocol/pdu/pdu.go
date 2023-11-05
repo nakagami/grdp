@@ -3,10 +3,10 @@ package pdu
 import (
 	"bytes"
 	"encoding/hex"
+	"log/slog"
 
 	"github.com/nakagami/grdp/core"
 	"github.com/nakagami/grdp/emission"
-	"github.com/nakagami/grdp/glog"
 	"github.com/nakagami/grdp/protocol/t125/gcc"
 )
 
@@ -149,7 +149,7 @@ func NewClient(t core.Transport) *Client {
 }
 
 func (c *Client) connect(data *gcc.ClientCoreData, userId uint16, channelId uint16) {
-	glog.Debug("pdu connect:", userId, ",", channelId)
+	slog.Debug("pdu connect:", userId, ",", channelId)
 	c.clientCoreData = data
 	c.userId = userId
 	c.channelId = channelId
@@ -157,34 +157,33 @@ func (c *Client) connect(data *gcc.ClientCoreData, userId uint16, channelId uint
 }
 
 func (c *Client) recvDemandActivePDU(s []byte) {
-	glog.Trace("PDU recvDemandActivePDU", hex.EncodeToString(s))
+	slog.Debug("PDU recvDemandActivePDU", hex.EncodeToString(s))
 	r := bytes.NewReader(s)
 	pdu, err := readPDU(r)
 	if err != nil {
-		glog.Error(err)
+		slog.Error("%v", err)
 		return
 	}
 	if pdu.ShareCtrlHeader.PDUType != PDUTYPE_DEMANDACTIVEPDU {
-		glog.Debug("PDU ignore message during connection sequence, type is", pdu.ShareCtrlHeader.PDUType)
+		slog.Debug("PDU ignore message during connection sequence, type is", pdu.ShareCtrlHeader.PDUType)
 		c.transport.Once("data", c.recvDemandActivePDU)
 		return
 	}
 	c.sharedId = pdu.Message.(*DemandActivePDU).SharedId
 	c.demandActivePDU = pdu.Message.(*DemandActivePDU)
 	for _, caps := range c.demandActivePDU.CapabilitySets {
-		// glog.Debugf("serverCapabilities<%s>: %+v", caps.Type(), caps)
 		c.serverCapabilities[caps.Type()] = caps
 	}
 
-	glog.Debugf("recvDemandActivePDU() -> sendConfirmActivePDU()")
+	slog.Debug("recvDemandActivePDU() -> sendConfirmActivePDU()")
 	c.sendConfirmActivePDU()
-	glog.Debugf("recvDemandActivePDU() -> sendClientFinalizeSynchronizePDU()")
+	slog.Debug("recvDemandActivePDU() -> sendClientFinalizeSynchronizePDU()")
 	c.sendClientFinalizeSynchronizePDU()
 	c.transport.Once("data", c.recvServerSynchronizePDU)
 }
 
 func (c *Client) sendConfirmActivePDU() {
-	glog.Debug("PDU start sendConfirmActivePDU")
+	slog.Debug("PDU start sendConfirmActivePDU")
 
 	pdu := NewConfirmActivePDU()
 	generalCapa := c.clientCapabilities[CAPSTYPE_GENERAL].(*GeneralCapability)
@@ -245,7 +244,6 @@ func (c *Client) sendConfirmActivePDU() {
 
 	pdu.SharedId = c.sharedId
 	for _, v := range c.clientCapabilities {
-		// glog.Debugf("clientCapabilities<%s>: %+v", v.Type(), v)
 		pdu.CapabilitySets = append(pdu.CapabilitySets, v)
 	}
 	pdu.NumberCapabilities = uint16(len(pdu.CapabilitySets))
@@ -257,7 +255,7 @@ func (c *Client) sendConfirmActivePDU() {
 }
 
 func (c *Client) sendClientFinalizeSynchronizePDU() {
-	glog.Debug("PDU start sendClientFinalizeSynchronizePDU")
+	slog.Debug("PDU start sendClientFinalizeSynchronizePDU")
 	c.sendDataPDU(NewSynchronizeDataPDU(c.channelId))
 	c.sendDataPDU(&ControlDataPDU{Action: CTRLACTION_COOPERATE})
 	c.sendDataPDU(&ControlDataPDU{Action: CTRLACTION_REQUEST_CONTROL})
@@ -266,21 +264,21 @@ func (c *Client) sendClientFinalizeSynchronizePDU() {
 }
 
 func (c *Client) recvServerSynchronizePDU(s []byte) {
-	glog.Debug("PDU recvServerSynchronizePDU")
+	slog.Debug("PDU recvServerSynchronizePDU")
 	r := bytes.NewReader(s)
 	pdu, err := readPDU(r)
 	if err != nil {
-		glog.Error(err)
+		slog.Error("%v", err)
 		return
 	}
 	dataPdu, ok := pdu.Message.(*DataPDU)
 	if !ok || dataPdu.Header.PDUType2 != PDUTYPE2_SYNCHRONIZE {
 		if ok {
-			glog.Error("recvServerSynchronizePDU ignore datapdu type2", dataPdu.Header.PDUType2)
+			slog.Error("recvServerSynchronizePDU ignore datapdu type2", dataPdu.Header.PDUType2)
 		} else {
-			glog.Error("recvServerSynchronizePDU ignore message type", pdu.ShareCtrlHeader.PDUType)
+			slog.Error("recvServerSynchronizePDU ignore message type", pdu.ShareCtrlHeader.PDUType)
 		}
-		glog.Infof("%+v", dataPdu)
+		slog.Info("%+v", dataPdu)
 		c.transport.Once("data", c.recvServerSynchronizePDU)
 		return
 	}
@@ -288,25 +286,25 @@ func (c *Client) recvServerSynchronizePDU(s []byte) {
 }
 
 func (c *Client) recvServerControlCooperatePDU(s []byte) {
-	glog.Debug("PDU recvServerControlCooperatePDU")
+	slog.Debug("PDU recvServerControlCooperatePDU")
 	r := bytes.NewReader(s)
 	pdu, err := readPDU(r)
 	if err != nil {
-		glog.Error(err)
+		slog.Error("%v", err)
 		return
 	}
 	dataPdu, ok := pdu.Message.(*DataPDU)
 	if !ok || dataPdu.Header.PDUType2 != PDUTYPE2_CONTROL {
 		if ok {
-			glog.Error("recvServerControlCooperatePDU ignore datapdu type2", dataPdu.Header.PDUType2)
+			slog.Error("recvServerControlCooperatePDU ignore datapdu type2", dataPdu.Header.PDUType2)
 		} else {
-			glog.Error("recvServerControlCooperatePDU ignore message type", pdu.ShareCtrlHeader.PDUType)
+			slog.Error("recvServerControlCooperatePDU ignore message type", pdu.ShareCtrlHeader.PDUType)
 		}
 		c.transport.Once("data", c.recvServerControlCooperatePDU)
 		return
 	}
 	if dataPdu.Data.(*ControlDataPDU).Action != CTRLACTION_COOPERATE {
-		glog.Error("recvServerControlCooperatePDU ignore action", dataPdu.Data.(*ControlDataPDU).Action)
+		slog.Error("recvServerControlCooperatePDU ignore action", dataPdu.Data.(*ControlDataPDU).Action)
 		c.transport.Once("data", c.recvServerControlCooperatePDU)
 		return
 	}
@@ -314,25 +312,25 @@ func (c *Client) recvServerControlCooperatePDU(s []byte) {
 }
 
 func (c *Client) recvServerControlGrantedPDU(s []byte) {
-	glog.Debug("PDU recvServerControlGrantedPDU")
+	slog.Debug("PDU recvServerControlGrantedPDU")
 	r := bytes.NewReader(s)
 	pdu, err := readPDU(r)
 	if err != nil {
-		glog.Error(err)
+		slog.Error("%v", err)
 		return
 	}
 	dataPdu, ok := pdu.Message.(*DataPDU)
 	if !ok || dataPdu.Header.PDUType2 != PDUTYPE2_CONTROL {
 		if ok {
-			glog.Error("recvServerControlGrantedPDU ignore datapdu type2", dataPdu.Header.PDUType2)
+			slog.Error("recvServerControlGrantedPDU ignore datapdu type2", dataPdu.Header.PDUType2)
 		} else {
-			glog.Error("recvServerControlGrantedPDU ignore message type", pdu.ShareCtrlHeader.PDUType)
+			slog.Error("recvServerControlGrantedPDU ignore message type", pdu.ShareCtrlHeader.PDUType)
 		}
 		c.transport.Once("data", c.recvServerControlGrantedPDU)
 		return
 	}
 	if dataPdu.Data.(*ControlDataPDU).Action != CTRLACTION_GRANTED_CONTROL {
-		glog.Error("recvServerControlGrantedPDU ignore action", dataPdu.Data.(*ControlDataPDU).Action)
+		slog.Error("recvServerControlGrantedPDU ignore action", dataPdu.Data.(*ControlDataPDU).Action)
 		c.transport.Once("data", c.recvServerControlGrantedPDU)
 		return
 	}
@@ -340,19 +338,19 @@ func (c *Client) recvServerControlGrantedPDU(s []byte) {
 }
 
 func (c *Client) recvServerFontMapPDU(s []byte) {
-	glog.Debug("PDU recvServerFontMapPDU")
+	slog.Debug("PDU recvServerFontMapPDU")
 	r := bytes.NewReader(s)
 	pdu, err := readPDU(r)
 	if err != nil {
-		glog.Error(err)
+		slog.Error("%v", err)
 		return
 	}
 	dataPdu, ok := pdu.Message.(*DataPDU)
 	if !ok || dataPdu.Header.PDUType2 != PDUTYPE2_FONTMAP {
 		if ok {
-			glog.Error("recvServerFontMapPDU ignore datapdu type2", dataPdu.Header.PDUType2)
+			slog.Error("recvServerFontMapPDU ignore datapdu type2", dataPdu.Header.PDUType2)
 		} else {
-			glog.Error("recvServerFontMapPDU ignore message type", pdu.ShareCtrlHeader.PDUType)
+			slog.Error("recvServerFontMapPDU ignore message type", pdu.ShareCtrlHeader.PDUType)
 		}
 		return
 	}
@@ -361,12 +359,12 @@ func (c *Client) recvServerFontMapPDU(s []byte) {
 }
 
 func (c *Client) recvPDU(s []byte) {
-	glog.Trace("PDU recvPDU", hex.EncodeToString(s))
+	slog.Debug("PDU recvPDU", hex.EncodeToString(s))
 	r := bytes.NewReader(s)
 	if r.Len() > 0 {
 		p, err := readPDU(r)
 		if err != nil {
-			glog.Error(err)
+			slog.Error("%v", err)
 			return
 		}
 		if p.ShareCtrlHeader.PDUType == PDUTYPE_DEACTIVATEALLPDU {
@@ -376,7 +374,6 @@ func (c *Client) recvPDU(s []byte) {
 }
 
 func (c *Client) RecvFastPath(secFlag byte, s []byte) {
-	// glog.Trace("PDU RecvFastPath", hex.EncodeToString(s))
 	r := bytes.NewReader(s)
 	for r.Len() > 0 {
 		updateHeader, err := core.ReadUInt8(r)
@@ -397,12 +394,12 @@ func (c *Client) RecvFastPath(secFlag byte, s []byte) {
 		if err != nil {
 			return
 		}
-		glog.Trace("Code:", FastPathUpdateType(updateCode),
+		slog.Debug("Code:", FastPathUpdateType(updateCode),
 			"compressionFlags:", compressionFlags,
 			"fragmentation:", fragmentation,
 			"size:", size, "len:", r.Len())
 		if compressionFlags&RDP_MPPC_COMPRESSED != 0 {
-			glog.Info("RDP_MPPC_COMPRESSED")
+			slog.Info("RDP_MPPC_COMPRESSED")
 		}
 		if fragmentation != FASTPATH_FRAGMENT_SINGLE {
 			if fragmentation == FASTPATH_FRAGMENT_FIRST {
@@ -418,7 +415,7 @@ func (c *Client) RecvFastPath(secFlag byte, s []byte) {
 
 		p, err := readFastPathUpdatePDU(r, updateCode)
 		if err != nil || p == nil || p.Data == nil {
-			glog.Debug("readFastPathUpdatePDU:", err)
+			slog.Debug("readFastPathUpdatePDU:", err)
 			return
 		}
 

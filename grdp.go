@@ -72,7 +72,7 @@ func (g *Client) Login(user, pwd string) error {
 	wg.Add(1)
 
 	g.pdu.On("error", func(e error) {
-		slog.Error(fmt.Sprintf("%v", e))
+		slog.Error("%v", e)
 		wg.Done()
 	}).On("close", func() {
 		err = errors.New("close")
