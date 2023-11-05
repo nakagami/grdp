@@ -5,9 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 
 	"github.com/nakagami/grdp/core"
-	"github.com/nakagami/grdp/glog"
 	"github.com/lunixbochs/struc"
 )
 
@@ -255,7 +255,7 @@ func readDemandActivePDU(r io.Reader) (*DemandActivePDU, error) {
 	d.NumberCapabilities, err = core.ReadUint16LE(r)
 	d.Pad2Octets, err = core.ReadUint16LE(r)
 	d.CapabilitySets = make([]Capability, 0, d.NumberCapabilities)
-	glog.Debug("NumberCapabilities is", d.NumberCapabilities)
+	slog.Debug(fmt.Sprintf("NumberCapabilities is %v", d.NumberCapabilities))
 	for i := 0; i < int(d.NumberCapabilities); i++ {
 		c, err := readCapability(r)
 		if err != nil {
@@ -372,7 +372,7 @@ func readConfirmActivePDU(r io.Reader) (*ConfirmActivePDU, error) {
 		p.CapabilitySets = append(p.CapabilitySets, c)
 	}
 	s, _ := core.ReadUInt32LE(r)
-	glog.Info("sessionid:", s)
+	slog.Info("sessionid:%v", s)
 	return p, nil
 }
 
@@ -427,11 +427,11 @@ func readDataPDU(r io.Reader) (*DataPDU, error) {
 	header := &ShareDataHeader{}
 	err := struc.Unpack(r, header)
 	if err != nil {
-		glog.Error("read data pdu header error", err)
+		slog.Error("read data pdu header error: %v", err)
 		return nil, err
 	}
 	var d DataPDUData
-	glog.Debugf("PDUType2 0x%02x", header.PDUType2)
+	slog.Debug("PDUType2 0x%02x", header.PDUType2)
 	switch header.PDUType2 {
 	case PDUTYPE2_SYNCHRONIZE:
 		d = &SynchronizeDataPDU{}
@@ -449,19 +449,19 @@ func readDataPDU(r io.Reader) (*DataPDU, error) {
 		d = s
 	default:
 		err = errors.New(fmt.Sprintf("Unknown data pdu type2 0x%02x", header.PDUType2))
-		glog.Error(err)
+		slog.Error("%v", err)
 		return nil, err
 	}
 
 	if header.PDUType2 != PDUTYPE2_SAVE_SESSION_INFO {
 		err = struc.Unpack(r, d)
 		if err != nil {
-			glog.Error("read data pdu error", err)
+			slog.Error("read data pdu error %v", err)
 			return nil, err
 		}
 	}
 
-	glog.Debugf("PDUType2<%s>: %+v", PduType2(d.Type2()), d)
+	slog.Debug("PDUType2<%s>: %+v", PduType2(d.Type2()), d)
 	p := &DataPDU{
 		Header: header,
 		Data:   d,
@@ -568,7 +568,7 @@ func (s *SaveSessionInfo) logonInfoV1(r io.Reader) (err error) {
 
 	sessionId, _ := core.ReadUInt32LE(r)
 	s.LogonId = sessionId
-	glog.Infof("SessionId:[%d] UserName:[%s] Domain:[%s]", s.LogonId, userName, domain)
+	slog.Info("SessionId:[%d] UserName:[%s] Domain:[%s]", s.LogonId, userName, domain)
 	return err
 }
 func (s *SaveSessionInfo) logonInfoV2(r io.Reader) (err error) {
@@ -584,7 +584,7 @@ func (s *SaveSessionInfo) logonInfoV2(r io.Reader) (err error) {
 	domain := core.UnicodeDecode(b)
 	b, _ = core.ReadBytes(int(cbUserName), r)
 	userName := core.UnicodeDecode(b)
-	glog.Infof("SessionId:[%d] UserName:[ %s] Domain:[ %s]", s.LogonId, userName, domain)
+	slog.Info("SessionId:[%d] UserName:[ %s] Domain:[ %s]", s.LogonId, userName, domain)
 
 	return err
 }
@@ -595,7 +595,7 @@ func (s *SaveSessionInfo) logonPlainNotify(r io.Reader) (err error) {
 func (s *SaveSessionInfo) logonInfoExtended(r io.Reader) (err error) {
 	s.Length, err = core.ReadUint16LE(r)
 	s.FieldsPresent, err = core.ReadUInt32LE(r)
-	//glog.Info("FieldsPresent:", s.FieldsPresent)
+	slog.Info("FieldsPresent:%v", s.FieldsPresent)
 	// auto reconnect cookie
 	if s.FieldsPresent&LOGON_EX_AUTORECONNECTCOOKIE != 0 {
 		core.ReadUInt32LE(r)
@@ -631,7 +631,7 @@ func (s *SaveSessionInfo) Unpack(r io.Reader) (err error) {
 	case INFOTYPE_LOGON_EXTENDED_INFO:
 		err = s.logonInfoExtended(r)
 	default:
-		glog.Errorf("Unhandled saveSessionInfo type 0x%x", s.InfoType)
+		slog.Error("Unhandled saveSessionInfo type 0x%x", s.InfoType)
 		return fmt.Errorf("Unhandled saveSessionInfo type 0x%x", s.InfoType)
 	}
 
@@ -791,7 +791,6 @@ func readFastPathUpdatePDU(r io.Reader, code uint8) (*FastPathUpdatePDU, error) 
 	f := &FastPathUpdatePDU{}
 	var err error
 	var d UpdateData
-	//glog.Debugf("FastPathPDU type %s(0x%x)", FastPathUpdateType(code), code)
 	switch code {
 	case FASTPATH_UPDATETYPE_ORDERS:
 		d = &FastPathOrdersPDU{}
@@ -810,13 +809,12 @@ func readFastPathUpdatePDU(r io.Reader, code uint8) (*FastPathUpdatePDU, error) 
 	case FASTPATH_UPDATETYPE_POINTER:
 	case FASTPATH_UPDATETYPE_LARGE_POINTER:
 	default:
-		glog.Debugf("Unknown FastPathPDU type 0x%x", code)
+		slog.Debug("Unknown FastPathPDU type 0x%x", code)
 		return f, errors.New(fmt.Sprintf("Unknown FastPathPDU type 0x%x", code))
 	}
 	if d != nil {
 		err = d.Unpack(r)
 		if err != nil {
-			//glog.Error("Unpack:", err)
 			return nil, err
 		}
 	} else {
@@ -863,19 +861,19 @@ func readPDU(r io.Reader) (*PDU, error) {
 	var d PDUMessage
 	switch pdu.ShareCtrlHeader.PDUType {
 	case PDUTYPE_DEMANDACTIVEPDU:
-		glog.Debug("PDUTYPE_DEMANDACTIVEPDU")
+		slog.Debug("PDUTYPE_DEMANDACTIVEPDU")
 		d, err = readDemandActivePDU(r)
 	case PDUTYPE_DATAPDU:
-		glog.Debug("PDUTYPE_DATAPDU")
+		slog.Debug("PDUTYPE_DATAPDU")
 		d, err = readDataPDU(r)
 	case PDUTYPE_CONFIRMACTIVEPDU:
-		glog.Debug("PDUTYPE_CONFIRMACTIVEPDU")
+		slog.Debug("PDUTYPE_CONFIRMACTIVEPDU")
 		d, err = readConfirmActivePDU(r)
 	case PDUTYPE_DEACTIVATEALLPDU:
-		glog.Debug("PDUTYPE_DEACTIVATEALLPDU")
+		slog.Debug("PDUTYPE_DEACTIVATEALLPDU")
 		d, err = readDeactiveAllPDU(r)
 	default:
-		glog.Errorf("PDU invalid pdu type: 0x%02x", pdu.ShareCtrlHeader.PDUType)
+		slog.Error("PDU invalid pdu type: 0x%02x", pdu.ShareCtrlHeader.PDUType)
 	}
 	if err != nil {
 		return nil, err
