@@ -2,9 +2,9 @@ package gcc
 
 import (
 	"bytes"
-	"github.com/icodeface/grdp/core"
-	"github.com/icodeface/grdp/glog"
-	"github.com/icodeface/grdp/protocol/t125/per"
+	"log/slog"
+	"github.com/nakagami/grdp/core"
+	"github.com/nakagami/grdp/protocol/t125/per"
 	"github.com/lunixbochs/struc"
 )
 
@@ -218,6 +218,7 @@ type ChannelDef struct {
 	Options uint32
 }
 
+// https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/00f1da4a-ee9c-421a-852f-c19f92343d73
 type ClientCoreData struct {
 	RdpVersion             VERSION        `struc:"uint32,little"`
 	DesktopWidth           uint16         `struc:"little"`
@@ -249,7 +250,7 @@ func NewClientCoreData() *ClientCoreData {
 		RNS_UD_SAS_DEL, US, 3790, [32]byte{'m', 's', 't', 's', 'c'}, KT_IBM_101_102_KEYS,
 		0, 12, [64]byte{}, RNS_UD_COLOR_8BPP, 1, 0, HIGH_COLOR_24BPP,
 		RNS_UD_15BPP_SUPPORT | RNS_UD_16BPP_SUPPORT | RNS_UD_24BPP_SUPPORT | RNS_UD_32BPP_SUPPORT,
-		RNS_UD_CS_SUPPORT_ERRINFO_PDU, [64]byte{}, 0, 0, 0}
+		RNS_UD_CS_SUPPORT_ERRINFO_PDU | RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL, [64]byte{}, 0, 0, 0}
 }
 
 func (data *ClientCoreData) Block() []byte {
@@ -350,7 +351,7 @@ func MakeConferenceCreateRequest(userData []byte) []byte {
 
 func ReadConferenceCreateResponse(data []byte) []interface{} {
 	// todo
-	glog.Debug("ReadConferenceCreateResponse todo")
+	slog.Debug("ReadConferenceCreateResponse todo")
 	ret := make([]interface{}, 0)
 	return ret
 }

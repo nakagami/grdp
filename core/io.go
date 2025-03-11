@@ -2,8 +2,6 @@ package core
 
 import (
 	"encoding/binary"
-	"encoding/hex"
-	"github.com/icodeface/grdp/glog"
 	"io"
 )
 
@@ -13,7 +11,6 @@ func StartReadBytes(len int, r io.Reader, cb ReadBytesComplete) {
 	b := make([]byte, len)
 	go func() {
 		_, err := io.ReadFull(r, b)
-		glog.Debug("GetBytes: ", hex.EncodeToString(b))
 		cb(b, err)
 	}()
 }
@@ -108,4 +105,26 @@ func WriteUInt32BE(data uint32, w io.Writer) (int, error) {
 	b := make([]byte, 4)
 	binary.BigEndian.PutUint32(b, data)
 	return w.Write(b)
+}
+
+func PutUint16BE(data uint16) (uint8, uint8) {
+	b := make([]byte, 2)
+	binary.BigEndian.PutUint16(b, data)
+	return uint8(b[0]), uint8(b[1])
+}
+
+func Uint16BE(d0, d1 uint8) uint16 {
+	b := make([]byte, 2)
+	b[0] = d0
+	b[1] = d1
+
+	return binary.BigEndian.Uint16(b)
+}
+
+func RGB565ToRGB(data uint16) (r, g, b uint8) {
+	r = uint8(uint32(data&0xF800)>>11) << 3
+	g = uint8(uint32(data&0x07E0)>>5) << 2
+	b = uint8(uint32(data&0x001F)) << 3
+
+	return
 }

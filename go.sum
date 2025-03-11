@@ -1,7 +1,5 @@
-github.com/icodeface/tls v0.0.0-20190904081526-e03692abd1c9 h1:GQupZCLP/Co5jVtI6rdwfgrPE7DOUGvQMrDm2uI4xko=
-github.com/icodeface/tls v0.0.0-20190904081526-e03692abd1c9/go.mod h1:VJNHW2GxCtQP/IQtXykBIPBV8maPJ/dHWirVTwm9GwY=
-github.com/icodeface/tls v0.0.0-20190904082144-a3e1fe30543e h1:3V+yaobzgt0CfQTbMoTEwDY5qbvrVnRgr96JBZ00Vhw=
-github.com/icodeface/tls v0.0.0-20190904082144-a3e1fe30543e/go.mod h1:VJNHW2GxCtQP/IQtXykBIPBV8maPJ/dHWirVTwm9GwY=
+github.com/huin/asn1ber v0.0.0-20120622192748-af09f62e6358 h1:hVXNJ57IHkOA8FBq80UG263MEBwNUMfS9c82J2QE5UQ=
+github.com/huin/asn1ber v0.0.0-20120622192748-af09f62e6358/go.mod h1:qBE210J2T9uLXRB3GNc73SvZACDEFAmDCOlDkV47zbY=
 github.com/lunixbochs/struc v0.0.0-20190326164542-a9e4041416c2 h1:xvBq0/ARZLqmB57m6jds017I+KtXPcsKBHv6dUUac4A=
 github.com/lunixbochs/struc v0.0.0-20190326164542-a9e4041416c2/go.mod h1:iOJu9pApjjmEmNq7PqlA5R9mDu/HMF5EM3llWKX/TyA=
 golang.org/x/crypto v0.0.0-20190308221718-c2843e01d9a2/go.mod h1:djNgcEr1/C05ACkg1iLfiJU5Ep61QUkGW8qpdssI0+w=

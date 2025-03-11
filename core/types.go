@@ -1,6 +1,6 @@
 package core
 
-import "github.com/icodeface/grdp/emission"
+import "github.com/nakagami/grdp/emission"
 
 type Transport interface {
 	Read(b []byte) (n int, err error)
@@ -18,4 +18,8 @@ type FastPathListener interface {
 
 type FastPathSender interface {
 	SendFastPath(secFlag byte, s []byte) (int, error)
+}
+
+type ChannelSender interface {
+	SendToChannel(channel string, s []byte) (int, error)
 }

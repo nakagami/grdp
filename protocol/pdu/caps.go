@@ -5,11 +5,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"github.com/icodeface/grdp/core"
-	"github.com/icodeface/grdp/glog"
-	"github.com/icodeface/grdp/protocol/t125/gcc"
-	"github.com/lunixbochs/struc"
 	"io"
+	"log/slog"
+
+	"github.com/nakagami/grdp/core"
+	"github.com/nakagami/grdp/protocol/t125/gcc"
+	"github.com/lunixbochs/struc"
 )
 
 type CapsType uint16
@@ -44,6 +45,69 @@ const (
 	CAPSETTYPE_BITMAP_CODECS                  = 0x001D
 	CAPSSETTYPE_FRAME_ACKNOWLEDGE             = 0x001E
 )
+
+func (c CapsType) String() string {
+	switch c {
+	case CAPSTYPE_GENERAL:
+		return "CAPSTYPE_GENERAL"
+	case CAPSTYPE_BITMAP:
+		return "CAPSTYPE_BITMAP"
+	case CAPSTYPE_ORDER:
+		return "CAPSTYPE_ORDER"
+	case CAPSTYPE_BITMAPCACHE:
+		return "CAPSTYPE_BITMAPCACHE"
+	case CAPSTYPE_CONTROL:
+		return "CAPSTYPE_CONTROL"
+	case CAPSTYPE_ACTIVATION:
+		return "CAPSTYPE_ACTIVATION"
+	case CAPSTYPE_POINTER:
+		return "CAPSTYPE_POINTER"
+	case CAPSTYPE_SHARE:
+		return "CAPSTYPE_SHARE"
+	case CAPSTYPE_COLORCACHE:
+		return "CAPSTYPE_COLORCACHE"
+	case CAPSTYPE_SOUND:
+		return "CAPSTYPE_SOUND"
+	case CAPSTYPE_INPUT:
+		return "CAPSTYPE_INPUT"
+	case CAPSTYPE_FONT:
+		return "CAPSTYPE_FONT"
+	case CAPSTYPE_BRUSH:
+		return "CAPSTYPE_BRUSH"
+	case CAPSTYPE_GLYPHCACHE:
+		return "CAPSTYPE_GLYPHCACHE"
+	case CAPSTYPE_OFFSCREENCACHE:
+		return "CAPSTYPE_OFFSCREENCACHE"
+	case CAPSTYPE_BITMAPCACHE_HOSTSUPPORT:
+		return "CAPSTYPE_BITMAPCACHE_HOSTSUPPORT"
+	case CAPSTYPE_BITMAPCACHE_REV2:
+		return "CAPSTYPE_BITMAPCACHE_REV2"
+	case CAPSTYPE_VIRTUALCHANNEL:
+		return "CAPSTYPE_VIRTUALCHANNEL"
+	case CAPSTYPE_DRAWNINEGRIDCACHE:
+		return "CAPSTYPE_DRAWNINEGRIDCACHE"
+	case CAPSTYPE_DRAWGDIPLUS:
+		return "CAPSTYPE_DRAWGDIPLUS"
+	case CAPSTYPE_RAIL:
+		return "CAPSTYPE_RAIL"
+	case CAPSTYPE_WINDOW:
+		return "CAPSTYPE_WINDOW"
+	case CAPSETTYPE_COMPDESK:
+		return "CAPSETTYPE_COMPDESK"
+	case CAPSETTYPE_MULTIFRAGMENTUPDATE:
+		return "CAPSETTYPE_MULTIFRAGMENTUPDATE"
+	case CAPSETTYPE_LARGE_POINTER:
+		return "CAPSETTYPE_LARGE_POINTER"
+	case CAPSETTYPE_SURFACE_COMMANDS:
+		return "CAPSETTYPE_SURFACE_COMMANDS"
+	case CAPSETTYPE_BITMAP_CODECS:
+		return "CAPSETTYPE_BITMAP_CODECS"
+	case CAPSSETTYPE_FRAME_ACKNOWLEDGE:
+		return "CAPSSETTYPE_FRAME_ACKNOWLEDGE"
+	}
+
+	return "Unknown"
+}
 
 type MajorType uint16
 
@@ -117,7 +181,7 @@ const (
 	TS_NEG_FAST_GLYPH_INDEX               = 0x18
 	TS_NEG_ELLIPSE_SC_INDEX               = 0x19
 	TS_NEG_ELLIPSE_CB_INDEX               = 0x1A
-	TS_NEG_INDEX_INDEX                    = 0x1B
+	TS_NEG_GLYPH_INDEX_INDEX              = 0x1B
 )
 
 type OrderEx uint16
@@ -139,7 +203,7 @@ const (
 	INPUT_FLAG_FASTPATH_INPUT2        = 0x0020
 	INPUT_FLAG_UNUSED1                = 0x0040
 	INPUT_FLAG_UNUSED2                = 0x0080
-	TS_INPUT_FLAG_MOUSE_HWHEEL        = 0x0100
+	INPUT_FLAG_MOUSE_HWHEEL           = 0x0100
 )
 
 /**
@@ -191,6 +255,54 @@ type SoundFlag uint16
 const (
 	SOUND_NONE       SoundFlag = 0x0000
 	SOUND_BEEPS_FLAG           = 0x0001
+)
+
+type RailsupportLevel uint32
+
+const (
+	RAIL_LEVEL_SUPPORTED                           = 0x00000001
+	RAIL_LEVEL_DOCKED_LANGBAR_SUPPORTED            = 0x00000002
+	RAIL_LEVEL_SHELL_INTEGRATION_SUPPORTED         = 0x00000004
+	RAIL_LEVEL_LANGUAGE_IME_SYNC_SUPPORTED         = 0x00000008
+	RAIL_LEVEL_SERVER_TO_CLIENT_IME_SYNC_SUPPORTED = 0x00000010
+	RAIL_LEVEL_HIDE_MINIMIZED_APPS_SUPPORTED       = 0x00000020
+	RAIL_LEVEL_WINDOW_CLOAKING_SUPPORTED           = 0x00000040
+	RAIL_LEVEL_HANDSHAKE_EX_SUPPORTED              = 0x00000080
+)
+
+const (
+	INPUT_EVENT_SYNC     = 0x0000
+	INPUT_EVENT_UNUSED   = 0x0002
+	INPUT_EVENT_SCANCODE = 0x0004
+	INPUT_EVENT_UNICODE  = 0x0005
+	INPUT_EVENT_MOUSE    = 0x8001
+	INPUT_EVENT_MOUSEX   = 0x8002
+)
+
+const (
+	PTRFLAGS_HWHEEL         = 0x0400
+	PTRFLAGS_WHEEL          = 0x0200
+	PTRFLAGS_WHEEL_NEGATIVE = 0x0100
+	WheelRotationMask       = 0x01FF
+	PTRFLAGS_MOVE           = 0x0800
+	PTRFLAGS_DOWN           = 0x8000
+	PTRFLAGS_BUTTON1        = 0x1000
+	PTRFLAGS_BUTTON2        = 0x2000
+	PTRFLAGS_BUTTON3        = 0x4000
+)
+
+const (
+	KBDFLAGS_EXTENDED = 0x0100
+	KBDFLAGS_DOWN     = 0x4000
+	KBDFLAGS_RELEASE  = 0x8000
+)
+
+type SurfaceCmdFlags uint32
+
+const (
+	SURFCMDS_SET_SURFACE_BITS    = 0x00000002
+	SURFCMDS_FRAME_MARKER        = 0x00000010
+	SURFCMDS_STREAM_SURFACE_BITS = 0x00000040
 )
 
 type Capability interface {
@@ -286,7 +398,7 @@ type PointerCapability struct {
 	ColorPointerFlag      uint16 `struc:"little"`
 	ColorPointerCacheSize uint16 `struc:"little"`
 	// old version of rdp doesn't support ...
-	// PointerCacheSize uint16 `struc:"little"` // only server need
+	PointerCacheSize uint16 `struc:"little"` // only server need
 }
 
 func (*PointerCapability) Type() CapsType {
@@ -349,6 +461,22 @@ type OffscreenBitmapCacheCapability struct {
 
 func (*OffscreenBitmapCacheCapability) Type() CapsType {
 	return CAPSTYPE_OFFSCREENCACHE
+}
+
+type BitmapCache2Capability struct {
+	BitmapCachePersist uint16   `struc:"little"`
+	Pad2octets         uint8    `struc:"little"`
+	CachesNum          uint8    `struc:"little"`
+	BmpC0Cells         uint32   `struc:"little"`
+	BmpC1Cells         uint32   `struc:"little"`
+	BmpC2Cells         uint32   `struc:"little"`
+	BmpC3Cells         uint32   `struc:"little"`
+	BmpC4Cells         uint32   `struc:"little"`
+	Pad2octets1        [12]byte `struc:"little"`
+}
+
+func (*BitmapCache2Capability) Type() CapsType {
+	return CAPSTYPE_BITMAPCACHE_REV2
 }
 
 type VirtualChannelCapability struct {
@@ -526,6 +654,24 @@ func (*SurfaceCommandsCapability) Type() CapsType {
 	return CAPSETTYPE_SURFACE_COMMANDS
 }
 
+type FrameAcknowledgeCapability struct {
+	FrameCount uint32 `struc:"little"`
+}
+
+func (*FrameAcknowledgeCapability) Type() CapsType {
+	return CAPSSETTYPE_FRAME_ACKNOWLEDGE
+}
+
+type DrawNineGridCapability struct {
+	SupportLevel uint32 `struc:"little"`
+	CacheSize    uint16 `struc:"little"`
+	CacheEntries uint16 `struc:"little"`
+}
+
+func (*DrawNineGridCapability) Type() CapsType {
+	return CAPSTYPE_DRAWNINEGRIDCACHE
+}
+
 func readCapability(r io.Reader) (Capability, error) {
 	capType, err := core.ReadUint16LE(r)
 	if err != nil {
@@ -535,12 +681,15 @@ func readCapability(r io.Reader) (Capability, error) {
 	if err != nil {
 		return nil, err
 	}
+	if int(capLen)-4 <= 0 {
+		return nil, errors.New(fmt.Sprintf("Capability length expected %d", capLen))
+	}
+
 	capBytes, err := core.ReadBytes(int(capLen)-4, r)
 	if err != nil {
 		return nil, err
 	}
 	capReader := bytes.NewReader(capBytes)
-
 	var c Capability
 	switch CapsType(capType) {
 	case CAPSTYPE_GENERAL:
@@ -593,13 +742,15 @@ func readCapability(r io.Reader) (Capability, error) {
 		c = &DesktopCompositionCapability{}
 	case CAPSETTYPE_SURFACE_COMMANDS:
 		c = &SurfaceCommandsCapability{}
+	case CAPSSETTYPE_FRAME_ACKNOWLEDGE:
+		c = &FrameAcknowledgeCapability{}
 	default:
 		err := errors.New(fmt.Sprintf("unsupported Capability type 0x%04x", capType))
-		glog.Error(err)
+		slog.Error("%v", err)
 		return nil, err
 	}
 	if err := struc.Unpack(capReader, c); err != nil {
-		glog.Error("Capability unpack error", err, fmt.Sprintf("0x%04x", capType), hex.EncodeToString(capBytes))
+		slog.Error("Capability unpack error %v %v", err, fmt.Sprintf("0x%04x", capType), hex.EncodeToString(capBytes))
 		return nil, err
 	}
 	return c, nil

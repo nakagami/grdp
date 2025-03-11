@@ -5,10 +5,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"github.com/icodeface/grdp/core"
-	"github.com/icodeface/grdp/emission"
-	"github.com/icodeface/grdp/glog"
-	"github.com/icodeface/grdp/protocol/tpkt"
+	"log/slog"
+
+	"github.com/nakagami/grdp/core"
+	"github.com/nakagami/grdp/emission"
+	"github.com/nakagami/grdp/protocol/tpkt"
 	"github.com/lunixbochs/struc"
 )
 
@@ -68,6 +69,28 @@ func NewNegotiation() *Negotiation {
 	return &Negotiation{0, 0, 0x0008 /*constant*/, PROTOCOL_RDP}
 }
 
+type failureCode int
+
+const (
+	//The server requires that the client support Enhanced RDP Security (section 5.4) with either TLS 1.0, 1.1 or 1.2 (section 5.4.5.1) or CredSSP (section 5.4.5.2). If only CredSSP was requested then the server only supports TLS.
+	SSL_REQUIRED_BY_SERVER = 0x00000001
+
+	//The server is configured to only use Standard RDP Security mechanisms (section 5.3) and does not support any External Security Protocols (section 5.4.5).
+	SSL_NOT_ALLOWED_BY_SERVER = 0x00000002
+
+	//The server does not possess a valid authentication certificate and cannot initialize the External Security Protocol Provider (section 5.4.5).
+	SSL_CERT_NOT_ON_SERVER = 0x00000003
+
+	//The list of requested security protocols is not consistent with the current security protocol in effect. This error is only possible when the Direct Approach (sections 5.4.2.2 and 1.3.1.2) is used and an External Security Protocol (section 5.4.5) is already being used.
+	INCONSISTENT_FLAGS = 0x00000004
+
+	//The server requires that the client support Enhanced RDP Security (section 5.4) with CredSSP (section 5.4.5.2).
+	HYBRID_REQUIRED_BY_SERVER = 0x00000005
+
+	//The server requires that the client support Enhanced RDP Security (section 5.4) with TLS 1.0, 1.1 or 1.2 (section 5.4.5.1) and certificate-based client authentication.<4>
+	SSL_WITH_USER_AUTH_REQUIRED_BY_SERVER = 0x00000006
+)
+
 /**
  * X224 client connection request
  * @param opt {object} component type options
@@ -103,6 +126,7 @@ func (x *ClientConnectionRequestPDU) Serialize() []byte {
 		core.WriteUInt16LE(0x0A0D, buff)
 	}
 	struc.Pack(buff, x.ProtocolNeg)
+
 	return buff.Bytes()
 }
 
@@ -125,9 +149,9 @@ type ServerConnectionConfirm struct {
  * @returns {type.Component}
  */
 type DataHeader struct {
-	Header      uint8
-	MessageType MessageType
-	Separator   uint8
+	Header      uint8       `struc:"little"`
+	MessageType MessageType `struc:"uint8"`
+	Separator   uint8       `struc:"little"`
 }
 
 func NewDataHeader() *DataHeader {
@@ -150,7 +174,7 @@ func New(t core.Transport) *X224 {
 	x := &X224{
 		*emission.NewEmitter(),
 		t,
-		PROTOCOL_SSL | PROTOCOL_HYBRID,
+		PROTOCOL_RDP | PROTOCOL_SSL | PROTOCOL_HYBRID,
 		PROTOCOL_SSL,
 		NewDataHeader(),
 	}
@@ -175,7 +199,8 @@ func (x *X224) Write(b []byte) (n int, err error) {
 		return 0, err
 	}
 	buff.Write(b)
-	glog.Debug("x224 write", hex.EncodeToString(buff.Bytes()))
+
+	slog.Debug("x224 write:", hex.EncodeToString(buff.Bytes()))
 	return x.transport.Write(buff.Bytes())
 }
 
@@ -195,48 +220,54 @@ func (x *X224) Connect() error {
 	message.ProtocolNeg.Type = TYPE_RDP_NEG_REQ
 	message.ProtocolNeg.Result = uint32(x.requestedProtocol)
 
-	glog.Debug("x224 sendConnectionRequest", hex.EncodeToString(message.Serialize()))
+	slog.Debug("x224 Connection Request PDU", hex.EncodeToString(message.Serialize()))
 	_, err := x.transport.Write(message.Serialize())
 	x.transport.Once("data", x.recvConnectionConfirm)
 	return err
 }
 
 func (x *X224) recvConnectionConfirm(s []byte) {
-	glog.Debug("x224 recvConnectionConfirm", hex.EncodeToString(s))
+	slog.Debug("x224 Connection Confirm PDU ", hex.EncodeToString(s))
 	message := &ServerConnectionConfirm{}
 	if err := struc.Unpack(bytes.NewReader(s), message); err != nil {
-		glog.Error("ReadServerConnectionConfirm err", err)
+		slog.Error("ReadServerConnectionConfirm err", err)
 		return
 	}
-
+	slog.Debug(fmt.Sprintf("message: %+v", *message.ProtocolNeg))
 	if message.ProtocolNeg.Type == TYPE_RDP_NEG_FAILURE {
-		glog.Error(fmt.Sprintf("NODE_RDP_PROTOCOL_X224_NEG_FAILURE with code: %d,see https://msdn.microsoft.com/en-us/library/cc240507.aspx",
+		slog.Error(fmt.Sprintf("NODE_RDP_PROTOCOL_X224_NEG_FAILURE with code: %d,see https://msdn.microsoft.com/en-us/library/cc240507.aspx",
 			message.ProtocolNeg.Result))
+		//only use Standard RDP Security mechanisms
+		if message.ProtocolNeg.Result == 2 {
+			slog.Info("Only use Standard RDP Security mechanisms, Reconnect with Standard RDP")
+		}
+		x.Close()
 		return
 	}
 
 	if message.ProtocolNeg.Type == TYPE_RDP_NEG_RSP {
-		glog.Info("TYPE_RDP_NEG_RSP")
+		slog.Info("TYPE_RDP_NEG_RSP")
 		x.selectedProtocol = message.ProtocolNeg.Result
 	}
 
 	if x.selectedProtocol == PROTOCOL_HYBRID_EX {
-		glog.Error("NODE_RDP_PROTOCOL_HYBRID_EX_NOT_SUPPORTED")
+		slog.Error("NODE_RDP_PROTOCOL_HYBRID_EX_NOT_SUPPORTED")
 		return
 	}
 
 	x.transport.On("data", x.recvData)
 
 	if x.selectedProtocol == PROTOCOL_RDP {
-		glog.Info("*** RDP security selected ***")
+		slog.Info("*** RDP security selected ***")
+		x.Emit("connect", x.selectedProtocol)
 		return
 	}
 
 	if x.selectedProtocol == PROTOCOL_SSL {
-		glog.Info("*** SSL security selected ***")
-		err := x.transport.(*tpkt.TPKT).Conn.StartTLS()
+		slog.Info("*** SSL security selected ***")
+		err := x.transport.(*tpkt.TPKT).StartTLS()
 		if err != nil {
-			glog.Error("start tls failed", err)
+			slog.Error("start tls failed:", err)
 			return
 		}
 		x.Emit("connect", x.selectedProtocol)
@@ -244,10 +275,10 @@ func (x *X224) recvConnectionConfirm(s []byte) {
 	}
 
 	if x.selectedProtocol == PROTOCOL_HYBRID {
-		glog.Info("*** NLA Security selected ***")
-		err := x.transport.(*tpkt.TPKT).Conn.StartNLA()
+		slog.Info("*** NLA Security selected ***")
+		err := x.transport.(*tpkt.TPKT).StartNLA()
 		if err != nil {
-			glog.Error("start NLA failed", err)
+			slog.Error("start NLA failed:", err)
 			return
 		}
 		x.Emit("connect", x.selectedProtocol)
@@ -256,7 +287,7 @@ func (x *X224) recvConnectionConfirm(s []byte) {
 }
 
 func (x *X224) recvData(s []byte) {
-	glog.Debug("x224 recvData", hex.EncodeToString(s), "emit data")
+	slog.Debug("x224 recvData %v", hex.EncodeToString(s))
 	// x224 header takes 3 bytes
 	x.Emit("data", s[3:])
 }

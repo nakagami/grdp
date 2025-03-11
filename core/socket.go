@@ -1,25 +1,25 @@
 package core
 
 import (
-	"encoding/hex"
-	"fmt"
-	"github.com/icodeface/grdp/glog"
-	"github.com/icodeface/grdp/protocol/nla"
-	"github.com/icodeface/tls"
+	"crypto/rsa"
+	"math/big"
+
+	"github.com/huin/asn1ber"
+
+	"crypto/tls"
+	"errors"
 	"net"
 )
 
 type SocketLayer struct {
 	conn    net.Conn
 	tlsConn *tls.Conn
-	ntlm    *nla.NTLMv2
 }
 
-func NewSocketLayer(conn net.Conn, ntlm *nla.NTLMv2) *SocketLayer {
+func NewSocketLayer(conn net.Conn) *SocketLayer {
 	l := &SocketLayer{
 		conn:    conn,
 		tlsConn: nil,
-		ntlm:    ntlm,
 	}
 	return l
 }
@@ -49,7 +49,6 @@ func (s *SocketLayer) Close() error {
 }
 
 func (s *SocketLayer) StartTLS() error {
-	glog.Info("StartTLS")
 	config := &tls.Config{
 		InsecureSkipVerify:       true,
 		MinVersion:               tls.VersionTLS10,
@@ -60,60 +59,15 @@ func (s *SocketLayer) StartTLS() error {
 	return s.tlsConn.Handshake()
 }
 
-func (s *SocketLayer) StartNLA() error {
-	glog.Info("StartNLA")
-	err := s.StartTLS()
-	if err != nil {
-		glog.Info("start tls failed", err)
-		return err
-	}
-	req := nla.EncodeDERTRequest([]nla.Message{s.ntlm.GetNegotiateMessage()}, "", "")
-	_, err = s.Write(req)
-	if err != nil {
-		glog.Info("send NegotiateMessage", err)
-		return err
-	}
-
-	resp := make([]byte, 1024)
-	n, err := s.Read(resp)
-	if err != nil {
-		return fmt.Errorf("read %s", err)
-	}
-	return s.recvChallenge(resp[:n])
+type PublicKey struct {
+	N *big.Int `asn1:"explicit,tag:0"` // modulus
+	E int      `asn1:"explicit,tag:1"` // public exponent
 }
 
-func (s *SocketLayer) recvChallenge(data []byte) error {
-	glog.Debug("recvChallenge", hex.EncodeToString(data))
-	tsreq, err := nla.DecodeDERTRequest(data)
-	if err != nil {
-		return err
+func (s *SocketLayer) TlsPubKey() ([]byte, error) {
+	if s.tlsConn == nil {
+		return nil, errors.New("TLS conn does not exist")
 	}
-
-	// get pubkey
-
-	pubkey := ""
-
-	msg := s.ntlm.GetAuthenticateMessage(tsreq.NegoTokens[0].Data)
-	req := nla.EncodeDERTRequest([]nla.Message{msg}, "", pubkey)
-	_, err = s.Write(req)
-	if err != nil {
-		glog.Info("send AuthenticateMessage", err)
-		return err
-	}
-
-	//resp := make([]byte, 1024)
-	//_, err = s.Read(resp)
-	//if err != nil {
-	//	return err
-	//}
-	//return s.recvPubKeyInc(resp)
-
-	fmt.Println("todo")
-	return nil
-
-}
-
-func (s *SocketLayer) recvPubKeyInc(data []byte) error {
-	// todo
-	return nil
+	pub := s.tlsConn.ConnectionState().PeerCertificates[0].PublicKey.(*rsa.PublicKey)
+	return asn1ber.Marshal(*pub)
 }

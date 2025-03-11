@@ -1,7 +1,7 @@
 package lic
 
 import (
-	"github.com/icodeface/grdp/core"
+	"github.com/nakagami/grdp/core"
 	"io"
 )
 
