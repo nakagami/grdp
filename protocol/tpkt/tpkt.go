@@ -81,11 +81,18 @@ func (t *TPKT) recvChallenge(data []byte) error {
 		slog.Info("DecodeDERTRequest", "err", err)
 		return err
 	}
+	// TSRequest
+	// https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-cssp/6aac4dea-08ef-47a6-8747-22ea7f6d8685
 	slog.Debug("recvChallenge", "tsreq", tsreq)
+
 	// get pubkey
 	pubkey, err := t.Conn.TlsPubKey()
 	slog.Debug("recvChallenge", "pubkey", pubkey)
 
+	// NTLM Authentication Message Syntax
+	// https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-nlmp/907f519d-6217-45b1-b421-dca10fc8af0d
+	// NTLM v2 Authentication
+	// https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-nlmp/5e550938-91d4-459f-b67d-75d70009e3f3
 	authMsg, ntlmSec := t.ntlm.GetAuthenticateMessage(tsreq.NegoTokens[0].Data)
 	t.ntlmSec = ntlmSec
 
