@@ -2,7 +2,7 @@ package tpkt
 
 import (
 	"bytes"
-	//	"encoding/hex"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 
@@ -54,11 +54,13 @@ func (t *TPKT) StartTLS() error {
 func (t *TPKT) StartNLA() error {
 	err := t.StartTLS()
 	if err != nil {
+		slog.Info("StartNLA", "start tls failed", err)
 		return err
 	}
 	req := nla.EncodeDERTRequest([]nla.Message{t.ntlm.GetNegotiateMessage()}, nil, nil)
 	_, err = t.Conn.Write(req)
 	if err != nil {
+		slog.Info("StartNLA", "send MegotiationMessage", err)
 		return err
 	}
 
@@ -67,17 +69,22 @@ func (t *TPKT) StartNLA() error {
 	if err != nil {
 		return fmt.Errorf("read %s", err)
 	} else {
+		slog.Debug("StartNLA Read success")
 	}
 	return t.recvChallenge(resp[:n])
 }
 
 func (t *TPKT) recvChallenge(data []byte) error {
+	slog.Info("recvChallenge", "data", hex.EncodeToString(data))
 	tsreq, err := nla.DecodeDERTRequest(data)
 	if err != nil {
+		slog.Info("DecodeDERTRequest", "err", err)
 		return err
 	}
+	slog.Debug("recvChallenge", "tsreq", tsreq)
 	// get pubkey
 	pubkey, err := t.Conn.TlsPubKey()
+	slog.Debug("recvChallenge", "pubkey", pubkey)
 
 	authMsg, ntlmSec := t.ntlm.GetAuthenticateMessage(tsreq.NegoTokens[0].Data)
 	t.ntlmSec = ntlmSec
@@ -86,13 +93,16 @@ func (t *TPKT) recvChallenge(data []byte) error {
 	req := nla.EncodeDERTRequest([]nla.Message{authMsg}, nil, encryptPubkey)
 	_, err = t.Conn.Write(req)
 	if err != nil {
+		slog.Info("send AuthenticateMessage", "err", err)
 		return err
 	}
 	resp := make([]byte, 1024)
 	n, err := t.Conn.Read(resp)
 	if err != nil {
+		slog.Error("recvChallenge Read:", "err", err)
 		return fmt.Errorf("read %s", err)
 	} else {
+		slog.Debug("recvChallenge Read success")
 	}
 	return t.recvPubKeyInc(resp[:n])
 }
