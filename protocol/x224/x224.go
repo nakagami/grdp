@@ -220,34 +220,40 @@ func (x *X224) Connect() error {
 	message.ProtocolNeg.Type = TYPE_RDP_NEG_REQ
 	message.ProtocolNeg.Result = uint32(x.requestedProtocol)
 
-	slog.Debug("x224 Connection Request PDU", hex.EncodeToString(message.Serialize()))
+	slog.Debug("x224 Connection Request PDU", "msg", hex.EncodeToString(message.Serialize()))
 	_, err := x.transport.Write(message.Serialize())
 	x.transport.Once("data", x.recvConnectionConfirm)
 	return err
 }
 
 func (x *X224) recvConnectionConfirm(s []byte) {
-	slog.Debug("x224 Connection Confirm PDU ", hex.EncodeToString(s))
-	message := &ServerConnectionConfirm{}
-	if err := struc.Unpack(bytes.NewReader(s), message); err != nil {
-		slog.Error("ReadServerConnectionConfirm err", err)
-		return
-	}
-	slog.Debug(fmt.Sprintf("message: %+v", *message.ProtocolNeg))
-	if message.ProtocolNeg.Type == TYPE_RDP_NEG_FAILURE {
-		slog.Error(fmt.Sprintf("NODE_RDP_PROTOCOL_X224_NEG_FAILURE with code: %d,see https://msdn.microsoft.com/en-us/library/cc240507.aspx",
-			message.ProtocolNeg.Result))
-		//only use Standard RDP Security mechanisms
-		if message.ProtocolNeg.Result == 2 {
-			slog.Info("Only use Standard RDP Security mechanisms, Reconnect with Standard RDP")
+	slog.Debug("x224 recvConnectionConfirm", "data", hex.EncodeToString(s))
+	r := bytes.NewReader(s)
+	ln, _ := core.ReadUInt8(r)
+	if ln > 6 {
+		message := &ServerConnectionConfirm{}
+		if err := struc.Unpack(bytes.NewReader(s), message); err != nil {
+			slog.Error("ReadServerConnectionConfirm", "err", err)
+			return
 		}
-		x.Close()
-		return
-	}
+		slog.Debug(fmt.Sprintf("message: %+v", *message.ProtocolNeg))
+		if message.ProtocolNeg.Type == TYPE_RDP_NEG_FAILURE {
+			slog.Error(fmt.Sprintf("NODE_RDP_PROTOCOL_X224_NEG_FAILURE with code: %d,see https://msdn.microsoft.com/en-us/library/cc240507.aspx",
+				message.ProtocolNeg.Result))
+			//only use Standard RDP Security mechanisms
+			if message.ProtocolNeg.Result == 2 {
+				slog.Info("Only use Standard RDP Security mechanisms, Reconnect with Standard RDP")
+			}
+			x.Close()
+			return
+		}
 
-	if message.ProtocolNeg.Type == TYPE_RDP_NEG_RSP {
-		slog.Info("TYPE_RDP_NEG_RSP")
-		x.selectedProtocol = message.ProtocolNeg.Result
+		if message.ProtocolNeg.Type == TYPE_RDP_NEG_RSP {
+			slog.Info("TYPE_RDP_NEG_RSP")
+			x.selectedProtocol = message.ProtocolNeg.Result
+		}
+	} else {
+		x.selectedProtocol = PROTOCOL_RDP
 	}
 
 	if x.selectedProtocol == PROTOCOL_HYBRID_EX {
@@ -278,7 +284,7 @@ func (x *X224) recvConnectionConfirm(s []byte) {
 		slog.Info("*** NLA Security selected ***")
 		err := x.transport.(*tpkt.TPKT).StartNLA()
 		if err != nil {
-			slog.Error("start NLA failed:", err)
+			slog.Error("StartNLA failed:", "err", err)
 			return
 		}
 		x.Emit("connect", x.selectedProtocol)
