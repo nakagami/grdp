@@ -236,7 +236,7 @@ func (x *X224) recvConnectionConfirm(s []byte) {
 			slog.Error("ReadServerConnectionConfirm", "err", err)
 			return
 		}
-		slog.Debug(fmt.Sprintf("message: %+v", *message.ProtocolNeg))
+		slog.Debug("x224 recvConnectionConfirm", "message", message.ProtocolNeg)
 		if message.ProtocolNeg.Type == TYPE_RDP_NEG_FAILURE {
 			slog.Error(fmt.Sprintf("NODE_RDP_PROTOCOL_X224_NEG_FAILURE with code: %d,see https://msdn.microsoft.com/en-us/library/cc240507.aspx",
 				message.ProtocolNeg.Result))
