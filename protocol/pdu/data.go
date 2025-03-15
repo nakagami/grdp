@@ -427,7 +427,7 @@ func readDataPDU(r io.Reader) (*DataPDU, error) {
 	header := &ShareDataHeader{}
 	err := struc.Unpack(r, header)
 	if err != nil {
-		slog.Error("read data pdu header error: %v", err)
+		slog.Error(fmt.Sprintf("read data pdu header error: %v", err))
 		return nil, err
 	}
 	var d DataPDUData
@@ -449,14 +449,14 @@ func readDataPDU(r io.Reader) (*DataPDU, error) {
 		d = s
 	default:
 		err = errors.New(fmt.Sprintf("Unknown data pdu type2 0x%02x", header.PDUType2))
-		slog.Error("%v", err)
+		slog.Error(fmt.Sprintf("%v", err))
 		return nil, err
 	}
 
 	if header.PDUType2 != PDUTYPE2_SAVE_SESSION_INFO {
 		err = struc.Unpack(r, d)
 		if err != nil {
-			slog.Error("read data pdu error %v", err)
+			slog.Error(fmt.Sprintf("read data pdu error %v", err))
 			return nil, err
 		}
 	}
@@ -631,7 +631,7 @@ func (s *SaveSessionInfo) Unpack(r io.Reader) (err error) {
 	case INFOTYPE_LOGON_EXTENDED_INFO:
 		err = s.logonInfoExtended(r)
 	default:
-		slog.Error("Unhandled saveSessionInfo type 0x%x", s.InfoType)
+		slog.Error(fmt.Sprintf("Unhandled saveSessionInfo type 0x%x", s.InfoType))
 		return fmt.Errorf("Unhandled saveSessionInfo type 0x%x", s.InfoType)
 	}
 
@@ -873,7 +873,7 @@ func readPDU(r io.Reader) (*PDU, error) {
 		slog.Debug("PDUTYPE_DEACTIVATEALLPDU")
 		d, err = readDeactiveAllPDU(r)
 	default:
-		slog.Error("PDU invalid pdu type: 0x%02x", pdu.ShareCtrlHeader.PDUType)
+		slog.Error(fmt.Sprintf("PDU invalid pdu type: 0x%02x", pdu.ShareCtrlHeader.PDUType))
 	}
 	if err != nil {
 		return nil, err

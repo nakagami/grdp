@@ -3,6 +3,7 @@ package pdu
 import (
 	"bytes"
 	"encoding/hex"
+	"fmt"
 	"log/slog"
 
 	"github.com/nakagami/grdp/core"
@@ -161,7 +162,7 @@ func (c *Client) recvDemandActivePDU(s []byte) {
 	r := bytes.NewReader(s)
 	pdu, err := readPDU(r)
 	if err != nil {
-		slog.Error("%v", err)
+		slog.Error(fmt.Sprintf("%v", err))
 		return
 	}
 	if pdu.ShareCtrlHeader.PDUType != PDUTYPE_DEMANDACTIVEPDU {
@@ -268,7 +269,7 @@ func (c *Client) recvServerSynchronizePDU(s []byte) {
 	r := bytes.NewReader(s)
 	pdu, err := readPDU(r)
 	if err != nil {
-		slog.Error("%v", err)
+		slog.Error(fmt.Sprintf("%v", err))
 		return
 	}
 	dataPdu, ok := pdu.Message.(*DataPDU)
@@ -290,7 +291,7 @@ func (c *Client) recvServerControlCooperatePDU(s []byte) {
 	r := bytes.NewReader(s)
 	pdu, err := readPDU(r)
 	if err != nil {
-		slog.Error("%v", err)
+		slog.Error(fmt.Sprintf("%v", err))
 		return
 	}
 	dataPdu, ok := pdu.Message.(*DataPDU)
@@ -316,7 +317,7 @@ func (c *Client) recvServerControlGrantedPDU(s []byte) {
 	r := bytes.NewReader(s)
 	pdu, err := readPDU(r)
 	if err != nil {
-		slog.Error("%v", err)
+		slog.Error(fmt.Sprintf("%v", err))
 		return
 	}
 	dataPdu, ok := pdu.Message.(*DataPDU)
@@ -342,7 +343,7 @@ func (c *Client) recvServerFontMapPDU(s []byte) {
 	r := bytes.NewReader(s)
 	pdu, err := readPDU(r)
 	if err != nil {
-		slog.Error("%v", err)
+		slog.Error(fmt.Sprintf("%v", err))
 		return
 	}
 	dataPdu, ok := pdu.Message.(*DataPDU)
@@ -364,7 +365,7 @@ func (c *Client) recvPDU(s []byte) {
 	if r.Len() > 0 {
 		p, err := readPDU(r)
 		if err != nil {
-			slog.Error("%v", err)
+			slog.Error(fmt.Sprintf("%v", err))
 			return
 		}
 		if p.ShareCtrlHeader.PDUType == PDUTYPE_DEACTIVATEALLPDU {

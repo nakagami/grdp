@@ -746,11 +746,11 @@ func readCapability(r io.Reader) (Capability, error) {
 		c = &FrameAcknowledgeCapability{}
 	default:
 		err := errors.New(fmt.Sprintf("unsupported Capability type 0x%04x", capType))
-		slog.Error("%v", err)
+		slog.Error(fmt.Sprintf("%v", err))
 		return nil, err
 	}
 	if err := struc.Unpack(capReader, c); err != nil {
-		slog.Error("Capability unpack error %v %v", err, fmt.Sprintf("0x%04x", capType), hex.EncodeToString(capBytes))
+		slog.Error(fmt.Sprintf("Capability unpack error %v %v", err, fmt.Sprintf("0x%04x", capType), hex.EncodeToString(capBytes)))
 		return nil, err
 	}
 	return c, nil

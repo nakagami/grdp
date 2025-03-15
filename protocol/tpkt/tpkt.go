@@ -188,7 +188,7 @@ func (t *TPKT) recvExtendedFastPathHeader(s []byte, err error) {
 	r := bytes.NewReader(s)
 	rightPart, err := core.ReadUInt8(r)
 	if err != nil {
-		slog.Error("TPTK recvExtendedFastPathHeader %v", err)
+		slog.Error(fmt.Sprintf("TPTK recvExtendedFastPathHeader %v", err))
 		return
 	}
 

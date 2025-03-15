@@ -371,7 +371,7 @@ func (o *OrderPdu) processPrimaryOrder(r io.Reader) error {
 	case ORDER_TYPE_TEXT2:
 		p = &GlayphIndex{}
 	default:
-		slog.Error("Not Support order type:%v", orderType)
+		slog.Error(fmt.Srpintf("Not Support order type:%v", orderType))
 		return errors.New("Not Support order type")
 	}
 	if p != nil {

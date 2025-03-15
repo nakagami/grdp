@@ -317,7 +317,7 @@ func (c *MCSClient) recvConnectResponse(s []byte) {
 			}
 		default:
 			err := errors.New(fmt.Sprintf("unhandle server gcc block %v %v", v, cResp.userData))
-			slog.Error("%v", err)
+			slog.Error(fmt.Sprintf("recvConnectResponse %v", err))
 			c.Emit("error", err)
 			return
 		}
