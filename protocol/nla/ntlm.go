@@ -5,12 +5,13 @@ import (
 	"crypto/md5"
 	"crypto/rc4"
 	"encoding/binary"
+	"encoding/hex"
+	"fmt"
 	"log/slog"
-	//	"encoding/hex"
 	"time"
 
-	"github.com/nakagami/grdp/core"
 	"github.com/lunixbochs/struc"
+	"github.com/nakagami/grdp/core"
 )
 
 const (
@@ -393,8 +394,9 @@ func (n *NTLMv2) GetAuthenticateMessage(s []byte) (*AuthenticateMessage, *NTLMv2
 	}
 	challengeMsg.Payload, _ = core.ReadBytes(r.Len(), r)
 	n.challengeMessage = challengeMsg
+	slog.Debug("GetAuthenticateMessage", "challengeMsg", challengeMsg)
 
-	// serverName := challengeMsg.getTargetName()
+	serverName := challengeMsg.getTargetName()
 	serverInfo := challengeMsg.getTargetInfo()
 	timestamp := challengeMsg.getTargetInfoTimestamp(serverInfo)
 	computeMIC := false
@@ -406,6 +408,7 @@ func (n *NTLMv2) GetAuthenticateMessage(s []byte) (*AuthenticateMessage, *NTLMv2
 	} else {
 		computeMIC = true
 	}
+	slog.Info("GetAuthenticateMessage", "serverName", core.UnicodeDecode(serverName))
 	serverChallenge := challengeMsg.ServerChallenge[:]
 	clientChallenge := core.Random(8)
 	ntChallengeResponse, lmChallengeResponse, SessionBaseKey := n.ComputeResponse(
@@ -420,6 +423,7 @@ func (n *NTLMv2) GetAuthenticateMessage(s []byte) (*AuthenticateMessage, *NTLMv2
 	if challengeMsg.NegotiateFlags&NTLMSSP_NEGOTIATE_UNICODE != 0 {
 		n.enableUnicode = true
 	}
+	slog.Info(fmt.Sprintf("user: %s, passwd:%s", n.user, n.password))
 	domain, user, _ := n.GetEncodedCredentials()
 
 	n.authenticateMessage = NewAuthenticateMessage(challengeMsg.NegotiateFlags,
@@ -449,6 +453,11 @@ func (n *NTLMv2) GetAuthenticateMessage(s []byte) (*AuthenticateMessage, *NTLMv2
 	a = concat(exportedSessionKey, serverSealing)
 	md.Write(a)
 	ServerSealingKey := md.Sum(nil)
+
+	slog.Debug("GetAuthenticateMessage", "ClientSigningKey:", hex.EncodeToString(ClientSigningKey))
+	slog.Debug("GetAuthenticateMessage", "ServerSigningKey:", hex.EncodeToString(ServerSigningKey))
+	slog.Debug("GetAuthenticateMessage", "ClientSealingKey:", hex.EncodeToString(ClientSealingKey))
+	slog.Debug("GetAuthenticateMessage", "ServerSealingKey:", hex.EncodeToString(ServerSealingKey))
 
 	encryptRC4, _ := rc4.NewCipher(ClientSealingKey)
 	decryptRC4, _ := rc4.NewCipher(ServerSealingKey)

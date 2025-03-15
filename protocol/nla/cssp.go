@@ -2,8 +2,8 @@ package nla
 
 import (
 	"encoding/asn1"
-	"log/slog"
 	"fmt"
+	"log/slog"
 )
 
 type NegoToken struct {
@@ -11,11 +11,12 @@ type NegoToken struct {
 }
 
 type TSRequest struct {
-	Version    int         `asn1:"explicit,tag:0"`
-	NegoTokens []NegoToken `asn1:"optional,explicit,tag:1"`
-	AuthInfo   []byte      `asn1:"optional,explicit,tag:2"`
-	PubKeyAuth []byte      `asn1:"optional,explicit,tag:3"`
-	//ErrorCode  int         `asn1:"optional,explicit,tag:4"`
+	Version     int         `asn1:"explicit,tag:0"`
+	NegoTokens  []NegoToken `asn1:"optional,explicit,tag:1"`
+	AuthInfo    []byte      `asn1:"optional,explicit,tag:2"`
+	PubKeyAuth  []byte      `asn1:"optional,explicit,tag:3"`
+	ErrorCode   int         `asn1:"optional,explicit,tag:4"`
+	ClientNonce []byte      `asn1:"optional,explicit,tag:5"`
 }
 
 type TSCredentials struct {
