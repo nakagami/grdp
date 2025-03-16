@@ -453,10 +453,12 @@ func (n *NTLMv2) GetAuthenticateMessage(s []byte) (*AuthenticateMessage, *NTLMv2
 	md.Write(a)
 	ServerSealingKey := md.Sum(nil)
 
-	slog.Debug("GetAuthenticateMessage", "ClientSigningKey:", hex.EncodeToString(ClientSigningKey))
-	slog.Debug("GetAuthenticateMessage", "ServerSigningKey:", hex.EncodeToString(ServerSigningKey))
-	slog.Debug("GetAuthenticateMessage", "ClientSealingKey:", hex.EncodeToString(ClientSealingKey))
-	slog.Debug("GetAuthenticateMessage", "ServerSealingKey:", hex.EncodeToString(ServerSealingKey))
+	slog.Debug("GetAuthenticateMessage",
+		"ClientSigningKey", hex.EncodeToString(ClientSigningKey),
+		"ServerSigningKey", hex.EncodeToString(ServerSigningKey),
+		"ClientSealingKey", hex.EncodeToString(ClientSealingKey),
+		"ServerSealingKey:", hex.EncodeToString(ServerSealingKey),
+	)
 
 	encryptRC4, _ := rc4.NewCipher(ClientSealingKey)
 	decryptRC4, _ := rc4.NewCipher(ServerSealingKey)
