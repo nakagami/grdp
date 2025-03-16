@@ -431,7 +431,7 @@ func readDataPDU(r io.Reader) (*DataPDU, error) {
 		return nil, err
 	}
 	var d DataPDUData
-	slog.Debug("PDUType2 0x%02x", header.PDUType2)
+	slog.Debug("readDataPDU", "PDUType2", fmt.Sprintf("0x%02x", header.PDUType2))
 	switch header.PDUType2 {
 	case PDUTYPE2_SYNCHRONIZE:
 		d = &SynchronizeDataPDU{}
@@ -461,7 +461,7 @@ func readDataPDU(r io.Reader) (*DataPDU, error) {
 		}
 	}
 
-	slog.Debug("PDUType2<%s>: %+v", PduType2(d.Type2()), d)
+	slog.Debug("readDataPDU", "PDUType2", fmt.Sprintf("%v", PduType2(d.Type2()), d))
 	p := &DataPDU{
 		Header: header,
 		Data:   d,

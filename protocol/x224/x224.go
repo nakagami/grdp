@@ -200,7 +200,7 @@ func (x *X224) Write(b []byte) (n int, err error) {
 	}
 	buff.Write(b)
 
-	slog.Debug("x224 write:", hex.EncodeToString(buff.Bytes()))
+	slog.Debug("x224.Write", "data", hex.EncodeToString(buff.Bytes()))
 	return x.transport.Write(buff.Bytes())
 }
 
@@ -293,7 +293,7 @@ func (x *X224) recvConnectionConfirm(s []byte) {
 }
 
 func (x *X224) recvData(s []byte) {
-	slog.Debug("x224 recvData %v", hex.EncodeToString(s))
+	slog.Debug("x224.recvData", "data", hex.EncodeToString(s))
 	// x224 header takes 3 bytes
 	x.Emit("data", s[3:])
 }

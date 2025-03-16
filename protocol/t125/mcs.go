@@ -265,7 +265,7 @@ func NewMCSClient(t core.Transport) *MCSClient {
 }
 
 func (c *MCSClient) connect(selectedProtocol uint32) {
-	slog.Debug("MCS Connect Initial PDU with GCC Conference Create Request: serverSelectedProtocol", selectedProtocol)
+	slog.Debug("MCS Connect Initial PDU with GCC Conference Create Request", "serverSelectedProtocol", selectedProtocol)
 	c.clientCoreData.ServerSelectedProtocol = selectedProtocol
 
 	// sendConnectInitial
@@ -292,7 +292,7 @@ func (c *MCSClient) connect(selectedProtocol uint32) {
 }
 
 func (c *MCSClient) recvConnectResponse(s []byte) {
-	slog.Debug("mcs recvConnectResponse", hex.EncodeToString(s))
+	slog.Debug("mcs.recvConnectResponse", "data", hex.EncodeToString(s))
 	cResp, err := ReadConnectResponse(bytes.NewReader(s))
 	if err != nil {
 		c.Emit("error", errors.New(fmt.Sprintf("ReadConnectResponse %v", err)))
@@ -317,7 +317,7 @@ func (c *MCSClient) recvConnectResponse(s []byte) {
 			}
 		default:
 			err := errors.New(fmt.Sprintf("unhandle server gcc block %v %v", v, cResp.userData))
-			slog.Error(fmt.Sprintf("recvConnectResponse %v", err))
+			slog.Error("recvConnectResponse", "err", fmt.Sprintf("%v", err))
 			c.Emit("error", err)
 			return
 		}
@@ -347,7 +347,7 @@ func (c *MCSClient) sendAttachUserRequest() {
 }
 
 func (c *MCSClient) recvAttachUserConfirm(s []byte) {
-	slog.Debug("mcs recvAttachUserConfirm", hex.EncodeToString(s))
+	slog.Debug("mcs recvAttachUserConfirm", "data", hex.EncodeToString(s))
 	r := bytes.NewReader(s)
 
 	option, err := core.ReadUInt8(r)
@@ -458,12 +458,12 @@ func (c *MCSClient) recvData(s []byte) {
 		c.Emit("error", errors.New(fmt.Sprintf("mcs recvData get data error %v", err)))
 		return
 	}
-	slog.Debug("mcs emit channel", channelName)
+	slog.Debug("mcs emit channel", "name", channelName)
 	c.Emit(channelName, left)
 }
 
 func (c *MCSClient) recvChannelJoinConfirm(s []byte) {
-	slog.Debug("mcs recvChannelJoinConfirm", hex.EncodeToString(s))
+	slog.Debug("mcs recvChannelJoinConfirm", "s", hex.EncodeToString(s))
 	r := bytes.NewReader(s)
 	option, err := core.ReadUInt8(r)
 	if err != nil {

@@ -265,7 +265,7 @@ func (c *Client) sendInfoPkt() {
 }
 
 func (c *Client) recvLicenceInfo(s []byte) {
-	slog.Debug("sec recvLicenceInfo", hex.EncodeToString(s))
+	slog.Debug("sec recvLicenceInfo", "s", hex.EncodeToString(s))
 	r := bytes.NewReader(s)
 	if (readSecurityHeader(r).securityFlag & LICENSE_PKT) <= 0 {
 		c.Emit("error", errors.New("NODE_RDP_PROTOCOL_PDU_SEC_BAD_LICENSE_HEADER"))

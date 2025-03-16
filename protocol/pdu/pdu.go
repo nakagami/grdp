@@ -150,7 +150,7 @@ func NewClient(t core.Transport) *Client {
 }
 
 func (c *Client) connect(data *gcc.ClientCoreData, userId uint16, channelId uint16) {
-	slog.Debug("pdu connect:", userId, ",", channelId)
+	slog.Debug("pdu connect:", "userId", userId, "channelId", channelId)
 	c.clientCoreData = data
 	c.userId = userId
 	c.channelId = channelId
@@ -158,7 +158,7 @@ func (c *Client) connect(data *gcc.ClientCoreData, userId uint16, channelId uint
 }
 
 func (c *Client) recvDemandActivePDU(s []byte) {
-	slog.Debug("PDU recvDemandActivePDU", hex.EncodeToString(s))
+	slog.Debug("PDU recvDemandActivePDU", "s", hex.EncodeToString(s))
 	r := bytes.NewReader(s)
 	pdu, err := readPDU(r)
 	if err != nil {
@@ -395,7 +395,8 @@ func (c *Client) RecvFastPath(secFlag byte, s []byte) {
 		if err != nil {
 			return
 		}
-		slog.Debug("Code:", FastPathUpdateType(updateCode),
+		slog.Debug("RecvFalstPath",
+			"Code:", FastPathUpdateType(updateCode),
 			"compressionFlags:", compressionFlags,
 			"fragmentation:", fragmentation,
 			"size:", size, "len:", r.Len())
@@ -416,7 +417,7 @@ func (c *Client) RecvFastPath(secFlag byte, s []byte) {
 
 		p, err := readFastPathUpdatePDU(r, updateCode)
 		if err != nil || p == nil || p.Data == nil {
-			slog.Debug("readFastPathUpdatePDU:", err)
+			slog.Debug("readFastPathUpdatePDU", "err",  err)
 			return
 		}
 

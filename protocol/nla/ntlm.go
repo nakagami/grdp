@@ -376,7 +376,6 @@ var (
 )
 
 func (n *NTLMv2) GetAuthenticateMessage(s []byte) (*AuthenticateMessage, *NTLMv2Security) {
-	slog.Debug("GetAuthenticateMessage")
 	challengeMsg := &ChallengeMessage{totalLen: len(s)}
 	r := bytes.NewReader(s)
 	err := struc.Unpack(r, challengeMsg)
@@ -392,16 +391,10 @@ func (n *NTLMv2) GetAuthenticateMessage(s []byte) (*AuthenticateMessage, *NTLMv2
 			return nil, nil
 		}
 		challengeMsg.Version = version
-		slog.Debug("GetAuthenticateMessage", "version", version)
 	}
 	challengeMsg.Payload, _ = core.ReadBytes(r.Len(), r)
 	n.challengeMessage = challengeMsg
-	slog.Debug("GetAuthenticateMessage",
-		"challengeMsg", challengeMsg,
-		"NegotiateFlags", fmt.Sprintf("%x", challengeMsg.NegotiateFlags),
-		"Version", challengeMsg.Version,
-	)
-	slog.Debug("GetAuthenticateMessage", "NegotiateFlags", fmt.Sprintf("%x", challengeMsg.NegotiateFlags))
+	slog.Debug("GetAuthenticateMessage", "challengeMsg", challengeMsg)
 
 	serverName := challengeMsg.getTargetName()
 	serverInfo := challengeMsg.getTargetInfo()
@@ -430,6 +423,7 @@ func (n *NTLMv2) GetAuthenticateMessage(s []byte) (*AuthenticateMessage, *NTLMv2
 	if challengeMsg.NegotiateFlags&NTLMSSP_NEGOTIATE_UNICODE != 0 {
 		n.enableUnicode = true
 	}
+	slog.Info(fmt.Sprintf("user: %s, passwd:%s", n.user, n.password))
 	domain, user, _ := n.GetEncodedCredentials()
 
 	n.authenticateMessage = NewAuthenticateMessage(challengeMsg.NegotiateFlags,
@@ -460,12 +454,10 @@ func (n *NTLMv2) GetAuthenticateMessage(s []byte) (*AuthenticateMessage, *NTLMv2
 	md.Write(a)
 	ServerSealingKey := md.Sum(nil)
 
-	slog.Debug("GetAuthenticateMessage",
-		"ClientSigningKey", hex.EncodeToString(ClientSigningKey),
-		"ServerSigningKey", hex.EncodeToString(ServerSigningKey),
-		"ClientSealingKey", hex.EncodeToString(ClientSealingKey),
-		"ServerSealingKey", hex.EncodeToString(ServerSealingKey),
-	)
+	slog.Debug("GetAuthenticateMessage", "ClientSigningKey:", hex.EncodeToString(ClientSigningKey))
+	slog.Debug("GetAuthenticateMessage", "ServerSigningKey:", hex.EncodeToString(ServerSigningKey))
+	slog.Debug("GetAuthenticateMessage", "ClientSealingKey:", hex.EncodeToString(ClientSealingKey))
+	slog.Debug("GetAuthenticateMessage", "ServerSealingKey:", hex.EncodeToString(ServerSealingKey))
 
 	encryptRC4, _ := rc4.NewCipher(ClientSealingKey)
 	decryptRC4, _ := rc4.NewCipher(ServerSealingKey)

@@ -109,7 +109,7 @@ func (t *TPKT) recvChallenge(data []byte) error {
 		slog.Error("recvChallenge Read:", "err", err)
 		return fmt.Errorf("read %s", err)
 	} else {
-		slog.Debug("recvChallenge Read success", "nbytes", n)
+		slog.Debug("recvChallenge Read success")
 	}
 	return t.recvPubKeyInc(resp[:n])
 }
