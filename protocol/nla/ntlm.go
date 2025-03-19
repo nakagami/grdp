@@ -6,7 +6,6 @@ import (
 	"crypto/rc4"
 	"encoding/binary"
 	"encoding/hex"
-	"fmt"
 	"log/slog"
 	"time"
 
