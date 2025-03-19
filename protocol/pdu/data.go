@@ -7,8 +7,8 @@ import (
 	"io"
 	"log/slog"
 
-	"github.com/nakagami/grdp/core"
 	"github.com/lunixbochs/struc"
+	"github.com/nakagami/grdp/core"
 )
 
 const (
@@ -812,6 +812,7 @@ func readFastPathUpdatePDU(r io.Reader, code uint8) (*FastPathUpdatePDU, error) 
 		slog.Debug("Unknown FastPathPDU type 0x%x", code)
 		return f, errors.New(fmt.Sprintf("Unknown FastPathPDU type 0x%x", code))
 	}
+
 	if d != nil {
 		err = d.Unpack(r)
 		if err != nil {

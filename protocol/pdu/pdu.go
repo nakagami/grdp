@@ -417,7 +417,7 @@ func (c *Client) RecvFastPath(secFlag byte, s []byte) {
 
 		p, err := readFastPathUpdatePDU(r, updateCode)
 		if err != nil || p == nil || p.Data == nil {
-			slog.Debug("readFastPathUpdatePDU", "err",  err)
+			slog.Debug("readFastPathUpdatePDU", "err", err)
 			return
 		}
 

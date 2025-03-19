@@ -8,9 +8,9 @@ import (
 	"io"
 	"log/slog"
 
+	"github.com/lunixbochs/struc"
 	"github.com/nakagami/grdp/core"
 	"github.com/nakagami/grdp/protocol/t125/gcc"
-	"github.com/lunixbochs/struc"
 )
 
 type CapsType uint16
