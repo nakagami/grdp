@@ -87,7 +87,7 @@ func (t *TPKT) recvChallenge(data []byte) error {
 
 	// get pubkey
 	pubkey, err := t.Conn.TlsPubKey()
-	slog.Debug("recvChallenge", "pubkey", pubkey)
+	slog.Debug("recvChallenge", "pubkey", hex.EncodeToString(pubkey))
 
 	// NTLM Authentication Message Syntax
 	// https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-nlmp/907f519d-6217-45b1-b421-dca10fc8af0d

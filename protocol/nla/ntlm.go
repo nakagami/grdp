@@ -68,6 +68,30 @@ const (
 	NTLMSSP_NEGOTIATE_UNICODE                  = 0x00000001
 )
 
+var NegotiateFlagToString = map[uint32]string{
+	NTLMSSP_NEGOTIATE_56:                       "NTLMSSP_NEGOTIATE_56",
+	NTLMSSP_NEGOTIATE_KEY_EXCH:                 "NTLMSSP_NEGOTIATE_KEY_EXCH",
+	NTLMSSP_NEGOTIATE_128:                      "NTLMSSP_NEGOTIATE_128",
+	NTLMSSP_NEGOTIATE_VERSION:                  "NTLMSSP_NEGOTIATE_VERSION",
+	NTLMSSP_NEGOTIATE_TARGET_INFO:              "NTLMSSP_NEGOTIATE_TARGET_INFO",
+	NTLMSSP_REQUEST_NON_NT_SESSION_KEY:         "NTLMSSP_REQUEST_NON_NT_SESSION_KEY",
+	NTLMSSP_NEGOTIATE_IDENTIFY:                 "NTLMSSP_NEGOTIATE_IDENTIFY",
+	NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY: "NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY",
+	NTLMSSP_TARGET_TYPE_SERVER:                 "NTLMSSP_TARGET_TYPE_SERVER",
+	NTLMSSP_TARGET_TYPE_DOMAIN:                 "NTLMSSP_TARGET_TYPE_DOMAIN",
+	NTLMSSP_NEGOTIATE_ALWAYS_SIGN:              "NTLMSSP_NEGOTIATE_ALWAYS_SIGN",
+	NTLMSSP_NEGOTIATE_OEM_WORKSTATION_SUPPLIED: "NTLMSSP_NEGOTIATE_OEM_WORKSTATION_SUPPLIED",
+	NTLMSSP_NEGOTIATE_OEM_DOMAIN_SUPPLIED:      "NTLMSSP_NEGOTIATE_OEM_DOMAIN_SUPPLIED",
+	NTLMSSP_NEGOTIATE_NTLM:                     "NTLMSSP_NEGOTIATE_NTLM",
+	NTLMSSP_NEGOTIATE_LM_KEY:                   "NTLMSSP_NEGOTIATE_LM_KEY",
+	NTLMSSP_NEGOTIATE_DATAGRAM:                 "NTLMSSP_NEGOTIATE_DATAGRAM",
+	NTLMSSP_NEGOTIATE_SEAL:                     "NTLMSSP_NEGOTIATE_SEAL",
+	NTLMSSP_NEGOTIATE_SIGN:                     "NTLMSSP_NEGOTIATE_SIGN",
+	NTLMSSP_REQUEST_TARGET:                     "NTLMSSP_REQUEST_TARGET",
+	NTLM_NEGOTIATE_OEM:                         "NTLM_NEGOTIATE_OEM",
+	NTLMSSP_NEGOTIATE_UNICODE:                  "NTLMSSP_NEGOTIATE_UNICODE",
+}
+
 type NVersion struct {
 	ProductMajorVersion uint8   `struc:"little"`
 	ProductMinorVersion uint8   `struc:"little"`
@@ -135,6 +159,16 @@ type ChallengeMessage struct {
 	TargetInfoBufferOffset uint32   `struc:"little"`
 	Version                NVersion `struc:"skip"`
 	Payload                []byte   `struc:"skip"`
+}
+
+func (m *ChallengeMessage) NegotiateFlagNames() []string {
+	names := make([]string, 0, len(NegotiateFlagToString))
+	for k, v := range NegotiateFlagToString {
+		if (k & m.NegotiateFlags) != 0 {
+			names = append(names, v)
+		}
+	}
+	return names
 }
 
 func (m *ChallengeMessage) Serialize() []byte {
@@ -394,6 +428,7 @@ func (n *NTLMv2) GetAuthenticateMessage(s []byte) (*AuthenticateMessage, *NTLMv2
 	challengeMsg.Payload, _ = core.ReadBytes(r.Len(), r)
 	n.challengeMessage = challengeMsg
 	slog.Debug("GetAuthenticateMessage", "challengeMsg", challengeMsg)
+	slog.Debug("GetAuthenticateMessage", "NegotiateFlags", challengeMsg.NegotiateFlagNames())
 
 	serverName := challengeMsg.getTargetName()
 	serverInfo := challengeMsg.getTargetInfo()
