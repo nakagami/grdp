@@ -74,7 +74,7 @@ func EncodeDERTRequest(msgs []Message, authInfo []byte, pubKeyAuth []byte) []byt
 	if err != nil {
 		slog.Error(fmt.Sprintf("%v", err))
 	}
-	slog.Debug("EncodeDERTRequest", "result", result)
+	slog.Debug("EncodeDERTRequest", "result", hex.EncodeToString(result))
 	return result
 }
 
