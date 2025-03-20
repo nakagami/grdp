@@ -22,6 +22,7 @@ const (
 
 	WINDOWS_MAJOR_VERSION_5 = 0x05
 	WINDOWS_MAJOR_VERSION_6 = 0x06
+	WINDOWS_MAJOR_VERSION_10 = 10
 	NTLMSSP_REVISION_W2K3   = 0x0F
 )
 
@@ -103,9 +104,9 @@ type NVersion struct {
 
 func NewNVersion() NVersion {
 	return NVersion{
-		ProductMajorVersion: WINDOWS_MAJOR_VERSION_6,
+		ProductMajorVersion: WINDOWS_MAJOR_VERSION_10,
 		ProductMinorVersion: WINDOWS_MINOR_VERSION_0,
-		ProductBuild:        6002,
+		ProductBuild:        20348,
 		NTLMRevisionCurrent: NTLMSSP_REVISION_W2K3,
 	}
 }

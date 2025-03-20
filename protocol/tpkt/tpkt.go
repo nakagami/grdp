@@ -81,6 +81,9 @@ func (t *TPKT) recvChallenge(data []byte) error {
 		slog.Info("DecodeDERTRequest", "err", err)
 		return err
 	}
+	// NTLM Pass-Through Authentication
+	// https://learn.microsoft.com/ja-jp/openspecs/windows_protocols/ms-apds/5bfd942e-7da5-494d-a640-f269a0e3cc5d
+
 	// TSRequest
 	// https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-cssp/6aac4dea-08ef-47a6-8747-22ea7f6d8685
 	slog.Debug("recvChallenge", "tsreq", tsreq)
