@@ -2,6 +2,7 @@ package nla
 
 import (
 	"encoding/asn1"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 )
@@ -46,6 +47,8 @@ type TSSmartCardCreds struct {
 }
 
 func EncodeDERTRequest(msgs []Message, authInfo []byte, pubKeyAuth []byte) []byte {
+	slog.Debug("EncodeDERTRequest", "msgs", msgs, "authInfo", hex.EncodeToString(authInfo), "pubKeyAuth", hex.EncodeToString(pubKeyAuth))
+
 	req := TSRequest{
 		Version: 2,
 	}
@@ -71,6 +74,7 @@ func EncodeDERTRequest(msgs []Message, authInfo []byte, pubKeyAuth []byte) []byt
 	if err != nil {
 		slog.Error(fmt.Sprintf("%v", err))
 	}
+	slog.Debug("EncodeDERTRequest", "result", result)
 	return result
 }
 

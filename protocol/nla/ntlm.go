@@ -7,8 +7,8 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"log/slog"
-	"time"
 	"slices"
+	"time"
 
 	"github.com/lunixbochs/struc"
 	"github.com/nakagami/grdp/core"

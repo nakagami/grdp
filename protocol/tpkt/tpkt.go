@@ -99,8 +99,6 @@ func (t *TPKT) recvChallenge(data []byte) error {
 	encryptPubkey := ntlmSec.GssEncrypt(pubkey)
 	req := nla.EncodeDERTRequest([]nla.Message{authMsg}, nil, encryptPubkey)
 
-	slog.Error("nla.EncodeDERTRequest", "data", req)
-
 	_, err = t.Conn.Write(req)
 	if err != nil {
 		slog.Info("send AuthenticateMessage", "err", err)
