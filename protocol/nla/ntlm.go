@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"log/slog"
 	"time"
+	"slices"
 
 	"github.com/lunixbochs/struc"
 	"github.com/nakagami/grdp/core"
@@ -168,6 +169,7 @@ func (m *ChallengeMessage) NegotiateFlagNames() []string {
 			names = append(names, v)
 		}
 	}
+	slices.Sort(names)
 	return names
 }
 
