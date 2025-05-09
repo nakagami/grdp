@@ -265,7 +265,7 @@ func NewMCSClient(t core.Transport) *MCSClient {
 }
 
 func (c *MCSClient) connect(selectedProtocol uint32) {
-	slog.Debug("MCS Connect Initial PDU with GCC Conference Create Request", "serverSelectedProtocol", selectedProtocol)
+	slog.Debug("mcs connect", selectedProtocol)
 	c.clientCoreData.ServerSelectedProtocol = selectedProtocol
 
 	// sendConnectInitial
@@ -292,7 +292,8 @@ func (c *MCSClient) connect(selectedProtocol uint32) {
 }
 
 func (c *MCSClient) recvConnectResponse(s []byte) {
-	slog.Debug("mcs.recvConnectResponse", "data", hex.EncodeToString(s))
+	slog.Debug("mcs recvConnectResponse")
+	slog.Debug("------------------------ recvConnectResponse ---------------------------")
 	cResp, err := ReadConnectResponse(bytes.NewReader(s))
 	if err != nil {
 		c.Emit("error", errors.New(fmt.Sprintf("ReadConnectResponse %v", err)))
@@ -323,16 +324,18 @@ func (c *MCSClient) recvConnectResponse(s []byte) {
 		}
 	}
 
-	slog.Debug("mcs sendErectDomainRequest")
+	slog.Debug("------------------------ sendErectDomainRequest ---------------------------")
 	c.sendErectDomainRequest()
 
-	slog.Debug("mcs sendAttachUserRequest")
+	slog.Debug("------------------------ sendAttachUserRequest ---------------------------")
 	c.sendAttachUserRequest()
 
+	slog.Debug("------------------------ recvAttachUserConfirm ---------------------------")
 	c.transport.Once("data", c.recvAttachUserConfirm)
 }
 
 func (c *MCSClient) sendErectDomainRequest() {
+	slog.Debug("mcs sendErectDomainRequest")
 	buff := &bytes.Buffer{}
 	writeMCSPDUHeader(ERECT_DOMAIN_REQUEST, 0, buff)
 	per.WriteInteger(0, buff)
@@ -341,6 +344,7 @@ func (c *MCSClient) sendErectDomainRequest() {
 }
 
 func (c *MCSClient) sendAttachUserRequest() {
+	slog.Debug("mcs sendAttachUserRequest")
 	buff := &bytes.Buffer{}
 	writeMCSPDUHeader(ATTACH_USER_REQUEST, 0, buff)
 	c.transport.Write(buff.Bytes())
@@ -392,7 +396,7 @@ func (c *MCSClient) connectChannels() {
 		serverData := make([]interface{}, 0)
 		serverData = append(serverData, c.serverCoreData)
 		serverData = append(serverData, c.serverSecurityData)
-		slog.Debug("msc connectChannels callback to sec")
+		slog.Debug("---------------------- connected ---------------------------")
 		c.Emit("connect", clientData, serverData, c.userId, c.channels)
 		return
 	}
