@@ -351,7 +351,7 @@ func MakeConferenceCreateRequest(userData []byte) []byte {
 
 func ReadConferenceCreateResponse(data []byte) []interface{} {
 	// todo
-	slog.Debug("ReadConferenceCreateResponse todo")
+	slog.Debug("ReadConferenceCreateResponse todo", "len", len(data))
 	ret := make([]interface{}, 0)
 	return ret
 }

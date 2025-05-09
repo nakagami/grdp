@@ -152,7 +152,7 @@ func (t *TPKT) Write(data []byte) (n int, err error) {
 	core.WriteUInt8(0, buff)
 	core.WriteUInt16BE(uint16(len(data)+4), buff)
 	buff.Write(data)
-	slog.Info("tpkt Write", "data", hex.EncodeToString(buff.Bytes()))
+	slog.Info("tpkt Write", "len", len(buff.Bytes()), "data", hex.EncodeToString(buff.Bytes()))
 	return t.Conn.Write(buff.Bytes())
 }
 
