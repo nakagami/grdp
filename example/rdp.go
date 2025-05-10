@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/nakagami/rdp-client/plugin"
-	"github.com/nakagami/rdp-client/plugin/cliprdr"
 
 	"github.com/nakagami/rdp-client/core"
 	"github.com/nakagami/rdp-client/glog"
