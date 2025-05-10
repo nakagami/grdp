@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"unsafe"
 
-	"github.com/tomatome/grdp/glog"
+	"github.com/nakagami/rdp-client/glog"
 
-	"github.com/tomatome/grdp/core"
-	"github.com/tomatome/grdp/emission"
+	"github.com/nakagami/rdp-client/core"
+	"github.com/nakagami/rdp-client/emission"
 )
 
 const (

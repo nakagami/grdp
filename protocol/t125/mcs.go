@@ -8,17 +8,17 @@ import (
 	"io"
 	"reflect"
 
-	"github.com/tomatome/grdp/plugin/cliprdr"
-	"github.com/tomatome/grdp/plugin/rail"
+	"github.com/nakagami/rdp-client/plugin/cliprdr"
+	"github.com/nakagami/rdp-client/plugin/rail"
 
-	"github.com/tomatome/grdp/plugin/drdynvc"
+	"github.com/nakagami/rdp-client/plugin/drdynvc"
 
-	"github.com/tomatome/grdp/core"
-	"github.com/tomatome/grdp/emission"
-	"github.com/tomatome/grdp/glog"
-	"github.com/tomatome/grdp/protocol/t125/ber"
-	"github.com/tomatome/grdp/protocol/t125/gcc"
-	"github.com/tomatome/grdp/protocol/t125/per"
+	"github.com/nakagami/rdp-client/core"
+	"github.com/nakagami/rdp-client/emission"
+	"github.com/nakagami/rdp-client/glog"
+	"github.com/nakagami/rdp-client/protocol/t125/ber"
+	"github.com/nakagami/rdp-client/protocol/t125/gcc"
+	"github.com/nakagami/rdp-client/protocol/t125/per"
 )
 
 // take idea from https://github.com/Madnikulin50/gordp

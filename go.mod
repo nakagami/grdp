@@ -1,6 +1,8 @@
-module github.com/tomatome/grdp
+module github.com/nakagami/rdp-client
 
-go 1.18
+go 1.23.0
+
+toolchain go1.24.3
 
 require (
 	github.com/google/gxui v0.0.0-20151028112939-f85e0a97b3a4

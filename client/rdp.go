@@ -6,14 +6,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/tomatome/grdp/core"
-	"github.com/tomatome/grdp/plugin"
-	"github.com/tomatome/grdp/protocol/nla"
-	"github.com/tomatome/grdp/protocol/pdu"
-	"github.com/tomatome/grdp/protocol/sec"
-	"github.com/tomatome/grdp/protocol/t125"
-	"github.com/tomatome/grdp/protocol/tpkt"
-	"github.com/tomatome/grdp/protocol/x224"
+	"github.com/nakagami/rdp-client/core"
+	"github.com/nakagami/rdp-client/plugin"
+	"github.com/nakagami/rdp-client/protocol/nla"
+	"github.com/nakagami/rdp-client/protocol/pdu"
+	"github.com/nakagami/rdp-client/protocol/sec"
+	"github.com/nakagami/rdp-client/protocol/t125"
+	"github.com/nakagami/rdp-client/protocol/tpkt"
+	"github.com/nakagami/rdp-client/protocol/x224"
 )
 
 type RdpClient struct {
