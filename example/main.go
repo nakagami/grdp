@@ -8,8 +8,6 @@ import (
 	"os"
 	"runtime"
 	"strings"
-
-	"github.com/tomatome/grdp/glog"
 )
 
 var (
@@ -17,9 +15,9 @@ var (
 )
 
 func init() {
-	glog.SetLevel(glog.INFO)
-	logger := log.New(os.Stdout, "", 0)
-	glog.SetLogger(logger)
+//	glog.SetLevel(glog.INFO)
+//	logger := log.New(os.Stdout, "", 0)
+//	glog.SetLogger(logger)
 }
 
 func main() {
