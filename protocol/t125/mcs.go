@@ -8,7 +8,6 @@ import (
 	"io"
 	"reflect"
 
-	"github.com/nakagami/rdp-client/plugin/cliprdr"
 	"github.com/nakagami/rdp-client/plugin/rail"
 
 	"github.com/nakagami/rdp-client/plugin/drdynvc"
@@ -292,7 +291,8 @@ func (c *MCSClient) SetClientRemoteProgram() {
 }
 
 func (c *MCSClient) SetClientCliprdr() {
-	c.clientNetworkData.AddVirtualChannel(cliprdr.ChannelName, cliprdr.ChannelOption)
+	glog.Debug("mcs SetClientCliprdr")
+	// c.clientNetworkData.AddVirtualChannel(cliprdr.ChannelName, cliprdr.ChannelOption)
 }
 
 func (c *MCSClient) connect(selectedProtocol uint32) {
