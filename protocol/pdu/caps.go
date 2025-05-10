@@ -7,11 +7,11 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/tomatome/grdp/glog"
+	"github.com/nakagami/rdp-client/glog"
 
 	"github.com/lunixbochs/struc"
-	"github.com/tomatome/grdp/core"
-	"github.com/tomatome/grdp/protocol/t125/gcc"
+	"github.com/nakagami/rdp-client/core"
+	"github.com/nakagami/rdp-client/protocol/t125/gcc"
 )
 
 type CapsType uint16

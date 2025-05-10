@@ -9,7 +9,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/tomatome/grdp/glog"
+	"github.com/nakagami/rdp-client/glog"
 )
 
 var (

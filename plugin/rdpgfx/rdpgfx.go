@@ -3,9 +3,9 @@ package rdpgfx
 import (
 	"encoding/hex"
 
-	"github.com/tomatome/grdp/core"
-	"github.com/tomatome/grdp/glog"
-	"github.com/tomatome/grdp/plugin"
+	"github.com/nakagami/rdp-client/core"
+	"github.com/nakagami/rdp-client/glog"
+	"github.com/nakagami/rdp-client/plugin"
 )
 
 const (

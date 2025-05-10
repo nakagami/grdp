@@ -7,8 +7,8 @@ import (
 	"net"
 	"time"
 
-	"github.com/tomatome/grdp/glog"
-	"github.com/tomatome/grdp/protocol/rfb"
+	"github.com/nakagami/rdp-client/glog"
+	"github.com/nakagami/rdp-client/protocol/rfb"
 )
 
 type VncClient struct {

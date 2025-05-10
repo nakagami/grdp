@@ -4,7 +4,7 @@ import (
 	"encoding/hex"
 	"testing"
 
-	"github.com/tomatome/grdp/protocol/nla"
+	"github.com/nakagami/rdp-client/protocol/nla"
 )
 
 func TestEncodeDERTRequest(t *testing.T) {
