@@ -8,17 +8,13 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/tomatome/grdp/plugin"
-	"github.com/tomatome/grdp/plugin/cliprdr"
-
-	"github.com/tomatome/grdp/core"
-	"github.com/tomatome/grdp/glog"
-	"github.com/tomatome/grdp/protocol/nla"
-	"github.com/tomatome/grdp/protocol/pdu"
-	"github.com/tomatome/grdp/protocol/sec"
-	"github.com/tomatome/grdp/protocol/t125"
-	"github.com/tomatome/grdp/protocol/tpkt"
-	"github.com/tomatome/grdp/protocol/x224"
+	"github.com/nakagami/grdp/core"
+	"github.com/nakagami/grdp/protocol/nla"
+	"github.com/nakagami/grdp/protocol/pdu"
+	"github.com/nakagami/grdp/protocol/sec"
+	"github.com/nakagami/grdp/protocol/t125"
+	"github.com/nakagami/grdp/protocol/tpkt"
+	"github.com/nakagami/grdp/protocol/x224"
 )
 
 const (
@@ -38,10 +34,9 @@ type RdpClient struct {
 	mcs      *t125.MCSClient
 	sec      *sec.Client
 	pdu      *pdu.Client
-	channels *plugin.Channels
 }
 
-func NewRdpClient(host string, width, height int, logLevel glog.LEVEL) *RdpClient {
+func NewRdpClient(host string, width, height int) *RdpClient {
 	return &RdpClient{
 		Host:   host,
 		Width:  width,
@@ -60,27 +55,25 @@ func uiRdp(info *Info) (error, *RdpClient) {
 	runtime.GOMAXPROCS(runtime.NumCPU())
 
 	BitmapCH = make(chan []Bitmap, 500)
-	g := NewRdpClient(fmt.Sprintf("%s:%s", info.Ip, info.Port), info.Width, info.Height, glog.INFO)
+	g := NewRdpClient(fmt.Sprintf("%s:%s", info.Ip, info.Port), info.Width, info.Height)
 	g.info = info
 	err := g.Login()
 	if err != nil {
-		glog.Error("Login:", err)
+//		glog.Error("Login:", err)
 		return err, nil
 	}
-	cc := cliprdr.NewCliprdrClient()
-	g.channels.Register(cc)
 
 	g.pdu.On("error", func(e error) {
-		glog.Info("on error:", e)
+//		glog.Info("on error:", e)
 	}).On("close", func() {
 		err = errors.New("close")
-		glog.Info("on close")
+//		glog.Info("on close")
 	}).On("success", func() {
-		glog.Info("on success")
+//		glog.Info("on success")
 	}).On("ready", func() {
-		glog.Info("on ready")
+//		glog.Info("on ready")
 	}).On("bitmap", func(rectangles []pdu.BitmapData) {
-		glog.Info("Update Bitmap:", len(rectangles))
+//		glog.Info("Update Bitmap:", len(rectangles))
 		bs := make([]Bitmap, 0, 50)
 		for _, v := range rectangles {
 			IsCompress := v.IsCompress()
@@ -102,7 +95,7 @@ func uiRdp(info *Info) (error, *RdpClient) {
 
 func (g *RdpClient) Login() error {
 	domain, user, pwd := g.info.Domain, g.info.Username, g.info.Passwd
-	glog.Info("Connect:", g.Host, "with", domain+"\\"+user, ":", pwd)
+//	glog.Info("Connect:", g.Host, "with", domain+"\\"+user, ":", pwd)
 	conn, err := net.DialTimeout("tcp", g.Host, 3*time.Second)
 	if err != nil {
 		return fmt.Errorf("[dial err] %v", err)
@@ -113,7 +106,7 @@ func (g *RdpClient) Login() error {
 	g.mcs = t125.NewMCSClient(g.x224)
 	g.sec = sec.NewClient(g.mcs)
 	g.pdu = pdu.NewClient(g.sec)
-	g.channels = plugin.NewChannels(g.sec)
+	//g.channels = plugin.NewChannels(g.sec)
 
 	g.mcs.SetClientDesktop(uint16(g.Width), uint16(g.Height))
 	//clipboard
@@ -149,7 +142,7 @@ func (g *RdpClient) Login() error {
 }
 
 func (g *RdpClient) KeyUp(sc int, name string) {
-	glog.Debugf("KeyUp: 0x%x, name: %s", sc, name)
+//	glog.Debugf("KeyUp: 0x%x, name: %s", sc, name)
 
 	p := &pdu.ScancodeKeyEvent{}
 	p.KeyCode = uint16(sc)
@@ -157,7 +150,7 @@ func (g *RdpClient) KeyUp(sc int, name string) {
 	g.pdu.SendInputEvents(pdu.INPUT_EVENT_SCANCODE, []pdu.InputEventsInterface{p})
 }
 func (g *RdpClient) KeyDown(sc int, name string) {
-	glog.Debugf("KeyDown: 0x%x, name: %s", sc, name)
+//	glog.Debugf("KeyDown: 0x%x, name: %s", sc, name)
 
 	p := &pdu.ScancodeKeyEvent{}
 	p.KeyCode = uint16(sc)
@@ -165,7 +158,7 @@ func (g *RdpClient) KeyDown(sc int, name string) {
 }
 
 func (g *RdpClient) MouseMove(x, y int) {
-	glog.Debug("MouseMove", x, ":", y)
+//	glog.Debug("MouseMove", x, ":", y)
 	p := &pdu.PointerEvent{}
 	p.PointerFlags |= pdu.PTRFLAGS_MOVE
 	p.XPos = uint16(x)
@@ -174,7 +167,7 @@ func (g *RdpClient) MouseMove(x, y int) {
 }
 
 func (g *RdpClient) MouseWheel(scroll, x, y int) {
-	glog.Info("MouseWheel", x, ":", y)
+//	glog.Info("MouseWheel", x, ":", y)
 	p := &pdu.PointerEvent{}
 	p.PointerFlags |= pdu.PTRFLAGS_WHEEL
 	p.XPos = uint16(x)
@@ -183,7 +176,7 @@ func (g *RdpClient) MouseWheel(scroll, x, y int) {
 }
 
 func (g *RdpClient) MouseUp(button int, x, y int) {
-	glog.Debug("MouseUp", x, ":", y, ":", button)
+//	glog.Debug("MouseUp", x, ":", y, ":", button)
 	p := &pdu.PointerEvent{}
 
 	switch button {
@@ -202,7 +195,7 @@ func (g *RdpClient) MouseUp(button int, x, y int) {
 	g.pdu.SendInputEvents(pdu.INPUT_EVENT_MOUSE, []pdu.InputEventsInterface{p})
 }
 func (g *RdpClient) MouseDown(button int, x, y int) {
-	glog.Info("MouseDown:", x, ":", y, ":", button)
+//	glog.Info("MouseDown:", x, ":", y, ":", button)
 	p := &pdu.PointerEvent{}
 
 	p.PointerFlags |= pdu.PTRFLAGS_DOWN

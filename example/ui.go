@@ -10,13 +10,10 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/google/gxui/drivers/gl"
-
 	"github.com/google/gxui"
 	"github.com/google/gxui/samples/flags"
 	"github.com/google/gxui/themes/light"
 	"github.com/nakagami/grdp/core"
-	"github.com/nakagami/grdp/glog"
 )
 
 var (
@@ -256,7 +253,7 @@ func Bpp(BitsPerPixel uint16) (pixel int) {
 		pixel = 4
 
 	default:
-		glog.Error("invalid bitmap data format")
+//		glog.Error("invalid bitmap data format")
 	}
 	return
 }

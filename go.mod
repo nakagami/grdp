@@ -12,6 +12,7 @@ require (
 
 require (
 	github.com/go-gl/gl v0.0.0-20231021071112-07e5d0ea2e71 // indirect
+	github.com/go-gl/glfw/v3.3/glfw v0.0.0-20250301202403-da16c1255728 // indirect
 	github.com/gofrs/uuid v4.0.0+incompatible // indirect
 	github.com/golang/freetype v0.0.0-20170609003504-e2365dfdc4a0 // indirect
 	github.com/gomodule/redigo v1.8.4 // indirect
@@ -20,5 +21,7 @@ require (
 	github.com/gopherjs/gopherjs v1.17.2 // indirect
 	github.com/gorilla/websocket v1.4.2 // indirect
 	github.com/goxjs/gl v0.0.0-20230705020350-37525f4d9d35 // indirect
+	github.com/goxjs/glfw v0.0.0-20230704040236-622eb27e272a // indirect
 	golang.org/x/image v0.27.0 // indirect
+	honnef.co/go/js/dom v0.0.0-20250304181735-b5e52f05e89d // indirect
 )

@@ -11,7 +11,6 @@ import (
 	"time"
 
 	socketio "github.com/googollee/go-socket.io"
-	"github.com/nakagami/grdp/glog"
 	"github.com/nakagami/grdp/protocol/pdu"
 )
 
@@ -40,7 +39,7 @@ func socketIO() {
 		json.Unmarshal(v, &info)
 		fmt.Println(so.ID(), "logon infos:", info)
 
-		g := NewRdpClient(fmt.Sprintf("%s:%s", info.Ip, info.Port), info.Width, info.Height, glog.INFO)
+		g := NewRdpClient(fmt.Sprintf("%s:%s", info.Ip, info.Port), info.Width, info.Height)
 		g.info = &info
 		err := g.Login()
 		if err != nil {
@@ -61,18 +60,18 @@ func socketIO() {
 		}).On("ready", func() {
 			fmt.Println("on ready")
 		}).On("bitmap", func(rectangles []pdu.BitmapData) {
-			glog.Info(time.Now(), "on update Bitmap:", len(rectangles))
+//			glog.Info(time.Now(), "on update Bitmap:", len(rectangles))
 			bs := make([]Bitmap, 0, len(rectangles))
 			for _, v := range rectangles {
 				IsCompress := v.IsCompress()
 				data := v.BitmapDataStream
-				glog.Debug("data:", data)
+//				glog.Debug("data:", data)
 				if IsCompress {
 					//data = decompress(&v)
 					//IsCompress = false
 				}
 
-				glog.Debug(IsCompress, v.BitsPerPixel)
+//				glog.Debug(IsCompress, v.BitsPerPixel)
 				b := Bitmap{int(v.DestLeft), int(v.DestTop), int(v.DestRight), int(v.DestBottom),
 					int(v.Width), int(v.Height), int(v.BitsPerPixel), IsCompress, data}
 				so.Emit("rdp-bitmap", []Bitmap{b})
@@ -83,7 +82,7 @@ func socketIO() {
 	})
 
 	server.OnEvent("/", "mouse", func(so socketio.Conn, x, y uint16, button int, isPressed bool) {
-		glog.Info("mouse", x, ":", y, ":", button, ":", isPressed)
+//		glog.Info("mouse", x, ":", y, ":", button, ":", isPressed)
 		p := &pdu.PointerEvent{}
 		if isPressed {
 			p.PointerFlags |= pdu.PTRFLAGS_DOWN
@@ -108,7 +107,7 @@ func socketIO() {
 
 	//keyboard
 	server.OnEvent("/", "scancode", func(so socketio.Conn, button uint16, isPressed bool) {
-		glog.Info("scancode:", "button:", button, "isPressed:", isPressed)
+//		glog.Info("scancode:", "button:", button, "isPressed:", isPressed)
 
 		p := &pdu.ScancodeKeyEvent{}
 		p.KeyCode = button
@@ -122,7 +121,7 @@ func socketIO() {
 
 	//wheel
 	server.OnEvent("/", "wheel", func(so socketio.Conn, x, y, step uint16, isNegative, isHorizontal bool) {
-		glog.Info("wheel", x, ":", y, ":", step, ":", isNegative, ":", isHorizontal)
+//		glog.Info("wheel", x, ":", y, ":", step, ":", isNegative, ":", isHorizontal)
 		var p = &pdu.PointerEvent{}
 		if isHorizontal {
 			p.PointerFlags |= pdu.PTRFLAGS_HWHEEL
