@@ -1,89 +1,79 @@
+// main.go
 package main
 
 import (
 	"flag"
 	"fmt"
-	"log/slog"
+	"log"
 	"os"
+	"runtime"
 	"strings"
-	"sync"
-	"time"
 
-	"github.com/nakagami/grdp"
-	"github.com/nakagami/grdp/protocol/pdu"
+	"github.com/tomatome/grdp/glog"
 )
 
 var (
-	Host     string
-	User     string
-	Password string
-	Passfile string
+	server bool
 )
 
 func init() {
-	flag.StringVar(&Host, "host", "", "Target rdp server ip:port")
-	flag.StringVar(&User, "user", "Administrator", "Name of the client send to the server, [Domain\\]{User}")
-	flag.StringVar(&Password, "password", "", "Password")
-	flag.StringVar(&Passfile, "passfile", "", "Password file path")
-	flag.Parse()
-
-	if Host == "" || User == "" || (Password == "" && Passfile == "") {
-		flag.Usage()
-		os.Exit(0)
-	}
-	if Password == "" {
-		if body, err := os.ReadFile(Passfile); err != nil {
-			fmt.Printf("ERROR: Passfile read failed, %s\n", err)
-			os.Exit(1)
-		} else {
-			Password = strings.Trim(string(body), "\r\n")
-		}
-	}
+	glog.SetLevel(glog.INFO)
+	logger := log.New(os.Stdout, "", 0)
+	glog.SetLogger(logger)
 }
 
 func main() {
-	fmt.Printf("Show: Host=%s, User=%s, Password=********\n", Host, User)
-	fmt.Printf("---\n")
-	handler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})
-	slog.SetDefault(slog.New(handler))
+	flag.BoolVar(&server, "s", false, "web server")
+	flag.Parse()
 
-	client := grdp.NewClient(Host)
-	err := client.Login(User, Password)
-	if err != nil {
-		fmt.Printf("connect failed: %#v\n", err)
-		os.Exit(2)
-		return
+	runtime.GOMAXPROCS(runtime.NumCPU())
+	//web example
+	if server {
+		socketIO()
+	} else {
+		//client example
+		StartUI(1520, 1080)
 	}
-	defer client.Close()
+}
 
-	fmt.Printf("connected!\n")
+type Screen struct {
+	Height int `json:"height"`
+	Width  int `json:"width"`
+}
 
-	sig := make(chan struct{})
-	once := new(sync.Once)
-	done := func() {
-		once.Do(func() {
-			close(sig)
-		})
+type Info struct {
+	Domain   string `json:"domain"`
+	Ip       string `json:"ip"`
+	Port     string `json:"port"`
+	Username string `json:"username"`
+	Passwd   string `json:"password"`
+	Screen   `json:"screen"`
+}
+
+func NewInfo(ip, user, passwd string) (error, *Info) {
+	var i Info
+	if ip == "" || user == "" || passwd == "" {
+		return fmt.Errorf("Must ip/user/passwd"), nil
+	}
+	t := strings.Split(ip, ":")
+	i.Ip = t[0]
+	i.Port = "3389"
+	if len(t) > 1 {
+		i.Port = t[1]
+	}
+	if strings.Index(user, "\\") != -1 {
+		t = strings.Split(user, "\\")
+		i.Domain = t[0]
+		i.Username = t[len(t)-1]
+	} else if strings.Index(user, "/") != -1 {
+		t = strings.Split(user, "/")
+		i.Domain = t[0]
+		i.Username = t[len(t)-1]
+	} else {
+		i.Username = user
 	}
 
-	client.OnError(func(e error) {
-		fmt.Printf("%s Error = %#v\n", time.Now(), e)
-		done()
-	})
-	client.OnSuccess(func() {
-		fmt.Printf("%s Success\n", time.Now())
-	})
-	client.OnReady(func() {
-		fmt.Printf("%s Ready\n", time.Now())
-	})
-	client.OnClose(func() {
-		fmt.Printf("%s Close\n", time.Now())
-		done()
-	})
-	client.OnUpdate(func(_ []pdu.BitmapData) {
-		fmt.Printf("%s Update\n", time.Now())
-	})
+	i.Passwd = passwd
 
-	fmt.Printf("waiting...\n")
-	<-sig
+	return nil, &i
 }
