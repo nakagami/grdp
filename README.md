@@ -1,6 +1,6 @@
 # Golang Remote Desktop Protocol
 
-grdp is a pure Golang implementation of the Microsoft RDP (Remote Desktop Protocol) protocol (**client side authorization only**).
+grdp is a pure Golang implementation of the Microsoft RDP (Remote Desktop Protocol) protocol client
 
 Forked from [tomatome/grdp](https://github.com/tomatome/grdp)
 
@@ -14,16 +14,16 @@ For example clipboard.
 ## TODO
 
 - Ubuntu RDP server support
-- RDP client
+- RDP client (Currently, there is only an example that demonstrates the library's functionality).
 
 ## Build and start example
 
-::
-
-   git clone https://github.com/nakagami/grdp
-   cd grdp/example
-   go build .
-   ./example
+```
+git clone https://github.com/nakagami/grdp
+cd grdp/example
+go build .
+./example
+```
 
 ## Take ideas from
 
