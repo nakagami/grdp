@@ -138,7 +138,7 @@ func (g *RdpClient) Login() error {
 	//g.pdu.SetFastPathSender(g.tpkt)
 
 	//g.x224.SetRequestedProtocol(x224.PROTOCOL_RDP)
-	g.x224.SetRequestedProtocol(x224.PROTOCOL_SSL)
+	g.x224.SetRequestedProtocol(x224.PROTOCOL_SSL | x224.PROTOCOL_HYBRID)
 
 	err = g.x224.Connect()
 	if err != nil {
