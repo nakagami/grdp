@@ -2,10 +2,8 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"net"
-	"runtime"
 	"time"
 
 	"github.com/nakagami/grdp/plugin"
@@ -55,49 +53,6 @@ func BitmapDecompress(bitmap *pdu.BitmapData) []byte {
 	return core.Decompress(bitmap.BitmapDataStream, int(bitmap.Width), int(bitmap.Height), Bpp(bitmap.BitsPerPixel))
 }
 
-func uiRdp(info *Info) (error, *RdpClient) {
-	runtime.GOMAXPROCS(runtime.NumCPU())
-
-	BitmapCH = make(chan []Bitmap, 500)
-	g := NewRdpClient(fmt.Sprintf("%s:%s", info.Ip, info.Port), info.Width, info.Height, glog.INFO)
-	g.info = info
-	err := g.Login()
-	if err != nil {
-		glog.Error("Login:", err)
-		return err, nil
-	}
-//	cc := cliprdr.NewCliprdrClient()
-//	g.channels.Register(cc)
-
-	g.pdu.On("error", func(e error) {
-		glog.Info("on error:", e)
-	}).On("close", func() {
-		err = errors.New("close")
-		glog.Info("on close")
-	}).On("success", func() {
-		glog.Info("on success")
-	}).On("ready", func() {
-		glog.Info("on ready")
-	}).On("bitmap", func(rectangles []pdu.BitmapData) {
-		glog.Info("Update Bitmap:", len(rectangles))
-		bs := make([]Bitmap, 0, 50)
-		for _, v := range rectangles {
-			IsCompress := v.IsCompress()
-			data := v.BitmapDataStream
-			if IsCompress {
-				data = BitmapDecompress(&v)
-				IsCompress = false
-			}
-
-			b := Bitmap{int(v.DestLeft), int(v.DestTop), int(v.DestRight), int(v.DestBottom),
-				int(v.Width), int(v.Height), Bpp(v.BitsPerPixel), IsCompress, data}
-			bs = append(bs, b)
-		}
-		ui_paint_bitmap(bs)
-	})
-
-	return nil, g
-}
 
 func (g *RdpClient) Login() error {
 	domain, user, pwd := g.info.Domain, g.info.Username, g.info.Passwd
