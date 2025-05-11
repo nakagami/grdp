@@ -49,7 +49,7 @@ func socketIO() {
 			return
 		}
 		so.SetContext(g)
-		g.pdu.On("error", func(e error) {
+		g.PDU().On("error", func(e error) {
 			fmt.Println("on error:", e)
 			so.Emit("rdp-error", "{\"code\":1,\"message\":\""+e.Error()+"\"}")
 			//wg.Done()
@@ -103,7 +103,7 @@ func socketIO() {
 		p.XPos = x
 		p.YPos = y
 		g := so.Context().(*grdp.RdpClient)
-		g.pdu.SendInputEvents(pdu.INPUT_EVENT_MOUSE, []pdu.InputEventsInterface{p})
+		g.PDU().SendInputEvents(pdu.INPUT_EVENT_MOUSE, []pdu.InputEventsInterface{p})
 	})
 
 	//keyboard
@@ -116,7 +116,7 @@ func socketIO() {
 			p.KeyboardFlags |= pdu.KBDFLAGS_RELEASE
 		}
 		g := so.Context().(*grdp.RdpClient)
-		g.pdu.SendInputEvents(pdu.INPUT_EVENT_SCANCODE, []pdu.InputEventsInterface{p})
+		g.PDU().SendInputEvents(pdu.INPUT_EVENT_SCANCODE, []pdu.InputEventsInterface{p})
 
 	})
 
@@ -138,7 +138,7 @@ func socketIO() {
 		p.XPos = x
 		p.YPos = y
 		g := so.Context().(*grdp.RdpClient)
-		g.pdu.SendInputEvents(pdu.INPUT_EVENT_SCANCODE, []pdu.InputEventsInterface{p})
+		g.PDU().SendInputEvents(pdu.INPUT_EVENT_SCANCODE, []pdu.InputEventsInterface{p})
 	})
 
 	server.OnError("/", func(so socketio.Conn, err error) {

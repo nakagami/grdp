@@ -42,7 +42,7 @@ func uiRdp(info *Info) (error, *grdp.RdpClient) {
 	//	cc := cliprdr.NewCliprdrClient()
 	//	g.channels.Register(cc)
 
-	g.pdu.On("error", func(e error) {
+	g.PDU().On("error", func(e error) {
 		glog.Info("on error:", e)
 	}).On("close", func() {
 		err = errors.New("close")
