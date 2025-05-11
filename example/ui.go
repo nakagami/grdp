@@ -29,11 +29,11 @@ var (
 	width, height int
 )
 
-func uiRdp(info *Info) (error, *RdpClient) {
+func uiRdp(info *Info) (error, *grdp.RdpClient) {
 	runtime.GOMAXPROCS(runtime.NumCPU())
 
 	BitmapCH = make(chan []Bitmap, 500)
-	g := NewRdpClient(fmt.Sprintf("%s:%s", info.Ip, info.Port), info.Width, info.Height, info.Domain, info.Username, info.Password)
+	g := grdp.NewRdpClient(fmt.Sprintf("%s:%s", info.Ip, info.Port), info.Width, info.Height, info.Domain, info.Username, info.Password)
 	err := g.Login()
 	if err != nil {
 		glog.Error("Login:", err)
@@ -58,12 +58,12 @@ func uiRdp(info *Info) (error, *RdpClient) {
 			IsCompress := v.IsCompress()
 			data := v.BitmapDataStream
 			if IsCompress {
-				data = BitmapDecompress(&v)
+				data = grdp.BitmapDecompress(&v)
 				IsCompress = false
 			}
 
 			b := Bitmap{int(v.DestLeft), int(v.DestTop), int(v.DestRight), int(v.DestBottom),
-				int(v.Width), int(v.Height), Bpp(v.BitsPerPixel), IsCompress, data}
+				int(v.Width), int(v.Height), grdp.Bpp(v.BitsPerPixel), IsCompress, data}
 			bs = append(bs, b)
 		}
 		ui_paint_bitmap(bs)
