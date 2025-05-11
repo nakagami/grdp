@@ -266,11 +266,7 @@ func uiClient(info *Info) (error, Control) {
 		err error
 		g   Control
 	)
-	if true {
-		err, g = uiRdp(info)
-	} else {
-		err, g = uiVnc(info)
-	}
+	err, g = uiRdp(info)
 
 	return err, g
 }
