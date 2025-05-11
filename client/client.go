@@ -7,18 +7,12 @@ import (
 
 	"github.com/nakagami/grdp/glog"
 	"github.com/nakagami/grdp/protocol/pdu"
-	"github.com/nakagami/grdp/protocol/rfb"
 )
 
 const (
 	CLIP_OFF = 0
 	CLIP_IN  = 0x1
 	CLIP_OUT = 0x2
-)
-
-const (
-	TC_RDP = 0
-	TC_VNC = 1
 )
 
 type Control interface {
@@ -60,12 +54,7 @@ func NewClient(host, user, passwd string, t int, s *Setting) *Client {
 		setting: s,
 	}
 
-	switch t {
-	case TC_VNC:
-		c.ctl = newVncClient(s)
-	default:
-		c.ctl = newRdpClient(s)
-	}
+	c.ctl = newRdpClient(s)
 
 	s.SetLogLevel()
 	return c
@@ -108,27 +97,17 @@ func (c *Client) OnReady(f func()) {
 func (c *Client) OnBitmap(f func([]Bitmap)) {
 	f1 := func(data interface{}) {
 		bs := make([]Bitmap, 0, 50)
-		if c.tc == TC_VNC {
-			br := data.(*rfb.BitRect)
-			for _, v := range br.Rects {
-				b := Bitmap{int(v.Rect.X), int(v.Rect.Y), int(v.Rect.X + v.Rect.Width), int(v.Rect.Y + v.Rect.Height),
-					int(v.Rect.Width), int(v.Rect.Height),
-					Bpp(uint16(br.Pf.BitsPerPixel)), false, v.Data}
-				bs = append(bs, b)
+		for _, v := range data.([]pdu.BitmapData) {
+			IsCompress := v.IsCompress()
+			stream := v.BitmapDataStream
+			if IsCompress {
+				stream = bitmapDecompress(&v)
+				IsCompress = false
 			}
-		} else {
-			for _, v := range data.([]pdu.BitmapData) {
-				IsCompress := v.IsCompress()
-				stream := v.BitmapDataStream
-				if IsCompress {
-					stream = bitmapDecompress(&v)
-					IsCompress = false
-				}
 
-				b := Bitmap{int(v.DestLeft), int(v.DestTop), int(v.DestRight), int(v.DestBottom),
-					int(v.Width), int(v.Height), Bpp(v.BitsPerPixel), IsCompress, stream}
-				bs = append(bs, b)
-			}
+			b := Bitmap{int(v.DestLeft), int(v.DestTop), int(v.DestRight), int(v.DestBottom),
+				int(v.Width), int(v.Height), Bpp(v.BitsPerPixel), IsCompress, stream}
+			bs = append(bs, b)
 		}
 		f(bs)
 	}
