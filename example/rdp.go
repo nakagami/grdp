@@ -29,7 +29,9 @@ type RdpClient struct {
 	Host     string // ip:port
 	Width    int
 	Height   int
-	info     *Info
+	Domain   string
+	Username string
+	Password string
 	tpkt     *tpkt.TPKT
 	x224     *x224.X224
 	mcs      *t125.MCSClient
@@ -38,11 +40,14 @@ type RdpClient struct {
 	channels *plugin.Channels
 }
 
-func NewRdpClient(host string, width, height int, logLevel glog.LEVEL) *RdpClient {
+func NewRdpClient(host string, width, height int, domain, username, password string) *RdpClient {
 	return &RdpClient{
-		Host:   host,
-		Width:  width,
-		Height: height,
+		Host:     host,
+		Width:    width,
+		Height:   height,
+		Domain:   domain,
+		Username: username,
+		Password: password,
 	}
 }
 func (g *RdpClient) SetRequestedProtocol(p uint32) {
@@ -53,9 +58,8 @@ func BitmapDecompress(bitmap *pdu.BitmapData) []byte {
 	return core.Decompress(bitmap.BitmapDataStream, int(bitmap.Width), int(bitmap.Height), Bpp(bitmap.BitsPerPixel))
 }
 
-
 func (g *RdpClient) Login() error {
-	domain, user, pwd := g.info.Domain, g.info.Username, g.info.Passwd
+	domain, user, pwd := g.Domain, g.Username, g.Password
 	glog.Info("Connect:", g.Host, "with", domain+"\\"+user, ":", pwd)
 	conn, err := net.DialTimeout("tcp", g.Host, 3*time.Second)
 	if err != nil {
