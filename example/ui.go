@@ -16,6 +16,8 @@ import (
 	"github.com/google/gxui"
 	"github.com/google/gxui/samples/flags"
 	"github.com/google/gxui/themes/light"
+
+	"github.com/nakagami/grdp"
 	"github.com/nakagami/grdp/core"
 	"github.com/nakagami/grdp/glog"
 	"github.com/nakagami/grdp/protocol/pdu"
@@ -280,26 +282,6 @@ type Bitmap struct {
 	BitsPerPixel int    `json:"bitsPerPixel"`
 	IsCompress   bool   `json:"isCompress"`
 	Data         []byte `json:"data"`
-}
-
-func Bpp(BitsPerPixel uint16) (pixel int) {
-	switch BitsPerPixel {
-	case 15:
-		pixel = 1
-
-	case 16:
-		pixel = 2
-
-	case 24:
-		pixel = 3
-
-	case 32:
-		pixel = 4
-
-	default:
-		glog.Error("invalid bitmap data format")
-	}
-	return
 }
 
 func Hex2Dec(val string) int {

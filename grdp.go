@@ -46,6 +46,26 @@ func (g *RdpClient) SetRequestedProtocol(p uint32) {
 	g.x224.SetRequestedProtocol(p)
 }
 
+func Bpp(BitsPerPixel uint16) (pixel int) {
+    switch BitsPerPixel {
+    case 15:
+        pixel = 1
+
+    case 16:
+        pixel = 2
+
+    case 24:
+        pixel = 3
+
+    case 32:
+        pixel = 4
+
+    default:
+        glog.Error("invalid bitmap data format")
+    }
+    return
+}
+
 func BitmapDecompress(bitmap *pdu.BitmapData) []byte {
 	return core.Decompress(bitmap.BitmapDataStream, int(bitmap.Width), int(bitmap.Height), Bpp(bitmap.BitsPerPixel))
 }
