@@ -18,13 +18,6 @@ import (
 	"github.com/nakagami/grdp/protocol/x224"
 )
 
-const (
-	PROTOCOL_RDP       = x224.PROTOCOL_RDP
-	PROTOCOL_SSL       = x224.PROTOCOL_SSL
-	PROTOCOL_HYBRID    = x224.PROTOCOL_HYBRID
-	PROTOCOL_HYBRID_EX = x224.PROTOCOL_HYBRID_EX
-)
-
 type RdpClient struct {
 	Host     string // ip:port
 	Width    int
