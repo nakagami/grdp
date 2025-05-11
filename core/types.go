@@ -1,6 +1,6 @@
 package core
 
-import "github.com/nakagami/rdp-client/emission"
+import "github.com/nakagami/grdp/emission"
 
 type Transport interface {
 	Read(b []byte) (n int, err error)

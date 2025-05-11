@@ -5,9 +5,9 @@ import (
 	"encoding/hex"
 	"io"
 
-	"github.com/nakagami/rdp-client/core"
-	"github.com/nakagami/rdp-client/glog"
-	"github.com/nakagami/rdp-client/plugin"
+	"github.com/nakagami/grdp/core"
+	"github.com/nakagami/grdp/glog"
+	"github.com/nakagami/grdp/plugin"
 )
 
 const (

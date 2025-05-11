@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/nakagami/rdp-client/glog"
+	"github.com/nakagami/grdp/glog"
 
-	"github.com/nakagami/rdp-client/core"
+	"github.com/nakagami/grdp/core"
 )
 
 type ControlFlag uint8

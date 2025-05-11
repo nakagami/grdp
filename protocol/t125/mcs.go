@@ -8,16 +8,16 @@ import (
 	"io"
 	"reflect"
 
-	"github.com/nakagami/rdp-client/plugin/rail"
+	"github.com/nakagami/grdp/plugin/rail"
 
-	"github.com/nakagami/rdp-client/plugin/drdynvc"
+	"github.com/nakagami/grdp/plugin/drdynvc"
 
-	"github.com/nakagami/rdp-client/core"
-	"github.com/nakagami/rdp-client/emission"
-	"github.com/nakagami/rdp-client/glog"
-	"github.com/nakagami/rdp-client/protocol/t125/ber"
-	"github.com/nakagami/rdp-client/protocol/t125/gcc"
-	"github.com/nakagami/rdp-client/protocol/t125/per"
+	"github.com/nakagami/grdp/core"
+	"github.com/nakagami/grdp/emission"
+	"github.com/nakagami/grdp/glog"
+	"github.com/nakagami/grdp/protocol/t125/ber"
+	"github.com/nakagami/grdp/protocol/t125/gcc"
+	"github.com/nakagami/grdp/protocol/t125/per"
 )
 
 // take idea from https://github.com/Madnikulin50/gordp

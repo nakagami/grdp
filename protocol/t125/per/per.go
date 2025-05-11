@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"io"
 
-	"github.com/nakagami/rdp-client/glog"
+	"github.com/nakagami/grdp/glog"
 
-	"github.com/nakagami/rdp-client/core"
+	"github.com/nakagami/grdp/core"
 )
 
 func ReadEnumerates(r io.Reader) (uint8, error) {

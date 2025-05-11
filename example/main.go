@@ -9,7 +9,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/nakagami/rdp-client/glog"
+	"github.com/nakagami/grdp/glog"
 )
 
 var (
