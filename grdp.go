@@ -118,6 +118,10 @@ func (g *RdpClient) Login() error {
 	return nil
 }
 
+func (g *RdpClient) PDU() *pdu.Client {
+    return g.pdu
+}
+
 func (g *RdpClient) KeyUp(sc int, name string) {
 	glog.Debugf("KeyUp: 0x%x, name: %s", sc, name)
 
