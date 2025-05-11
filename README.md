@@ -2,24 +2,28 @@
 
 grdp is a pure Golang implementation of the Microsoft RDP (Remote Desktop Protocol) protocol (**client side authorization only**).
 
-Forked from [icodeface/grdp](https://github.com/icodeface/grdp)
+Forked from [tomatome/grdp](https://github.com/tomatome/grdp)
 
-## Status
+## Unsupported feature
 
-**The project is under development and not finished yet.**
+Remove VNC client feature.
 
-* [x] Standard RDP Authentication
-* [x] SSL Authentication
-* [x] NTLMv2 Authentication
-* [x] Windows Clipboard
-* [ ] RDP Client(ugly)
-* [ ] VNC Client(unfinished)
+Remove features that work only on certain platforms.
+For example clipboard.
 
-## Example
+## TODO
 
-1. build in example dir on linux or windows
-2. start example on port 8088
-3. http://localhost:8088
+- Ubuntu RDP server support
+- RDP client
+
+## Build and start example
+
+::
+
+   git clone https://github.com/nakagami/grdp
+   cd grdp/example
+   go build .
+   ./example
 
 ## Take ideas from
 
