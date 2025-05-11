@@ -1,5 +1,4 @@
-// main.go
-package main
+package grdp
 
 import (
 	"fmt"
