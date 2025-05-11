@@ -15,8 +15,8 @@ import (
 	"github.com/google/gxui"
 	"github.com/google/gxui/samples/flags"
 	"github.com/google/gxui/themes/light"
-	"github.com/nakagami/rdp-client/core"
-	"github.com/nakagami/rdp-client/glog"
+	"github.com/nakagami/grdp/core"
+	"github.com/nakagami/grdp/glog"
 )
 
 var (

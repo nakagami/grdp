@@ -4,7 +4,7 @@ import (
 	"encoding/hex"
 	"testing"
 
-	"github.com/nakagami/rdp-client/protocol/nla"
+	"github.com/nakagami/grdp/protocol/nla"
 )
 
 func TestNTOWFv2(t *testing.T) {

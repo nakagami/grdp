@@ -14,14 +14,14 @@ import (
 
 	"github.com/lunixbochs/struc"
 
-	"github.com/nakagami/rdp-client/protocol/nla"
+	"github.com/nakagami/grdp/protocol/nla"
 
-	"github.com/nakagami/rdp-client/core"
-	"github.com/nakagami/rdp-client/emission"
-	"github.com/nakagami/rdp-client/glog"
-	"github.com/nakagami/rdp-client/protocol/lic"
-	"github.com/nakagami/rdp-client/protocol/t125"
-	"github.com/nakagami/rdp-client/protocol/t125/gcc"
+	"github.com/nakagami/grdp/core"
+	"github.com/nakagami/grdp/emission"
+	"github.com/nakagami/grdp/glog"
+	"github.com/nakagami/grdp/protocol/lic"
+	"github.com/nakagami/grdp/protocol/t125"
+	"github.com/nakagami/grdp/protocol/t125/gcc"
 )
 
 /**

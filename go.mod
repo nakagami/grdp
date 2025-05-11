@@ -1,4 +1,4 @@
-module github.com/nakagami/rdp-client
+module github.com/nakagami/grdp
 
 go 1.23.0
 
