@@ -11,6 +11,7 @@ import (
 	"time"
 
 	socketio "github.com/googollee/go-socket.io"
+	"github.com/nakagami/grdp"
 	"github.com/nakagami/grdp/glog"
 	"github.com/nakagami/grdp/protocol/pdu"
 )
@@ -40,7 +41,7 @@ func socketIO() {
 		json.Unmarshal(v, &info)
 		fmt.Println(so.ID(), "logon infos:", info)
 
-		g := NewRdpClient(fmt.Sprintf("%s:%s", info.Ip, info.Port), info.Width, info.Height, info.Domain, info.Username, info.Password)
+		g := grdp.NewRdpClient(fmt.Sprintf("%s:%s", info.Ip, info.Port), info.Width, info.Height, info.Domain, info.Username, info.Password)
 		err := g.Login()
 		if err != nil {
 			fmt.Println("Login:", err)
@@ -101,7 +102,7 @@ func socketIO() {
 
 		p.XPos = x
 		p.YPos = y
-		g := so.Context().(*RdpClient)
+		g := so.Context().(*grdp.RdpClient)
 		g.pdu.SendInputEvents(pdu.INPUT_EVENT_MOUSE, []pdu.InputEventsInterface{p})
 	})
 
@@ -114,7 +115,7 @@ func socketIO() {
 		if !isPressed {
 			p.KeyboardFlags |= pdu.KBDFLAGS_RELEASE
 		}
-		g := so.Context().(*RdpClient)
+		g := so.Context().(*grdp.RdpClient)
 		g.pdu.SendInputEvents(pdu.INPUT_EVENT_SCANCODE, []pdu.InputEventsInterface{p})
 
 	})
@@ -136,7 +137,7 @@ func socketIO() {
 		p.PointerFlags |= (step & pdu.WheelRotationMask)
 		p.XPos = x
 		p.YPos = y
-		g := so.Context().(*RdpClient)
+		g := so.Context().(*grdp.RdpClient)
 		g.pdu.SendInputEvents(pdu.INPUT_EVENT_SCANCODE, []pdu.InputEventsInterface{p})
 	})
 
@@ -145,9 +146,9 @@ func socketIO() {
 			return
 		}
 		fmt.Println("error:", err)
-		g := so.Context().(*RdpClient)
+		g := so.Context().(*grdp.RdpClient)
 		if g != nil {
-			g.tpkt.Close()
+			g.Close()
 		}
 		so.Close()
 	})
@@ -159,9 +160,9 @@ func socketIO() {
 		fmt.Println("OnDisconnect:", s)
 		so.Emit("rdp-error", "{code:1,message:"+s+"}")
 
-		g := so.Context().(*RdpClient)
+		g := so.Context().(*grdp.RdpClient)
 		if g != nil {
-			g.tpkt.Close()
+			g.Close()
 		}
 		so.Close()
 	})
