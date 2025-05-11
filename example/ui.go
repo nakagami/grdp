@@ -2,7 +2,7 @@
 package main
 
 import (
-    "errors"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -31,15 +31,14 @@ func uiRdp(info *Info) (error, *RdpClient) {
 	runtime.GOMAXPROCS(runtime.NumCPU())
 
 	BitmapCH = make(chan []Bitmap, 500)
-	g := NewRdpClient(fmt.Sprintf("%s:%s", info.Ip, info.Port), info.Width, info.Height, glog.INFO)
-	g.info = info
+	g := NewRdpClient(fmt.Sprintf("%s:%s", info.Ip, info.Port), info.Width, info.Height, info.Domain, info.Username, info.Password)
 	err := g.Login()
 	if err != nil {
 		glog.Error("Login:", err)
 		return err, nil
 	}
-//	cc := cliprdr.NewCliprdrClient()
-//	g.channels.Register(cc)
+	//	cc := cliprdr.NewCliprdrClient()
+	//	g.channels.Register(cc)
 
 	g.pdu.On("error", func(e error) {
 		glog.Info("on error:", e)

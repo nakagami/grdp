@@ -40,8 +40,7 @@ func socketIO() {
 		json.Unmarshal(v, &info)
 		fmt.Println(so.ID(), "logon infos:", info)
 
-		g := NewRdpClient(fmt.Sprintf("%s:%s", info.Ip, info.Port), info.Width, info.Height, glog.INFO)
-		g.info = &info
+		g := NewRdpClient(fmt.Sprintf("%s:%s", info.Ip, info.Port), info.Width, info.Height, info.Domain, info.Username, info.Password)
 		err := g.Login()
 		if err != nil {
 			fmt.Println("Login:", err)
