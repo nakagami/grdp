@@ -121,6 +121,7 @@ func (m *NegotiateMessage) Serialize() []byte {
 }
 
 type ChallengeMessage struct {
+	totalLen               int
 	Signature              []byte   `struc:"[8]byte"`
 	MessageType            uint32   `struc:"little"`
 	TargetNameLen          uint16   `struc:"little"`
@@ -155,7 +156,7 @@ func NewChallengeMessage() *ChallengeMessage {
 
 // total len - payload len
 func (m *ChallengeMessage) BaseLen() uint32 {
-	return 56
+	return uint32(m.totalLen - len(m.Payload))
 }
 
 func (m *ChallengeMessage) getTargetInfo() []byte {
@@ -313,7 +314,7 @@ func (n *NTLMv2) GetNegotiateMessage() *NegotiateMessage {
 	return n.negotiateMessage
 }
 
-//  process NTLMv2 Authenticate hash
+// process NTLMv2 Authenticate hash
 func (n *NTLMv2) ComputeResponseV2(respKeyNT, respKeyLM, serverChallenge, clientChallenge,
 	timestamp, serverInfo []byte) (ntChallResp, lmChallResp, SessBaseKey []byte) {
 
@@ -363,7 +364,7 @@ var (
 )
 
 func (n *NTLMv2) GetAuthenticateMessage(s []byte) (*AuthenticateMessage, *NTLMv2Security) {
-	challengeMsg := &ChallengeMessage{}
+	challengeMsg := &ChallengeMessage{totalLen: len(s)}
 	r := bytes.NewReader(s)
 	err := struc.Unpack(r, challengeMsg)
 	if err != nil {
