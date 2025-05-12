@@ -8,7 +8,6 @@ require (
 	github.com/google/gxui v0.0.0-20151028112939-f85e0a97b3a4
 	github.com/googollee/go-socket.io v1.4.4
 	github.com/huin/asn1ber v0.0.0-20120622192748-af09f62e6358
-	github.com/icodeface/tls v0.0.0-20190904083142-17aec93c60e5
 	github.com/lunixbochs/struc v0.0.0-20200707160740-784aaebc1d40
 	github.com/shirou/w32 v0.0.0-20160930032740-bb4de0191aa4
 	github.com/tomatome/win v0.3.1
