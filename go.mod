@@ -10,11 +10,11 @@ require (
 )
 
 require (
-	github.com/google/gxui v0.0.0-20151028112939-f85e0a97b3a4
-	github.com/googollee/go-socket.io v1.4.4
 	github.com/go-gl/gl v0.0.0-20211210172815-726fda9656d6 // indirect
 	github.com/go-gl/glfw/v3.3/glfw v0.0.0-20220622232848-a6c407ee30a0 // indirect
 	github.com/golang/freetype v0.0.0-20170609003504-e2365dfdc4a0 // indirect
+	github.com/google/gxui v0.0.0-20151028112939-f85e0a97b3a4
+	github.com/googollee/go-socket.io v1.4.4
 	github.com/gopherjs/gopherjs v1.17.2 // indirect
 	github.com/gorilla/websocket v1.4.2 // indirect
 	github.com/goxjs/gl v0.0.0-20210104184919-e3fafc6f8f2a // indirect
