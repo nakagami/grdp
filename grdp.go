@@ -1,11 +1,8 @@
-// main.go
-package main
+package grdp
 
 import (
-	"errors"
 	"fmt"
 	"net"
-	"runtime"
 	"time"
 
 	"github.com/nakagami/grdp/plugin"
@@ -20,18 +17,13 @@ import (
 	"github.com/nakagami/grdp/protocol/x224"
 )
 
-const (
-	PROTOCOL_RDP       = x224.PROTOCOL_RDP
-	PROTOCOL_SSL       = x224.PROTOCOL_SSL
-	PROTOCOL_HYBRID    = x224.PROTOCOL_HYBRID
-	PROTOCOL_HYBRID_EX = x224.PROTOCOL_HYBRID_EX
-)
-
 type RdpClient struct {
 	Host     string // ip:port
 	Width    int
 	Height   int
-	info     *Info
+	Domain   string
+	Username string
+	Password string
 	tpkt     *tpkt.TPKT
 	x224     *x224.X224
 	mcs      *t125.MCSClient
@@ -40,67 +32,46 @@ type RdpClient struct {
 	channels *plugin.Channels
 }
 
-func NewRdpClient(host string, width, height int, logLevel glog.LEVEL) *RdpClient {
+func NewRdpClient(host string, width, height int, domain, username, password string) *RdpClient {
 	return &RdpClient{
-		Host:   host,
-		Width:  width,
-		Height: height,
+		Host:     host,
+		Width:    width,
+		Height:   height,
+		Domain:   domain,
+		Username: username,
+		Password: password,
 	}
 }
 func (g *RdpClient) SetRequestedProtocol(p uint32) {
 	g.x224.SetRequestedProtocol(p)
 }
 
+func Bpp(BitsPerPixel uint16) (pixel int) {
+    switch BitsPerPixel {
+    case 15:
+        pixel = 1
+
+    case 16:
+        pixel = 2
+
+    case 24:
+        pixel = 3
+
+    case 32:
+        pixel = 4
+
+    default:
+        glog.Error("invalid bitmap data format")
+    }
+    return
+}
+
 func BitmapDecompress(bitmap *pdu.BitmapData) []byte {
 	return core.Decompress(bitmap.BitmapDataStream, int(bitmap.Width), int(bitmap.Height), Bpp(bitmap.BitsPerPixel))
 }
 
-func uiRdp(info *Info) (error, *RdpClient) {
-	runtime.GOMAXPROCS(runtime.NumCPU())
-
-	BitmapCH = make(chan []Bitmap, 500)
-	g := NewRdpClient(fmt.Sprintf("%s:%s", info.Ip, info.Port), info.Width, info.Height, glog.INFO)
-	g.info = info
-	err := g.Login()
-	if err != nil {
-		glog.Error("Login:", err)
-		return err, nil
-	}
-//	cc := cliprdr.NewCliprdrClient()
-//	g.channels.Register(cc)
-
-	g.pdu.On("error", func(e error) {
-		glog.Info("on error:", e)
-	}).On("close", func() {
-		err = errors.New("close")
-		glog.Info("on close")
-	}).On("success", func() {
-		glog.Info("on success")
-	}).On("ready", func() {
-		glog.Info("on ready")
-	}).On("bitmap", func(rectangles []pdu.BitmapData) {
-		glog.Info("Update Bitmap:", len(rectangles))
-		bs := make([]Bitmap, 0, 50)
-		for _, v := range rectangles {
-			IsCompress := v.IsCompress()
-			data := v.BitmapDataStream
-			if IsCompress {
-				data = BitmapDecompress(&v)
-				IsCompress = false
-			}
-
-			b := Bitmap{int(v.DestLeft), int(v.DestTop), int(v.DestRight), int(v.DestBottom),
-				int(v.Width), int(v.Height), Bpp(v.BitsPerPixel), IsCompress, data}
-			bs = append(bs, b)
-		}
-		ui_paint_bitmap(bs)
-	})
-
-	return nil, g
-}
-
 func (g *RdpClient) Login() error {
-	domain, user, pwd := g.info.Domain, g.info.Username, g.info.Passwd
+	domain, user, pwd := g.Domain, g.Username, g.Password
 	glog.Info("Connect:", g.Host, "with", domain+"\\"+user, ":", pwd)
 	conn, err := net.DialTimeout("tcp", g.Host, 3*time.Second)
 	if err != nil {
@@ -145,6 +116,10 @@ func (g *RdpClient) Login() error {
 		return fmt.Errorf("[x224 connect err] %v", err)
 	}
 	return nil
+}
+
+func (g *RdpClient) PDU() *pdu.Client {
+    return g.pdu
 }
 
 func (g *RdpClient) KeyUp(sc int, name string) {

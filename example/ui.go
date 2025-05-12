@@ -2,6 +2,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -15,8 +16,11 @@ import (
 	"github.com/google/gxui"
 	"github.com/google/gxui/samples/flags"
 	"github.com/google/gxui/themes/light"
+
+	"github.com/nakagami/grdp"
 	"github.com/nakagami/grdp/core"
 	"github.com/nakagami/grdp/glog"
+	"github.com/nakagami/grdp/protocol/pdu"
 )
 
 var (
@@ -24,6 +28,49 @@ var (
 	driverc       gxui.Driver
 	width, height int
 )
+
+func uiRdp(info *Info) (error, *grdp.RdpClient) {
+	runtime.GOMAXPROCS(runtime.NumCPU())
+
+	BitmapCH = make(chan []Bitmap, 500)
+	g := grdp.NewRdpClient(fmt.Sprintf("%s:%s", info.Ip, info.Port), info.Width, info.Height, info.Domain, info.Username, info.Password)
+	err := g.Login()
+	if err != nil {
+		glog.Error("Login:", err)
+		return err, nil
+	}
+	//	cc := cliprdr.NewCliprdrClient()
+	//	g.channels.Register(cc)
+
+	g.PDU().On("error", func(e error) {
+		glog.Info("on error:", e)
+	}).On("close", func() {
+		err = errors.New("close")
+		glog.Info("on close")
+	}).On("success", func() {
+		glog.Info("on success")
+	}).On("ready", func() {
+		glog.Info("on ready")
+	}).On("bitmap", func(rectangles []pdu.BitmapData) {
+		glog.Info("Update Bitmap:", len(rectangles))
+		bs := make([]Bitmap, 0, 50)
+		for _, v := range rectangles {
+			IsCompress := v.IsCompress()
+			data := v.BitmapDataStream
+			if IsCompress {
+				data = grdp.BitmapDecompress(&v)
+				IsCompress = false
+			}
+
+			b := Bitmap{int(v.DestLeft), int(v.DestTop), int(v.DestRight), int(v.DestBottom),
+				int(v.Width), int(v.Height), grdp.Bpp(v.BitsPerPixel), IsCompress, data}
+			bs = append(bs, b)
+		}
+		ui_paint_bitmap(bs)
+	})
+
+	return nil, g
+}
 
 func StartUI(w, h int) {
 	width, height = w, h
@@ -220,11 +267,7 @@ func uiClient(info *Info) (error, Control) {
 		err error
 		g   Control
 	)
-	if true {
-		err, g = uiRdp(info)
-	} else {
-		err, g = uiVnc(info)
-	}
+	err, g = uiRdp(info)
 
 	return err, g
 }
@@ -239,26 +282,6 @@ type Bitmap struct {
 	BitsPerPixel int    `json:"bitsPerPixel"`
 	IsCompress   bool   `json:"isCompress"`
 	Data         []byte `json:"data"`
-}
-
-func Bpp(BitsPerPixel uint16) (pixel int) {
-	switch BitsPerPixel {
-	case 15:
-		pixel = 1
-
-	case 16:
-		pixel = 2
-
-	case 24:
-		pixel = 3
-
-	case 32:
-		pixel = 4
-
-	default:
-		glog.Error("invalid bitmap data format")
-	}
-	return
 }
 
 func Hex2Dec(val string) int {
