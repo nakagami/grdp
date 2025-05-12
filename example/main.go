@@ -46,14 +46,14 @@ type Info struct {
 	Ip       string `json:"ip"`
 	Port     string `json:"port"`
 	Username string `json:"username"`
-	Passwd   string `json:"password"`
+	Password string `json:"password"`
 	Screen   `json:"screen"`
 }
 
-func NewInfo(ip, user, passwd string) (error, *Info) {
+func NewInfo(ip, user, password string) (error, *Info) {
 	var i Info
-	if ip == "" || user == "" || passwd == "" {
-		return fmt.Errorf("Must ip/user/passwd"), nil
+	if ip == "" || user == "" || password == "" {
+		return fmt.Errorf("Must ip/user/password"), nil
 	}
 	t := strings.Split(ip, ":")
 	i.Ip = t[0]
@@ -73,7 +73,7 @@ func NewInfo(ip, user, passwd string) (error, *Info) {
 		i.Username = user
 	}
 
-	i.Passwd = passwd
+	i.Password = password
 
 	return nil, &i
 }
