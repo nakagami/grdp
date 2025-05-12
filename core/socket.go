@@ -6,10 +6,9 @@ import (
 
 	"github.com/huin/asn1ber"
 
-	//"crypto/tls"
+	"crypto/tls"
 	"errors"
 	"net"
-	"github.com/icodeface/tls"
 )
 
 type SocketLayer struct {
