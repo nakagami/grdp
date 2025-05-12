@@ -3,8 +3,7 @@ package core
 import (
 	"crypto/rsa"
 	"math/big"
-
-	"github.com/huin/asn1ber"
+	"encoding/asn1"
 
 	"crypto/tls"
 	"errors"
@@ -69,5 +68,5 @@ func (s *SocketLayer) TlsPubKey() ([]byte, error) {
 		return nil, errors.New("TLS conn does not exist")
 	}
 	pub := s.tlsConn.ConnectionState().PeerCertificates[0].PublicKey.(*rsa.PublicKey)
-	return asn1ber.Marshal(*pub)
+	return asn1.Marshal(*pub)
 }
