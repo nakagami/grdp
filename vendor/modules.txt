@@ -33,29 +33,17 @@ github.com/google/gxui/themes/dark
 github.com/google/gxui/themes/light
 # github.com/googollee/go-socket.io v1.4.4
 ## explicit; go 1.13
-github.com/googollee/go-socket.io
-github.com/googollee/go-socket.io/engineio
-github.com/googollee/go-socket.io/engineio/base
-github.com/googollee/go-socket.io/engineio/packet
-github.com/googollee/go-socket.io/engineio/payload
-github.com/googollee/go-socket.io/engineio/transport
-github.com/googollee/go-socket.io/engineio/transport/polling
-github.com/googollee/go-socket.io/engineio/transport/websocket
-github.com/googollee/go-socket.io/parser
 # github.com/gopherjs/gopherjs v1.17.2
 ## explicit; go 1.17
 github.com/gopherjs/gopherjs/js
 # github.com/gorilla/websocket v1.4.2
 ## explicit; go 1.12
-github.com/gorilla/websocket
 # github.com/goxjs/gl v0.0.0-20210104184919-e3fafc6f8f2a
 ## explicit
 github.com/goxjs/gl
 # github.com/goxjs/glfw v0.0.0-20220119044647-4bcee99381f2
 ## explicit
 github.com/goxjs/glfw
-# github.com/huin/asn1ber v0.0.0-20120622192748-af09f62e6358
-## explicit
 # github.com/lunixbochs/struc v0.0.0-20200707160740-784aaebc1d40
 ## explicit; go 1.12
 github.com/lunixbochs/struc

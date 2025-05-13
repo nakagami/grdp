@@ -27,13 +27,8 @@ func main() {
 	flag.Parse()
 
 	runtime.GOMAXPROCS(runtime.NumCPU())
-	//web example
-	if server {
-		socketIO()
-	} else {
-		//client example
-		StartUI(1520, 1080)
-	}
+	//client example
+	StartUI(1520, 1080)
 }
 
 type Screen struct {
