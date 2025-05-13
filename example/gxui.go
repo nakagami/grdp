@@ -2,6 +2,8 @@
 package main
 
 import (
+    "log"
+    "os"
 	"errors"
 	"fmt"
 	"image"
@@ -10,6 +12,7 @@ import (
 	"runtime"
 	"strconv"
 	"time"
+	"strings"
 
 	"github.com/google/gxui/drivers/gl"
 
@@ -417,4 +420,56 @@ func transKey(in gxui.KeyboardKey) int {
 		return v
 	}
 	return 0
+}
+
+func init() {
+	glog.SetLevel(glog.INFO)
+	logger := log.New(os.Stdout, "", 0)
+	glog.SetLogger(logger)
+}
+
+func main() {
+	StartUI(1520, 1080)
+}
+
+type Screen struct {
+	Height int `json:"height"`
+	Width  int `json:"width"`
+}
+
+type Info struct {
+	Domain   string `json:"domain"`
+	Ip       string `json:"ip"`
+	Port     string `json:"port"`
+	Username string `json:"username"`
+	Password string `json:"password"`
+	Screen   `json:"screen"`
+}
+
+func NewInfo(ip, user, password string) (error, *Info) {
+	var i Info
+	if ip == "" || user == "" || password == "" {
+		return fmt.Errorf("Must ip/user/password"), nil
+	}
+	t := strings.Split(ip, ":")
+	i.Ip = t[0]
+	i.Port = "3389"
+	if len(t) > 1 {
+		i.Port = t[1]
+	}
+	if strings.Index(user, "\\") != -1 {
+		t = strings.Split(user, "\\")
+		i.Domain = t[0]
+		i.Username = t[len(t)-1]
+	} else if strings.Index(user, "/") != -1 {
+		t = strings.Split(user, "/")
+		i.Domain = t[0]
+		i.Username = t[len(t)-1]
+	} else {
+		i.Username = user
+	}
+
+	i.Password = password
+
+	return nil, &i
 }
