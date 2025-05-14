@@ -21,9 +21,6 @@ type RdpClient struct {
 	Host     string // ip:port
 	Width    int
 	Height   int
-	Domain   string
-	Username string
-	Password string
 	tpkt     *tpkt.TPKT
 	x224     *x224.X224
 	mcs      *t125.MCSClient
@@ -32,14 +29,11 @@ type RdpClient struct {
 	channels *plugin.Channels
 }
 
-func NewRdpClient(host string, width, height int, domain, username, password string) *RdpClient {
+func NewRdpClient(host string, width, height int) *RdpClient {
 	return &RdpClient{
 		Host:     host,
 		Width:    width,
 		Height:   height,
-		Domain:   domain,
-		Username: username,
-		Password: password,
 	}
 }
 func (g *RdpClient) SetRequestedProtocol(p uint32) {
@@ -70,15 +64,14 @@ func BitmapDecompress(bitmap *pdu.BitmapData) []byte {
 	return core.Decompress(bitmap.BitmapDataStream, int(bitmap.Width), int(bitmap.Height), Bpp(bitmap.BitsPerPixel))
 }
 
-func (g *RdpClient) Login() error {
-	domain, user, pwd := g.Domain, g.Username, g.Password
-	glog.Info("Connect:", g.Host, "with", domain+"\\"+user, ":", pwd)
+func (g *RdpClient) Login(domain string, user string, password string) error {
+	glog.Info("Connect:", g.Host, "with", domain+"\\"+user, ":", password)
 	conn, err := net.DialTimeout("tcp", g.Host, 3*time.Second)
 	if err != nil {
 		return fmt.Errorf("[dial err] %v", err)
 	}
 
-	g.tpkt = tpkt.New(core.NewSocketLayer(conn), nla.NewNTLMv2(domain, user, pwd))
+	g.tpkt = tpkt.New(core.NewSocketLayer(conn), nla.NewNTLMv2(domain, user, password))
 	g.x224 = x224.New(g.tpkt)
 	g.mcs = t125.NewMCSClient(g.x224)
 	g.sec = sec.NewClient(g.mcs)
@@ -99,7 +92,7 @@ func (g *RdpClient) Login() error {
 	//g.channels.Register(drdynvc.NewDvcClient())
 
 	g.sec.SetUser(user)
-	g.sec.SetPwd(pwd)
+	g.sec.SetPwd(password)
 	g.sec.SetDomain(domain)
 
 	g.tpkt.SetFastPathListener(g.sec)

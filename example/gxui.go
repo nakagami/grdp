@@ -36,8 +36,8 @@ func uiRdp(info *Info) (error, *grdp.RdpClient) {
 	runtime.GOMAXPROCS(runtime.NumCPU())
 
 	BitmapCH = make(chan []Bitmap, 500)
-	g := grdp.NewRdpClient(fmt.Sprintf("%s:%s", info.Ip, info.Port), info.Width, info.Height, info.Domain, info.Username, info.Password)
-	err := g.Login()
+	g := grdp.NewRdpClient(fmt.Sprintf("%s:%s", info.Ip, info.Port), info.Width, info.Height)
+	err := g.Login(info.Domain, info.Username, info.Password)
 	if err != nil {
 		glog.Error("Login:", err)
 		return err, nil
@@ -296,7 +296,7 @@ func Hex2Dec(val string) int {
 }
 
 type Control interface {
-	Login() error
+	Login(domain, user, password string) error
 	SetRequestedProtocol(p uint32)
 	KeyUp(sc int, name string)
 	KeyDown(sc int, name string)
