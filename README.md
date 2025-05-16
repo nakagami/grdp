@@ -16,13 +16,21 @@ For example clipboard.
 - Ubuntu RDP server support
 - RDP client (Currently, there is only an example that demonstrates the library's functionality).
 
-## Build and start example
+## How to execute example
 
+Prepare environment variables
+```
+export GRDP_USER=nakagami
+export GRDP_PASSWORD=ZYL7P8dd*
+export GRDP_PORT=3389
+export GRDP_HOST=35.155.71.61
+```
+
+Clone and execute example
 ```
 git clone https://github.com/nakagami/grdp
-cd grdp/example
-go build .
-./example
+cd grdp
+go run example/gxui.go
 ```
 
 ## Take ideas from
