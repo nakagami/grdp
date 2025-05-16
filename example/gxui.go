@@ -90,7 +90,7 @@ func appMain(driver gxui.Driver) {
 	layoutImg.SetSizeMode(gxui.Fill)
 	layoutImg.SetHorizontalAlignment(gxui.AlignCenter)
 	layoutImg.AddChild(img)
-	layoutImg.SetVisible(false)
+	layoutImg.SetVisible(true)
 	ScreenImage = image.NewRGBA(image.Rect(0, 0, width, height))
 	layoutImg.OnMouseDown(func(e gxui.MouseEvent) {
 		gc.MouseDown(int(e.Button), e.Point.X, e.Point.Y)
@@ -119,69 +119,24 @@ func appMain(driver gxui.Driver) {
 		gc.KeyUp(key, "")
 	})
 
-	layout := theme.CreateLinearLayout()
-	layout.SetSizeMode(gxui.Fill)
-	layout.SetHorizontalAlignment(gxui.AlignCenter)
-
-	label := theme.CreateLabel()
-	label.SetText("Welcome Mstsc")
-	label.SetColor(gxui.Red)
-	ip := theme.CreateTextBox()
-	user := theme.CreateTextBox()
-	passwd := theme.CreateTextBox()
-	ip.SetDesiredWidth(width / 4)
-	user.SetDesiredWidth(width / 4)
-	passwd.SetDesiredWidth(width / 4)
-
 	h := strings.Join([]string{os.Getenv("GRDP_HOST"), ":", os.Getenv("GRDP_PORT")}, "")
 	u := os.Getenv("GRDP_USER")
 	p := os.Getenv("GRDP_PASSWORD")
-	ip.SetText(h)
-	user.SetText(u)
-	passwd.SetText(p)
 
-	bok := theme.CreateButton()
-	bok.SetText("OK")
-	bok.OnClick(func(e gxui.MouseEvent) {
-		err, info := NewInfo(ip.Text(), user.Text(), passwd.Text())
-		info.Width, info.Height = width, height
-		if err != nil {
-			fmt.Println(err.Error())
-			return
-		}
-		driverc = driver
-		err, gc = uiClient(info)
-		if err != nil {
-			fmt.Println(err.Error())
-			return
-		}
-		layout.SetVisible(false)
-		layoutImg.SetVisible(true)
-		ip.GainedFocus()
-	})
-	bcancel := theme.CreateButton()
-	bcancel.SetText("Clear")
-	bcancel.OnClick(func(e gxui.MouseEvent) {
-		ip.SetText("")
-		user.SetText("")
-		passwd.SetText("")
-	})
+	err, info := NewInfo(h, u, p)
+	info.Width, info.Height = width, height
+	if err != nil {
+		fmt.Println(err.Error())
+		return
+	}
+	driverc = driver
+	err, gc = uiClient(info)
+	if err != nil {
+		fmt.Println(err.Error())
+		return
+	}
+	layoutImg.SetVisible(true)
 
-	blayout := theme.CreateLinearLayout()
-	blayout.AddChild(bok)
-	blayout.AddChild(bcancel)
-
-	table := theme.CreateTableLayout()
-	table.SetGrid(3, 20) // columns, rows
-	table.SetChildAt(1, 4, 1, 1, ip)
-	table.SetChildAt(1, 5, 1, 1, user)
-	table.SetChildAt(1, 6, 1, 1, passwd)
-	table.SetChildAt(1, 7, 1, 1, blayout)
-	layout.AddChild(label)
-	layout.AddChild(table)
-	//layout.AddChild(blayout)
-
-	window.AddChild(layout)
 	window.AddChild(layoutImg)
 	window.OnClose(func() {
 		if gc != nil {
@@ -431,7 +386,7 @@ func init() {
 }
 
 func main() {
-	StartUI(1520, 1080)
+	StartUI(1280, 1024)
 }
 
 type Screen struct {
