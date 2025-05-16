@@ -2,6 +2,8 @@
 package main
 
 import (
+    "log"
+    "os"
 	"errors"
 	"fmt"
 	"image"
@@ -10,6 +12,7 @@ import (
 	"runtime"
 	"strconv"
 	"time"
+	"strings"
 
 	"github.com/google/gxui/drivers/gl"
 
@@ -33,8 +36,8 @@ func uiRdp(info *Info) (error, *grdp.RdpClient) {
 	runtime.GOMAXPROCS(runtime.NumCPU())
 
 	BitmapCH = make(chan []Bitmap, 500)
-	g := grdp.NewRdpClient(fmt.Sprintf("%s:%s", info.Ip, info.Port), info.Width, info.Height, info.Domain, info.Username, info.Password)
-	err := g.Login()
+	g := grdp.NewRdpClient(fmt.Sprintf("%s:%s", info.Ip, info.Port), info.Width, info.Height)
+	err := g.Login(info.Domain, info.Username, info.Password)
 	if err != nil {
 		glog.Error("Login:", err)
 		return err, nil
@@ -293,7 +296,7 @@ func Hex2Dec(val string) int {
 }
 
 type Control interface {
-	Login() error
+	Login(domain, user, password string) error
 	SetRequestedProtocol(p uint32)
 	KeyUp(sc int, name string)
 	KeyDown(sc int, name string)
@@ -417,4 +420,56 @@ func transKey(in gxui.KeyboardKey) int {
 		return v
 	}
 	return 0
+}
+
+func init() {
+	glog.SetLevel(glog.INFO)
+	logger := log.New(os.Stdout, "", 0)
+	glog.SetLogger(logger)
+}
+
+func main() {
+	StartUI(1520, 1080)
+}
+
+type Screen struct {
+	Height int `json:"height"`
+	Width  int `json:"width"`
+}
+
+type Info struct {
+	Domain   string `json:"domain"`
+	Ip       string `json:"ip"`
+	Port     string `json:"port"`
+	Username string `json:"username"`
+	Password string `json:"password"`
+	Screen   `json:"screen"`
+}
+
+func NewInfo(ip, user, password string) (error, *Info) {
+	var i Info
+	if ip == "" || user == "" || password == "" {
+		return fmt.Errorf("Must ip/user/password"), nil
+	}
+	t := strings.Split(ip, ":")
+	i.Ip = t[0]
+	i.Port = "3389"
+	if len(t) > 1 {
+		i.Port = t[1]
+	}
+	if strings.Index(user, "\\") != -1 {
+		t = strings.Split(user, "\\")
+		i.Domain = t[0]
+		i.Username = t[len(t)-1]
+	} else if strings.Index(user, "/") != -1 {
+		t = strings.Split(user, "/")
+		i.Domain = t[0]
+		i.Username = t[len(t)-1]
+	} else {
+		i.Username = user
+	}
+
+	i.Password = password
+
+	return nil, &i
 }
