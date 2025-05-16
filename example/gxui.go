@@ -2,17 +2,17 @@
 package main
 
 import (
-    "log"
-    "os"
 	"errors"
 	"fmt"
 	"image"
 	"image/color"
 	"image/draw"
+	"log"
+	"os"
 	"runtime"
 	"strconv"
-	"time"
 	"strings"
+	"time"
 
 	"github.com/google/gxui/drivers/gl"
 
@@ -132,11 +132,13 @@ func appMain(driver gxui.Driver) {
 	ip.SetDesiredWidth(width / 4)
 	user.SetDesiredWidth(width / 4)
 	passwd.SetDesiredWidth(width / 4)
-	//ip.SetText("192.168.18.100:5902")
-	ip.SetText("192.168.0.132:3389")
-	user.SetText("administrator")
-	passwd.SetText("Jhadmin123")
-	//passwd.SetText("wren")
+
+	h := strings.Join([]string{os.Getenv("GRDP_HOST"), ":", os.Getenv("GRDP_PORT")}, "")
+	u := os.Getenv("GRDP_USER")
+	p := os.Getenv("GRDP_PASSWORD")
+	ip.SetText(h)
+	user.SetText(u)
+	passwd.SetText(p)
 
 	bok := theme.CreateButton()
 	bok.SetText("OK")
