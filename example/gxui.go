@@ -41,8 +41,6 @@ func uiRdp(info *Info) (error, *grdp.RdpClient) {
 		glog.Error("Login:", err)
 		return err, nil
 	}
-	//	cc := cliprdr.NewCliprdrClient()
-	//	g.channels.Register(cc)
 
 	g.PDU().On("error", func(e error) {
 		glog.Info("on error:", e)
