@@ -23,7 +23,6 @@ import (
 	"github.com/nakagami/grdp"
 	"github.com/nakagami/grdp/core"
 	"github.com/nakagami/grdp/glog"
-	"github.com/nakagami/grdp/protocol/pdu"
 )
 
 var (
@@ -35,7 +34,7 @@ var (
 func uiRdp(info *Info) (error, *grdp.RdpClient) {
 	runtime.GOMAXPROCS(runtime.NumCPU())
 
-	BitmapCH = make(chan []Bitmap, 500)
+	BitmapCH = make(chan []grdp.Bitmap, 500)
 	g := grdp.NewRdpClient(fmt.Sprintf("%s:%s", info.Ip, info.Port), info.Width, info.Height)
 	err := g.Login(info.Domain, info.Username, info.Password)
 	if err != nil {
@@ -54,26 +53,9 @@ func uiRdp(info *Info) (error, *grdp.RdpClient) {
 		glog.Info("on success")
 	}).On("ready", func() {
 		glog.Info("on ready")
-	}).On("bitmap", func(rectangles []pdu.BitmapData) {
-		glog.Info("on bitmap len(rectangles)", len(rectangles))
-		bs := make([]Bitmap, 0, 50)
-		for _, v := range rectangles {
-			IsCompress := v.IsCompress()
-			data := v.BitmapDataStream
-			if IsCompress {
-				data = grdp.BitmapDecompress(&v)
-				glog.Debug("uncompressed len(data)", len(data))
-				IsCompress = false
-			} else {
-				glog.Debug("len(data)", len(data))
-			}
-
-			b := Bitmap{int(v.DestLeft), int(v.DestTop), int(v.DestRight), int(v.DestBottom),
-				int(v.Width), int(v.Height), grdp.Bpp(v.BitsPerPixel), IsCompress, data}
-			bs = append(bs, b)
-		}
-		ui_paint_bitmap(bs)
 	})
+
+	g.OnBitmap(ui_paint_bitmap)
 
 	return nil, g
 }
@@ -187,7 +169,7 @@ func ToRGBA(pixel int, i int, data []byte) (r, g, b, a uint8) {
 	return
 }
 
-func paint_bitmap(bs []Bitmap) {
+func paint_bitmap(bs []grdp.Bitmap) {
 	var (
 		pixel      int
 		i          int
@@ -217,9 +199,9 @@ func paint_bitmap(bs []Bitmap) {
 
 }
 
-var BitmapCH chan []Bitmap
+var BitmapCH chan []grdp.Bitmap
 
-func ui_paint_bitmap(bs []Bitmap) {
+func ui_paint_bitmap(bs []grdp.Bitmap) {
 	BitmapCH <- bs
 }
 
@@ -233,18 +215,6 @@ func uiClient(info *Info) (error, Control) {
 	err, g = uiRdp(info)
 
 	return err, g
-}
-
-type Bitmap struct {
-	DestLeft     int    `json:"destLeft"`
-	DestTop      int    `json:"destTop"`
-	DestRight    int    `json:"destRight"`
-	DestBottom   int    `json:"destBottom"`
-	Width        int    `json:"width"`
-	Height       int    `json:"height"`
-	BitsPerPixel int    `json:"bitsPerPixel"`
-	IsCompress   bool   `json:"isCompress"`
-	Data         []byte `json:"data"`
 }
 
 func Hex2Dec(val string) int {
