@@ -24,14 +24,14 @@ var (
 	gc            Control
 	driverc       gxui.Driver
 	width, height int
-	ScreenImage *image.RGBA
-	img         gxui.Image
-    BitmapCH chan []grdp.Bitmap
+	ScreenImage   *image.RGBA
+	img           gxui.Image
+	BitmapCH      chan []grdp.Bitmap
 )
 
 func uiRdp(info *Info) (error, *grdp.RdpClient) {
 	BitmapCH = make(chan []grdp.Bitmap, 500)
-	g := grdp.NewRdpClient(fmt.Sprintf("%s:%s", info.Ip, info.Port), info.Width, info.Height)
+	g := grdp.NewRdpClient(fmt.Sprintf("%s:%s", info.Host, info.Port), info.Width, info.Height)
 	err := g.Login(info.Domain, info.Username, info.Password)
 	if err != nil {
 		glog.Error("Login:", err)
@@ -120,7 +120,6 @@ func appMain(driver gxui.Driver) {
 	update()
 }
 
-
 func update() {
 	go func() {
 		for {
@@ -147,7 +146,6 @@ func paint_bitmap(bs []grdp.Bitmap) {
 	})
 
 }
-
 
 func ui_paint_bitmap(bs []grdp.Bitmap) {
 	BitmapCH <- bs
@@ -291,18 +289,14 @@ func main() {
 	gl.StartDriver(appMain)
 }
 
-type Screen struct {
-	Height int `json:"height"`
-	Width  int `json:"width"`
-}
-
 type Info struct {
-	Domain   string `json:"domain"`
-	Ip       string `json:"ip"`
-	Port     string `json:"port"`
-	Username string `json:"username"`
-	Password string `json:"password"`
-	Screen   `json:"screen"`
+	Domain   string
+	Host     string
+	Port     string
+	Username string
+	Password string
+	Height   int
+	Width    int
 }
 
 func NewInfo(ip, user, password string) (error, *Info) {
@@ -311,7 +305,7 @@ func NewInfo(ip, user, password string) (error, *Info) {
 		return fmt.Errorf("Must ip/user/password"), nil
 	}
 	t := strings.Split(ip, ":")
-	i.Ip = t[0]
+	i.Host = t[0]
 	i.Port = "3389"
 	if len(t) > 1 {
 		i.Port = t[1]
