@@ -29,11 +29,22 @@ type RdpClient struct {
 	channels *plugin.Channels
 }
 
+type Bitmap struct {
+	DestLeft     int
+	DestTop      int
+	DestRight    int
+	DestBottom   int
+	Width        int
+	Height       int
+	BitsPerPixel int
+	Data         []byte
+}
+
 func NewRdpClient(host string, width, height int) *RdpClient {
 	return &RdpClient{
-		Host:     host,
-		Width:    width,
-		Height:   height,
+		Host:   host,
+		Width:  width,
+		Height: height,
 	}
 }
 func (g *RdpClient) SetRequestedProtocol(p uint32) {
@@ -41,23 +52,23 @@ func (g *RdpClient) SetRequestedProtocol(p uint32) {
 }
 
 func Bpp(BitsPerPixel uint16) (pixel int) {
-    switch BitsPerPixel {
-    case 15:
-        pixel = 1
+	switch BitsPerPixel {
+	case 15:
+		pixel = 1
 
-    case 16:
-        pixel = 2
+	case 16:
+		pixel = 2
 
-    case 24:
-        pixel = 3
+	case 24:
+		pixel = 3
 
-    case 32:
-        pixel = 4
+	case 32:
+		pixel = 4
 
-    default:
-        glog.Error("invalid bitmap data format")
-    }
-    return
+	default:
+		glog.Error("invalid bitmap data format")
+	}
+	return
 }
 
 func BitmapDecompress(bitmap *pdu.BitmapData) []byte {
@@ -112,7 +123,31 @@ func (g *RdpClient) Login(domain string, user string, password string) error {
 }
 
 func (g *RdpClient) PDU() *pdu.Client {
-    return g.pdu
+	return g.pdu
+}
+
+func (g *RdpClient) OnBitmap(paint_bitmap func([]Bitmap)) {
+	g.pdu.On("bitmap", func(rectangles []pdu.BitmapData) {
+		glog.Info("on bitmap len(rectangles)", len(rectangles))
+		bs := make([]Bitmap, 0, 50)
+		for _, v := range rectangles {
+			IsCompress := v.IsCompress()
+			data := v.BitmapDataStream
+			if IsCompress {
+				data = BitmapDecompress(&v)
+				glog.Debug("uncompressed len(data)", len(data))
+				IsCompress = false
+			} else {
+				glog.Debug("len(data)", len(data))
+			}
+
+			b := Bitmap{int(v.DestLeft), int(v.DestTop), int(v.DestRight), int(v.DestBottom),
+				int(v.Width), int(v.Height), Bpp(v.BitsPerPixel), data}
+			bs = append(bs, b)
+		}
+		paint_bitmap(bs)
+	})
+
 }
 
 func (g *RdpClient) KeyUp(sc int, name string) {
