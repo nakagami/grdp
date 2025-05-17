@@ -55,14 +55,17 @@ func uiRdp(info *Info) (error, *grdp.RdpClient) {
 	}).On("ready", func() {
 		glog.Info("on ready")
 	}).On("bitmap", func(rectangles []pdu.BitmapData) {
-		glog.Info("Update Bitmap:", len(rectangles))
+		glog.Info("on bitmap len(rectangles)", len(rectangles))
 		bs := make([]Bitmap, 0, 50)
 		for _, v := range rectangles {
 			IsCompress := v.IsCompress()
 			data := v.BitmapDataStream
 			if IsCompress {
 				data = grdp.BitmapDecompress(&v)
+				glog.Debug("uncompressed len(data)", len(data))
 				IsCompress = false
+			} else {
+				glog.Debug("len(data)", len(data))
 			}
 
 			b := Bitmap{int(v.DestLeft), int(v.DestTop), int(v.DestRight), int(v.DestBottom),
