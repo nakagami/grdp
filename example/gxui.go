@@ -9,7 +9,6 @@ import (
 	"log"
 	"os"
 	"runtime"
-	"strconv"
 	"strings"
 	"time"
 
@@ -58,6 +57,7 @@ func StartUI(w, h int) {
 	width, height = w, h
 	gl.StartDriver(appMain)
 }
+
 func appMain(driver gxui.Driver) {
 	theme := light.CreateTheme(driver)
 	window := theme.CreateWindow(width, height, "MSTSC")
@@ -78,10 +78,10 @@ func appMain(driver gxui.Driver) {
 		gc.MouseUp(int(e.Button), e.Point.X, e.Point.Y)
 	})
 	layoutImg.OnMouseMove(func(e gxui.MouseEvent) {
-		//gc.MouseMove(e.Point.X, e.Point.Y)
+		gc.MouseMove(e.Point.X, e.Point.Y)
 	})
 	layoutImg.OnMouseScroll(func(e gxui.MouseEvent) {
-		//gc.MouseWheel(e.ScrollY, e.Point.X, e.Point.Y)
+		gc.MouseWheel(e.ScrollY, e.Point.X, e.Point.Y)
 	})
 	window.OnKeyDown(func(e gxui.KeyboardEvent) {
 		if gc == nil {
@@ -209,14 +209,6 @@ func uiClient(info *Info) (error, Control) {
 	err, g = uiRdp(info)
 
 	return err, g
-}
-
-func Hex2Dec(val string) int {
-	n, err := strconv.ParseUint(val, 16, 32)
-	if err != nil {
-		fmt.Println(err)
-	}
-	return int(n)
 }
 
 type Control interface {
