@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net"
 	"time"
+	"image"
+	"image/color"
 
 	"github.com/nakagami/grdp/plugin"
 
@@ -38,6 +40,39 @@ type Bitmap struct {
 	Height       int
 	BitsPerPixel int
 	Data         []byte
+}
+
+func toRGBA(pixel int, i int, data []byte) (r, g, b, a uint8) {
+    a = 255
+    switch pixel {
+    case 1:
+        rgb555 := core.Uint16BE(data[i], data[i+1])
+        r, g, b = core.RGB555ToRGB(rgb555)
+    case 2:
+        rgb565 := core.Uint16BE(data[i], data[i+1])
+        r, g, b = core.RGB565ToRGB(rgb565)
+    case 3, 4:
+        fallthrough
+    default:
+        r, g, b = data[i+2], data[i+1], data[i]
+    }
+
+    return
+}
+
+func BitmapToRGBA(bm Bitmap) *image.RGBA {
+    i := 0
+    pixel := bm.BitsPerPixel
+    m := image.NewRGBA(image.Rect(0, 0, bm.Width, bm.Height))
+    for y := 0; y < bm.Height; y++ {
+        for x := 0; x < bm.Width; x++ {
+            r, g, b, a := toRGBA(pixel, i, bm.Data)
+            c := color.RGBA{r, g, b, a}
+            i += pixel
+            m.Set(x, y, c)
+        }
+    }
+    return m
 }
 
 func NewRdpClient(host string, width, height int) *RdpClient {
