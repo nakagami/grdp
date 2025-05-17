@@ -1,8 +1,7 @@
-// ui.go
+// gxui.go
 package main
 
 import (
-	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -42,18 +41,15 @@ func uiRdp(info *Info) (error, *grdp.RdpClient) {
 		return err, nil
 	}
 
-	g.PDU().On("error", func(e error) {
+    g.OnError(func(e error) {
 		glog.Info("on error:", e)
-	}).On("close", func() {
-		err = errors.New("close")
+    }).OnClose(func() {
 		glog.Info("on close")
-	}).On("success", func() {
+    }).OnSucces(func() {
 		glog.Info("on success")
-	}).On("ready", func() {
+    }).OnReady(func() {
 		glog.Info("on ready")
-	})
-
-	g.OnBitmap(ui_paint_bitmap)
+    }).OnBitmap(ui_paint_bitmap)
 
 	return nil, g
 }
