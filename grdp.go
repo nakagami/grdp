@@ -125,7 +125,26 @@ func (g *RdpClient) PDU() *pdu.Client {
 	return g.pdu
 }
 
-func (g *RdpClient) OnBitmap(paint_bitmap func([]Bitmap)) {
+func (g *RdpClient) OnError(f func(e error)) *RdpClient {
+	g.pdu.On("error", f)
+	return g
+}
+
+func (g *RdpClient) OnClose(f func()) *RdpClient {
+	g.pdu.On("close", f)
+	return g
+}
+
+func (g *RdpClient) OnSucces(f func()) *RdpClient {
+	g.pdu.On("succes", f)
+	return g
+}
+func (g *RdpClient) OnReady(f func()) *RdpClient {
+	g.pdu.On("ready", f)
+	return g
+}
+
+func (g *RdpClient) OnBitmap(paint_bitmap func([]Bitmap)) *RdpClient {
 	g.pdu.On("bitmap", func(rectangles []pdu.BitmapData) {
 		glog.Info("on bitmap len(rectangles)", len(rectangles))
 		bs := make([]Bitmap, 0, 50)
@@ -146,7 +165,7 @@ func (g *RdpClient) OnBitmap(paint_bitmap func([]Bitmap)) {
 		}
 		paint_bitmap(bs)
 	})
-
+	return g
 }
 
 func (g *RdpClient) KeyUp(sc int, name string) {
