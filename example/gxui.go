@@ -40,15 +40,15 @@ func uiRdp(info *Info) (error, *grdp.RdpClient) {
 		return err, nil
 	}
 
-    g.OnError(func(e error) {
+	g.OnError(func(e error) {
 		glog.Info("on error:", e)
-    }).OnClose(func() {
+	}).OnClose(func() {
 		glog.Info("on close")
-    }).OnSucces(func() {
+	}).OnSucces(func() {
 		glog.Info("on success")
-    }).OnReady(func() {
+	}).OnReady(func() {
 		glog.Info("on ready")
-    }).OnBitmap(ui_paint_bitmap)
+	}).OnBitmap(ui_paint_bitmap)
 
 	return nil, g
 }
@@ -163,25 +163,24 @@ func ToRGBA(pixel int, i int, data []byte) (r, g, b, a uint8) {
 	return
 }
 
-func paint_bitmap(bs []grdp.Bitmap) {
-	var (
-		pixel      int
-		i          int
-		r, g, b, a uint8
-	)
-
-	for _, bm := range bs {
-		i = 0
-		pixel = bm.BitsPerPixel
-		m := image.NewRGBA(image.Rect(0, 0, bm.Width, bm.Height))
-		for y := 0; y < bm.Height; y++ {
-			for x := 0; x < bm.Width; x++ {
-				r, g, b, a = ToRGBA(pixel, i, bm.Data)
-				c := color.RGBA{r, g, b, a}
-				i += pixel
-				m.Set(x, y, c)
-			}
+func BitmapToRGBA(bm grdp.Bitmap) *image.RGBA {
+	i := 0
+	pixel := bm.BitsPerPixel
+	m := image.NewRGBA(image.Rect(0, 0, bm.Width, bm.Height))
+	for y := 0; y < bm.Height; y++ {
+		for x := 0; x < bm.Width; x++ {
+			r, g, b, a := ToRGBA(pixel, i, bm.Data)
+			c := color.RGBA{r, g, b, a}
+			i += pixel
+			m.Set(x, y, c)
 		}
+	}
+	return m
+}
+
+func paint_bitmap(bs []grdp.Bitmap) {
+	for _, bm := range bs {
+		m := BitmapToRGBA(bm)
 
 		draw.Draw(ScreenImage, ScreenImage.Bounds().Add(image.Pt(bm.DestLeft, bm.DestTop)), m, m.Bounds().Min, draw.Src)
 	}
