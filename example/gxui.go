@@ -7,7 +7,6 @@ import (
 	"image/draw"
 	"log"
 	"os"
-	"runtime"
 	"strings"
 	"time"
 
@@ -28,8 +27,6 @@ var (
 )
 
 func uiRdp(info *Info) (error, *grdp.RdpClient) {
-	runtime.GOMAXPROCS(runtime.NumCPU())
-
 	BitmapCH = make(chan []grdp.Bitmap, 500)
 	g := grdp.NewRdpClient(fmt.Sprintf("%s:%s", info.Ip, info.Port), info.Width, info.Height)
 	err := g.Login(info.Domain, info.Username, info.Password)
@@ -107,7 +104,7 @@ func appMain(driver gxui.Driver) {
 		return
 	}
 	driverc = driver
-	err, gc = uiClient(info)
+	err, gc = uiRdp(info)
 	if err != nil {
 		fmt.Println(err.Error())
 		return
@@ -161,18 +158,6 @@ var BitmapCH chan []grdp.Bitmap
 
 func ui_paint_bitmap(bs []grdp.Bitmap) {
 	BitmapCH <- bs
-}
-
-func uiClient(info *Info) (error, Control) {
-	runtime.GOMAXPROCS(runtime.NumCPU())
-
-	var (
-		err error
-		g   Control
-	)
-	err, g = uiRdp(info)
-
-	return err, g
 }
 
 type Control interface {
