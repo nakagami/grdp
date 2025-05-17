@@ -24,6 +24,9 @@ var (
 	gc            Control
 	driverc       gxui.Driver
 	width, height int
+	ScreenImage *image.RGBA
+	img         gxui.Image
+    BitmapCH chan []grdp.Bitmap
 )
 
 func uiRdp(info *Info) (error, *grdp.RdpClient) {
@@ -46,11 +49,6 @@ func uiRdp(info *Info) (error, *grdp.RdpClient) {
 	}).OnBitmap(ui_paint_bitmap)
 
 	return nil, g
-}
-
-func StartUI(w, h int) {
-	width, height = w, h
-	gl.StartDriver(appMain)
 }
 
 func appMain(driver gxui.Driver) {
@@ -122,10 +120,6 @@ func appMain(driver gxui.Driver) {
 	update()
 }
 
-var (
-	ScreenImage *image.RGBA
-	img         gxui.Image
-)
 
 func update() {
 	go func() {
@@ -154,7 +148,6 @@ func paint_bitmap(bs []grdp.Bitmap) {
 
 }
 
-var BitmapCH chan []grdp.Bitmap
 
 func ui_paint_bitmap(bs []grdp.Bitmap) {
 	BitmapCH <- bs
@@ -294,7 +287,8 @@ func init() {
 }
 
 func main() {
-	StartUI(1280, 1024)
+	width, height = 1280, 1024
+	gl.StartDriver(appMain)
 }
 
 type Screen struct {
