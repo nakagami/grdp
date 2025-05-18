@@ -5,8 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-
-	"github.com/nakagami/grdp/glog"
+	"log/slog"
 
 	"github.com/nakagami/grdp/core"
 )
@@ -156,21 +155,21 @@ func (*FastPathOrdersPDU) FastPathUpdateType() uint8 {
 
 func (f *FastPathOrdersPDU) Unpack(r io.Reader) error {
 	f.NumberOrders, _ = core.ReadUint16LE(r)
-	//glog.Info("NumberOrders:", f.NumberOrders)
+	//slog.Info("NumberOrders:", f.NumberOrders)
 	for i := 0; i < int(f.NumberOrders); i++ {
 		var o OrderPdu
 		o.ControlFlags, _ = core.ReadUInt8(r)
 		if o.ControlFlags&TS_STANDARD == 0 {
-			//glog.Info("Altsec order")
+			//slog.Info("Altsec order")
 			o.processAltsecOrder(r)
 			o.Type = ORDER_ALTSEC
 			//return errors.New("Not support")
 		} else if o.ControlFlags&TS_SECONDARY != 0 {
-			//glog.Info("Secondary order")
+			//slog.Info("Secondary order")
 			o.processSecondaryOrder(r)
 			o.Type = ORDER_SECONDARY
 		} else {
-			//glog.Info("Primary order")
+			//slog.Info("Primary order")
 			o.processPrimaryOrder(r)
 			o.Type = ORDER_PRIMARY
 		}
@@ -184,7 +183,7 @@ func (f *FastPathOrdersPDU) Unpack(r io.Reader) error {
 }
 func (o *OrderPdu) processAltsecOrder(r io.Reader) error {
 	orderType := o.ControlFlags >> 2
-	//glog.Info("Altsec:", orderType)
+	//slog.Info("Altsec:", orderType)
 	switch orderType {
 	case ORDER_TYPE_SWITCH_SURFACE:
 	case ORDER_TYPE_CREATE_OFFSCREEN_BITMAP:
@@ -211,7 +210,7 @@ func (o *OrderPdu) processSecondaryOrder(r io.Reader) error {
 	flags, _ := core.ReadUint16LE(r)
 	orderType, _ := core.ReadUInt8(r)
 
-	glog.Info("Secondary:", SecondaryOrderType(orderType))
+	slog.Info("Secondary:", SecondaryOrderType(orderType))
 
 	b, _ := core.ReadBytes(int(length)+13-6, r)
 	r0 := bytes.NewReader(b)
@@ -236,7 +235,7 @@ func (o *OrderPdu) processSecondaryOrder(r io.Reader) error {
 	case ORDER_TYPE_CACHE_BRUSH:
 		sec.updateCacheBrushOrder(r0, flags)
 	default:
-		glog.Debugf("Unsupport order type 0x%x", orderType)
+		slog.Debug(fmt.Sprintf("Unsupport order type 0x%x", orderType))
 	}
 
 	return nil
@@ -312,13 +311,13 @@ func (o *OrderPdu) processPrimaryOrder(r io.Reader) error {
 		if o.ControlFlags&TS_ZERO_BOUNDS_DELTAS == 0 {
 			bounds.updateBounds(r)
 		}
-		//glog.Infof("updateBounds")
+		//slog.Info("updateBounds")
 		o.Primary.Bounds = bounds
 	}
 
 	delta := o.ControlFlags&TS_DELTA_COORDINATES != 0
 
-	//glog.Infof("present=%d,delta=%v", present, delta)
+	//slog.Info(fmt.Sprintf("present=%d,delta=%v", present, delta))
 
 	var p PrimaryOrder
 	switch orderType {
@@ -380,7 +379,7 @@ func (o *OrderPdu) processPrimaryOrder(r io.Reader) error {
 	case ORDER_TYPE_TEXT2:
 		p = &GlayphIndex{}
 	default:
-		glog.Error("Not Support order type:", orderType)
+		slog.Error("Not Support order type:", orderType)
 		return errors.New("Not Support order type")
 	}
 	if p != nil {
@@ -414,7 +413,7 @@ func (d *Dstblt) Type() int {
 	return ORDER_TYPE_DSTBLT
 }
 func (d *Dstblt) Unpack(r io.Reader, present uint32, delta bool) error {
-	glog.Infof("Dstblt Order")
+	slog.Info("Dstblt Order")
 	if present&0x01 != 0 {
 		readOrderCoord(r, &d.x, delta)
 	}
@@ -448,7 +447,7 @@ func (d *Patblt) Type() int {
 	return ORDER_TYPE_PATBLT
 }
 func (d *Patblt) Unpack(r io.Reader, present uint32, delta bool) error {
-	glog.Infof("Patblt Order")
+	slog.Info("Patblt Order")
 	if present&0x01 != 0 {
 		readOrderCoord(r, &d.x, delta)
 	}
@@ -527,7 +526,7 @@ func (d *Scrblt) Type() int {
 var d Scrblt
 
 func (d1 *Scrblt) Unpack(r io.Reader, present uint32, delta bool) error {
-	glog.Infof("Scrblt Order")
+	slog.Info("Scrblt Order")
 	if present&0x0001 != 0 {
 		readOrderCoord(r, &d.X, delta)
 	}
@@ -568,7 +567,7 @@ func (d *LineTo) Type() int {
 	return ORDER_TYPE_LINETO
 }
 func (d *LineTo) Unpack(r io.Reader, present uint32, delta bool) error {
-	glog.Infof("LineTo Order")
+	slog.Info("LineTo Order")
 	if present&0x0001 != 0 {
 		d.Mixmode, _ = core.ReadUint16LE(r)
 	}
@@ -630,7 +629,7 @@ func (d *OpaqueRect) Type() int {
 	return ORDER_TYPE_OPAQUERECT
 }
 func (d *OpaqueRect) Unpack(r io.Reader, present uint32, delta bool) error {
-	glog.Infof("OpaqueRect Order")
+	slog.Info("OpaqueRect Order")
 	if present&0x0001 != 0 {
 		readOrderCoord(r, &d.X, delta)
 	}

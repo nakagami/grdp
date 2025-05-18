@@ -6,8 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-
-	"github.com/nakagami/grdp/glog"
+	"log/slog"
 
 	"github.com/lunixbochs/struc"
 	"github.com/nakagami/grdp/core"
@@ -692,7 +691,7 @@ func readCapability(r io.Reader) (Capability, error) {
 	}
 	capReader := bytes.NewReader(capBytes)
 	var c Capability
-	glog.Debugf("Capability type 0x%04x", capType)
+	slog.Debug(fmt.Sprintf("Capability type 0x%04x", capType))
 	switch CapsType(capType) {
 	case CAPSTYPE_GENERAL:
 		c = &GeneralCapability{}
@@ -748,13 +747,13 @@ func readCapability(r io.Reader) (Capability, error) {
 		c = &FrameAcknowledgeCapability{}
 	default:
 		err := errors.New(fmt.Sprintf("unsupported Capability type 0x%04x", capType))
-		glog.Error(err)
+		slog.Error("err", err)
 		return nil, err
 	}
 	if err := struc.Unpack(capReader, c); err != nil {
-		glog.Error("Capability unpack error", err, fmt.Sprintf("0x%04x", capType), hex.EncodeToString(capBytes))
+		slog.Error("Capability unpack error", err, fmt.Sprintf("0x%04x", capType), hex.EncodeToString(capBytes))
 		return nil, err
 	}
-	glog.Debugf("Capability<%s>: %+v", c.Type(), c)
+	slog.Debug(fmt.Sprintf("Capability<%s>: %+v", c.Type(), c))
 	return c, nil
 }
