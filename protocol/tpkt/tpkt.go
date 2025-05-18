@@ -4,10 +4,10 @@ import (
 	"bytes"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 
 	"github.com/nakagami/grdp/core"
 	"github.com/nakagami/grdp/emission"
-	"github.com/nakagami/grdp/glog"
 	"github.com/nakagami/grdp/protocol/nla"
 )
 
@@ -54,13 +54,13 @@ func (t *TPKT) StartTLS() error {
 func (t *TPKT) StartNLA() error {
 	err := t.StartTLS()
 	if err != nil {
-		glog.Info("start tls failed", err)
+		slog.Info("start tls failed", err)
 		return err
 	}
 	req := nla.EncodeDERTRequest([]nla.Message{t.ntlm.GetNegotiateMessage()}, nil, nil)
 	_, err = t.Conn.Write(req)
 	if err != nil {
-		glog.Info("send NegotiateMessage", err)
+		slog.Info("send NegotiateMessage", err)
 		return err
 	}
 
@@ -69,22 +69,22 @@ func (t *TPKT) StartNLA() error {
 	if err != nil {
 		return fmt.Errorf("read %s", err)
 	} else {
-		glog.Debug("StartNLA Read success")
+		slog.Debug("StartNLA Read success")
 	}
 	return t.recvChallenge(resp[:n])
 }
 
 func (t *TPKT) recvChallenge(data []byte) error {
-	glog.Trace("recvChallenge", hex.EncodeToString(data))
+	slog.Debug("recvChallenge", "data", hex.EncodeToString(data))
 	tsreq, err := nla.DecodeDERTRequest(data)
 	if err != nil {
-		glog.Info("DecodeDERTRequest", err)
+		slog.Info("DecodeDERTRequest", err)
 		return err
 	}
-	glog.Debugf("tsreq:%+v", tsreq)
+	slog.Debug(fmt.Sprintf("tsreq:%+v", tsreq))
 	// get pubkey
 	pubkey, err := t.Conn.TlsPubKey()
-	glog.Debugf("pubkey=%+v", pubkey)
+	slog.Debug(fmt.Sprintf("pubkey=%+v", pubkey))
 
 	authMsg, ntlmSec := t.ntlm.GetAuthenticateMessage(tsreq.NegoTokens[0].Data)
 	t.ntlmSec = ntlmSec
@@ -93,28 +93,28 @@ func (t *TPKT) recvChallenge(data []byte) error {
 	req := nla.EncodeDERTRequest([]nla.Message{authMsg}, nil, encryptPubkey)
 	_, err = t.Conn.Write(req)
 	if err != nil {
-		glog.Info("send AuthenticateMessage", err)
+		slog.Info("send AuthenticateMessage", err)
 		return err
 	}
 	resp := make([]byte, 1024)
 	n, err := t.Conn.Read(resp)
 	if err != nil {
-		glog.Error("Read:", err)
+		slog.Error("Read:", err)
 		return fmt.Errorf("read %s", err)
 	} else {
-		glog.Debug("recvChallenge Read success")
+		slog.Debug("recvChallenge Read success")
 	}
 	return t.recvPubKeyInc(resp[:n])
 }
 
 func (t *TPKT) recvPubKeyInc(data []byte) error {
-	glog.Trace("recvPubKeyInc", hex.EncodeToString(data))
+	slog.Debug("recvPubKeyInc", "data", hex.EncodeToString(data))
 	tsreq, err := nla.DecodeDERTRequest(data)
 	if err != nil {
-		glog.Info("DecodeDERTRequest", err)
+		slog.Info("DecodeDERTRequest", "err", err)
 		return err
 	}
-	glog.Trace("PubKeyAuth:", tsreq.PubKeyAuth)
+	slog.Debug("PubKeyAuth", "key", tsreq.PubKeyAuth)
 	//ignore
 	//pubkey := t.ntlmSec.GssDecrypt([]byte(tsreq.PubKeyAuth))
 	domain, username, password := t.ntlm.GetEncodedCredentials()
@@ -123,7 +123,7 @@ func (t *TPKT) recvPubKeyInc(data []byte) error {
 	req := nla.EncodeDERTRequest(nil, authInfo, nil)
 	_, err = t.Conn.Write(req)
 	if err != nil {
-		glog.Info("send AuthenticateMessage", err)
+		slog.Info("send AuthenticateMessage", "err", err)
 		return err
 	}
 
@@ -140,7 +140,7 @@ func (t *TPKT) Write(data []byte) (n int, err error) {
 	core.WriteUInt8(0, buff)
 	core.WriteUInt16BE(uint16(len(data)+4), buff)
 	buff.Write(data)
-	glog.Trace("tpkt Write", hex.EncodeToString(buff.Bytes()))
+	slog.Debug("tpkt Write", "buff", hex.EncodeToString(buff.Bytes()))
 	return t.Conn.Write(buff.Bytes())
 }
 
@@ -157,12 +157,12 @@ func (t *TPKT) SendFastPath(secFlag byte, data []byte) (n int, err error) {
 	core.WriteUInt8(FASTPATH_ACTION_FASTPATH|((secFlag&0x3)<<6), buff)
 	core.WriteUInt16BE(uint16(len(data)+3)|0x8000, buff)
 	buff.Write(data)
-	glog.Trace("TPTK SendFastPath", hex.EncodeToString(buff.Bytes()))
+	slog.Debug("TPTK SendFastPath", "buff", hex.EncodeToString(buff.Bytes()))
 	return t.Conn.Write(buff.Bytes())
 }
 
 func (t *TPKT) recvHeader(s []byte, err error) {
-	glog.Trace("tpkt recvHeader", hex.EncodeToString(s), err)
+	slog.Debug("tpkt recvHeader", "s", hex.EncodeToString(s), "err", err)
 	if err != nil {
 		t.Emit("error", err)
 		return
@@ -170,7 +170,7 @@ func (t *TPKT) recvHeader(s []byte, err error) {
 	r := bytes.NewReader(s)
 	version, _ := core.ReadUInt8(r)
 	if version == FASTPATH_ACTION_X224 {
-		glog.Debug("tptk recvHeader FASTPATH_ACTION_X224, wait for recvExtendedHeader")
+		slog.Debug("tptk recvHeader FASTPATH_ACTION_X224, wait for recvExtendedHeader")
 		core.StartReadBytes(2, t.Conn, t.recvExtendedHeader)
 	} else {
 		t.secFlag = (version >> 6) & 0x3
@@ -185,18 +185,18 @@ func (t *TPKT) recvHeader(s []byte, err error) {
 }
 
 func (t *TPKT) recvExtendedHeader(s []byte, err error) {
-	glog.Trace("tpkt recvExtendedHeader", hex.EncodeToString(s), err)
+	slog.Debug("tpkt recvExtendedHeader", "s", hex.EncodeToString(s), "err", err)
 	if err != nil {
 		return
 	}
 	r := bytes.NewReader(s)
 	size, _ := core.ReadUint16BE(r)
-	glog.Debug("tpkt wait recvData:", size)
+	slog.Debug("tpkt wait recvData:", size)
 	core.StartReadBytes(int(size-4), t.Conn, t.recvData)
 }
 
 func (t *TPKT) recvData(s []byte, err error) {
-	glog.Trace("tpkt recvData", hex.EncodeToString(s), err)
+	slog.Debug("tpkt recvData", "s", hex.EncodeToString(s), "err", err)
 	if err != nil {
 		return
 	}
@@ -205,11 +205,11 @@ func (t *TPKT) recvData(s []byte, err error) {
 }
 
 func (t *TPKT) recvExtendedFastPathHeader(s []byte, err error) {
-	glog.Trace("tpkt recvExtendedFastPathHeader", hex.EncodeToString(s))
+	slog.Debug("tpkt recvExtendedFastPathHeader", "s", hex.EncodeToString(s))
 	r := bytes.NewReader(s)
 	rightPart, err := core.ReadUInt8(r)
 	if err != nil {
-		glog.Error("TPTK recvExtendedFastPathHeader", err)
+		slog.Error("TPTK recvExtendedFastPathHeader", err)
 		return
 	}
 
@@ -219,7 +219,7 @@ func (t *TPKT) recvExtendedFastPathHeader(s []byte, err error) {
 }
 
 func (t *TPKT) recvFastPath(s []byte, err error) {
-	glog.Trace("tpkt recvFastPath")
+	slog.Debug("tpkt recvFastPath")
 	if err != nil {
 		return
 	}

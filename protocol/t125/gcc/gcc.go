@@ -7,11 +7,11 @@ import (
 	"crypto/x509/pkix"
 	"encoding/asn1"
 	"errors"
+	"fmt"
 	"io"
+	"log/slog"
 	"math/big"
 	"os"
-
-	"github.com/nakagami/grdp/glog"
 
 	"github.com/lunixbochs/struc"
 	"github.com/nakagami/grdp/core"
@@ -411,7 +411,7 @@ func (x *X509CertificateChain) GetPublicKey() (*rsa.PublicKey, error) {
 	data := x.CertBlobArray[len(x.CertBlobArray)-1].AbCert
 	cert, err := x509.ParseCertificate(data)
 	if err != nil {
-		glog.Error("X509 ParseCertificate err:", err)
+		slog.Error("X509 ParseCertificate err:", err)
 		return nil, err
 	}
 	var rsaPublicKey *rsa.PublicKey
@@ -504,19 +504,19 @@ func (sc *ServerCertificate) Unpack(r io.Reader) error {
 	var cd CertData
 	switch CertificateType(sc.DwVersion & 0x7fffffff) {
 	case CERT_CHAIN_VERSION_1:
-		glog.Debug("ProprietaryServerCertificate")
+		slog.Debug("ProprietaryServerCertificate")
 		cd = &ProprietaryServerCertificate{}
 	case CERT_CHAIN_VERSION_2:
-		glog.Debug("X509CertificateChain")
+		slog.Debug("X509CertificateChain")
 		cd = &X509CertificateChain{}
 	default:
-		glog.Error("Unsupported version:", sc.DwVersion&0x7fffffff)
+		slog.Error("Unsupported version:", sc.DwVersion&0x7fffffff)
 		return errors.New("Unsupported version")
 	}
 	if cd != nil {
 		err := cd.Unpack(r)
 		if err != nil {
-			glog.Error("Unpack:", err)
+			slog.Error("Unpack:", err)
 			return err
 		}
 	}
@@ -588,7 +588,7 @@ func ReadConferenceCreateResponse(data []byte) []interface{} {
 	r := bytes.NewReader(data)
 	per.ReadChoice(r)
 	if !per.ReadObjectIdentifier(r, t124_02_98_oid) {
-		glog.Error("NODE_RDP_PROTOCOL_T125_GCC_BAD_OBJECT_IDENTIFIER_T124")
+		slog.Error("NODE_RDP_PROTOCOL_T125_GCC_BAD_OBJECT_IDENTIFIER_T124")
 		return ret
 	}
 	per.ReadLength(r)
@@ -600,14 +600,14 @@ func ReadConferenceCreateResponse(data []byte) []interface{} {
 	per.ReadChoice(r)
 
 	if !per.ReadOctetStream(r, h221_sc_key, 4) {
-		glog.Error("NODE_RDP_PROTOCOL_T125_GCC_BAD_H221_SC_KEY")
+		slog.Error("NODE_RDP_PROTOCOL_T125_GCC_BAD_H221_SC_KEY")
 		return ret
 	}
 
 	ln, _ := per.ReadLength(r)
 	for ln > 0 {
 		t, _ := core.ReadUint16LE(r)
-		glog.Debugf("Message type 0x%x,ln:%v", t, ln)
+		slog.Debug(fmt.Sprintf("Message type 0x%x,ln:%v", t, ln))
 		l, _ := core.ReadUint16LE(r)
 		dataBytes, _ := core.ReadBytes(int(l)-4, r)
 		ln = ln - l
@@ -620,7 +620,7 @@ func ReadConferenceCreateResponse(data []byte) []interface{} {
 		case SC_NET:
 			d = &ServerNetworkData{}
 		default:
-			glog.Error("Unknown type", t)
+			slog.Error("Unknown type", t)
 			continue
 		}
 
@@ -628,7 +628,7 @@ func ReadConferenceCreateResponse(data []byte) []interface{} {
 			r := bytes.NewReader(dataBytes)
 			err := d.Unpack(r)
 			if err != nil {
-				glog.Warn("Unpack:", err)
+				slog.Warn("Unpack:", err)
 			}
 			ret = append(ret, d)
 		}

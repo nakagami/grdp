@@ -6,11 +6,12 @@ import (
 	"crypto/rc4"
 	"encoding/binary"
 	"encoding/hex"
+	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/lunixbochs/struc"
 	"github.com/nakagami/grdp/core"
-	"github.com/nakagami/grdp/glog"
 )
 
 const (
@@ -368,21 +369,21 @@ func (n *NTLMv2) GetAuthenticateMessage(s []byte) (*AuthenticateMessage, *NTLMv2
 	r := bytes.NewReader(s)
 	err := struc.Unpack(r, challengeMsg)
 	if err != nil {
-		glog.Error("read challengeMsg", err)
+		slog.Error("read challengeMsg", err)
 		return nil, nil
 	}
 	if challengeMsg.NegotiateFlags&NTLMSSP_NEGOTIATE_VERSION != 0 {
 		version := NVersion{}
 		err := struc.Unpack(r, &version)
 		if err != nil {
-			glog.Error("read version", err)
+			slog.Error("read version", err)
 			return nil, nil
 		}
 		challengeMsg.Version = version
 	}
 	challengeMsg.Payload, _ = core.ReadBytes(r.Len(), r)
 	n.challengeMessage = challengeMsg
-	glog.Debugf("challengeMsg:%+v", challengeMsg)
+	slog.Debug(fmt.Sprintf("challengeMsg:%+v", challengeMsg))
 
 	serverName := challengeMsg.getTargetName()
 	serverInfo := challengeMsg.getTargetInfo()
@@ -396,7 +397,7 @@ func (n *NTLMv2) GetAuthenticateMessage(s []byte) (*AuthenticateMessage, *NTLMv2
 	} else {
 		computeMIC = true
 	}
-	glog.Infof("serverName=%+v", core.UnicodeDecode(serverName))
+	slog.Info(fmt.Sprintf("serverName=%+v", core.UnicodeDecode(serverName)))
 	serverChallenge := challengeMsg.ServerChallenge[:]
 	clientChallenge := core.Random(8)
 	ntChallengeResponse, lmChallengeResponse, SessionBaseKey := n.ComputeResponseV2(
@@ -411,7 +412,7 @@ func (n *NTLMv2) GetAuthenticateMessage(s []byte) (*AuthenticateMessage, *NTLMv2
 	if challengeMsg.NegotiateFlags&NTLMSSP_NEGOTIATE_UNICODE != 0 {
 		n.enableUnicode = true
 	}
-	glog.Infof("user: %s, passwd:%s", n.user, n.password)
+	slog.Info(fmt.Sprintf("user: %s, passwd:%s", n.user, n.password))
 	domain, user, _ := n.GetEncodedCredentials()
 
 	n.authenticateMessage = NewAuthenticateMessage(challengeMsg.NegotiateFlags,
@@ -442,10 +443,10 @@ func (n *NTLMv2) GetAuthenticateMessage(s []byte) (*AuthenticateMessage, *NTLMv2
 	md.Write(a)
 	ServerSealingKey := md.Sum(nil)
 
-	glog.Debugf("ClientSigningKey:%s", hex.EncodeToString(ClientSigningKey))
-	glog.Debugf("ServerSigningKey:%s", hex.EncodeToString(ServerSigningKey))
-	glog.Debugf("ClientSealingKey:%s", hex.EncodeToString(ClientSealingKey))
-	glog.Debugf("ServerSealingKey:%s", hex.EncodeToString(ServerSealingKey))
+	slog.Debug(fmt.Sprintf("ClientSigningKey:%s", hex.EncodeToString(ClientSigningKey)))
+	slog.Debug(fmt.Sprintf("ServerSigningKey:%s", hex.EncodeToString(ServerSigningKey)))
+	slog.Debug(fmt.Sprintf("ClientSealingKey:%s", hex.EncodeToString(ClientSealingKey)))
+	slog.Debug(fmt.Sprintf("ServerSealingKey:%s", hex.EncodeToString(ServerSealingKey)))
 
 	encryptRC4, _ := rc4.NewCipher(ClientSealingKey)
 	decryptRC4, _ := rc4.NewCipher(ServerSealingKey)
