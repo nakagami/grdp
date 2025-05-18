@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"image"
 	"image/draw"
-	"log"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
@@ -17,7 +17,6 @@ import (
 	"github.com/google/gxui/themes/light"
 
 	"github.com/nakagami/grdp"
-	"github.com/nakagami/grdp/glog"
 )
 
 var (
@@ -34,18 +33,18 @@ func uiRdp(info *Info) (error, *grdp.RdpClient) {
 	g := grdp.NewRdpClient(fmt.Sprintf("%s:%s", info.Host, info.Port), info.Width, info.Height)
 	err := g.Login(info.Domain, info.Username, info.Password)
 	if err != nil {
-		glog.Error("Login:", err)
+		slog.Error("Login", "err", err)
 		return err, nil
 	}
 
 	g.OnError(func(e error) {
-		glog.Info("on error:", e)
+		slog.Info("on error", "err", e)
 	}).OnClose(func() {
-		glog.Info("on close")
+		slog.Info("on close")
 	}).OnSucces(func() {
-		glog.Info("on success")
+		slog.Info("on success")
 	}).OnReady(func() {
-		glog.Info("on ready")
+		slog.Info("on ready")
 	}).OnBitmap(ui_paint_bitmap)
 
 	return nil, g
@@ -278,13 +277,10 @@ func transKey(in gxui.KeyboardKey) int {
 	return 0
 }
 
-func init() {
-	glog.SetLevel(glog.INFO)
-	logger := log.New(os.Stdout, "", 0)
-	glog.SetLogger(logger)
-}
-
 func main() {
+//    handler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})
+//    slog.SetDefault(slog.New(handler))
+
 	width, height = 1280, 1024
 	gl.StartDriver(appMain)
 }

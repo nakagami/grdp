@@ -4,9 +4,10 @@ import (
 	"bytes"
 	"encoding/hex"
 	"io"
+	"log/slog"
+	"fmt"
 
 	"github.com/nakagami/grdp/core"
-	"github.com/nakagami/grdp/glog"
 	"github.com/nakagami/grdp/plugin"
 )
 
@@ -82,7 +83,7 @@ func (h *DvcHeader) serialize(channelId uint32) []byte {
 }
 
 func (c *DvcClient) Send(s []byte) (int, error) {
-	glog.Debug("len:", len(s), "data:", hex.EncodeToString(s))
+	slog.Debug("len:", len(s), "data:", hex.EncodeToString(s))
 	name, _ := c.GetType()
 	return c.w.SendToChannel(name, s)
 }
@@ -94,28 +95,28 @@ func (c *DvcClient) GetType() (string, uint32) {
 }
 
 func (c *DvcClient) Process(s []byte) {
-	glog.Debug("recv:", hex.EncodeToString(s))
+	slog.Debug("recv:", hex.EncodeToString(s))
 	r := bytes.NewReader(s)
 	hdr := readHeader(r)
-	glog.Infof("dvc: Cmd=0x%x, Sp=%d CbChId=%d all=%d", hdr.cmd, hdr.sp, hdr.cbChId, r.Len())
+	slog.Info(fmt.Sprintf("dvc: Cmd=0x%x, Sp=%d CbChId=%d all=%d", hdr.cmd, hdr.sp, hdr.cbChId, r.Len()))
 
 	b, _ := core.ReadBytes(r.Len(), r)
 
 	switch hdr.cmd {
 	case DYNVC_CAPABILITIES:
-		glog.Info("DYNVC_CAPABILITIES")
+		slog.Info("DYNVC_CAPABILITIES")
 		c.processCapsPdu(hdr, b)
 	case DYNVC_CREATE_REQ:
-		glog.Info("DYNVC_CREATE_REQ")
+		slog.Info("DYNVC_CREATE_REQ")
 		c.processCreateReq(hdr, b)
 	case DYNVC_DATA_FIRST:
-		glog.Info("DYNVC_DATA_FIRST")
+		slog.Info("DYNVC_DATA_FIRST")
 	case DYNVC_DATA:
-		glog.Info("DYNVC_DATA")
+		slog.Info("DYNVC_DATA")
 	case DYNVC_CLOSE:
-		glog.Info("DYNVC_CLOSE")
+		slog.Info("DYNVC_CLOSE")
 	default:
-		glog.Errorf("type 0x%x not supported", hdr.cmd)
+		slog.Error(fmt.Sprintf("type 0x%x not supported", hdr.cmd))
 	}
 }
 func (c *DvcClient) processCreateReq(hdr *DvcHeader, s []byte) {
@@ -123,7 +124,7 @@ func (c *DvcClient) processCreateReq(hdr *DvcHeader, s []byte) {
 	channelId := readDvcId(r, hdr.cbChId)
 	name, _ := core.ReadBytes(r.Len(), r)
 	channelName := string(name)
-	glog.Infof("Server requests channelId=%d, name=%s", channelId, channelName)
+	slog.Info(fmt.Sprintf("Server requests channelId=%d, name=%s", channelId, channelName))
 
 	//response
 	b := &bytes.Buffer{}
@@ -149,7 +150,7 @@ func (c *DvcClient) processCapsPdu(hdr *DvcHeader, s []byte) {
 	r := bytes.NewReader(s)
 	core.ReadUInt8(r)
 	ver, _ := core.ReadUint16LE(r)
-	glog.Infof("Server supports dvc=%d", ver)
+	slog.Info(fmt.Sprintf("Server supports dvc=%d", ver))
 
 	hdr.cmd = DYNVC_CAPABILITIES
 	hdr.cbChId = 0

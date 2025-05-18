@@ -4,9 +4,10 @@ package rail
 import (
 	"bytes"
 	"encoding/hex"
+	"log/slog"
+	"fmt"
 
 	"github.com/nakagami/grdp/core"
-	"github.com/nakagami/grdp/glog"
 	"github.com/nakagami/grdp/plugin"
 )
 
@@ -81,7 +82,7 @@ func (h *RailPDUHeader) serialize() []byte {
 }
 
 func (c *RailClient) sendData(mType uint16, ln int, s []byte) {
-	glog.Debug(ln, ":ln:", len(s), "data:", hex.EncodeToString(s))
+	slog.Debug("sendData", ln, "s_length", len(s), "data:", hex.EncodeToString(s))
 	header := NewRailPDUHeader(mType, uint16(ln))
 
 	b := &bytes.Buffer{}
@@ -92,7 +93,7 @@ func (c *RailClient) sendData(mType uint16, ln int, s []byte) {
 }
 
 func (c *RailClient) Send(s []byte) (int, error) {
-	glog.Debug("len:", len(s), "data:", hex.EncodeToString(s))
+	slog.Debug("len:", len(s), "data:", hex.EncodeToString(s))
 	name, _ := c.GetType()
 	return c.w.SendToChannel(name, s)
 }
@@ -104,36 +105,36 @@ func (c *RailClient) GetType() (string, uint32) {
 }
 
 func (c *RailClient) Process(s []byte) {
-	glog.Debug("recv:", hex.EncodeToString(s))
+	slog.Debug("recv:", hex.EncodeToString(s))
 	r := bytes.NewReader(s)
 	msgType, _ := core.ReadUint16LE(r)
 	length, _ := core.ReadUint16LE(r)
 
-	glog.Infof("rail: type=0x%x length=%d, all=%d", msgType, length, r.Len())
+	slog.Info(fmt.Sprintf("rail: type=0x%x length=%d, all=%d", msgType, length, r.Len()))
 
 	b, _ := core.ReadBytes(int(length), r)
-	glog.Info("b:", hex.EncodeToString(b))
+	slog.Info("b:", hex.EncodeToString(b))
 
 	switch msgType {
 	case TS_RAIL_ORDER_HANDSHAKE:
-		glog.Info("TS_RAIL_ORDER_HANDSHAKE")
+		slog.Info("TS_RAIL_ORDER_HANDSHAKE")
 		c.processOrderHandshake(b)
 	case TS_RAIL_ORDER_SYSPARAM:
-		glog.Info("TS_RAIL_ORDER_SYSPARAM")
+		slog.Info("TS_RAIL_ORDER_SYSPARAM")
 		c.processOrderSysparam(b)
 	case TS_RAIL_ORDER_EXEC_RESULT:
-		glog.Info("TS_RAIL_ORDER_EXEC_RESULT")
+		slog.Info("TS_RAIL_ORDER_EXEC_RESULT")
 		c.processExecResult(b)
 
 	default:
-		glog.Errorf("type 0x%x not supported", msgType)
+		slog.Error(fmt.Sprintf("type 0x%x not supported", msgType))
 	}
 }
 
 func (c *RailClient) processOrderHandshake(b []byte) {
 	r := bytes.NewReader(b)
 	buildNumber, _ := core.ReadUInt32LE(r)
-	glog.Info("buildNumber:", buildNumber)
+	slog.Info("buildNumber:", buildNumber)
 
 	//send client info
 	c.sendClientStatus()
@@ -158,7 +159,7 @@ const (
 )
 
 func (c *RailClient) sendClientStatus() {
-	glog.Info("Send client Status")
+	slog.Info("Send client Status")
 	var flags uint32 = TS_RAIL_CLIENTSTATUS_ALLOWLOCALMOVESIZE
 
 	//if (settings->AutoReconnectionEnabled)
@@ -250,7 +251,7 @@ type RailSysparamOrder struct {
 }
 
 func (c *RailClient) sendClientSystemparam() {
-	glog.Info("Send client Systemparam")
+	slog.Info("Send client Systemparam")
 
 	var sp RailSysparamOrder
 	sp.params = 0
@@ -304,7 +305,7 @@ func (c *RailClient) sendClientSystemparam() {
 
 	if sp.params&SPI_MASK_SET_WORK_AREA != 0 {
 		sp.param = SPI_SET_WORK_AREA
-		glog.Debug("SPI_SET_WORK_AREA")
+		slog.Debug("SPI_SET_WORK_AREA")
 		c.sendOneClientSysparam(&sp)
 	}
 }
@@ -373,7 +374,7 @@ func (c *RailClient) sendOneClientSysparam(sp *RailSysparamOrder) {
 		core.WriteUInt8(sp.setScreenSaveActive, b)
 
 	default:
-		glog.Error("ERROR_BAD_ARGUMENTS")
+		slog.Error("ERROR_BAD_ARGUMENTS")
 		return
 	}
 
@@ -388,7 +389,7 @@ type RailExecOrder struct {
 }
 
 func (c *RailClient) sendClientExecute() {
-	glog.Info("Send Client Execute")
+	slog.Info("Send Client Execute")
 	var exec RailExecOrder
 	//exec.flags = TS_RAIL_EXEC_FLAG_EXPAND_ARGUMENTS
 	exec.RemoteApplicationProgram = c.RemoteApplicationProgram
@@ -418,7 +419,7 @@ func (c *RailClient) processOrderSysparam(b []byte) {
 	r := bytes.NewReader(b)
 	systemParam, _ := core.ReadUInt32LE(r)
 	body, _ := core.ReadUInt8(r)
-	glog.Infof("systemParam:0x%x, body:%d", systemParam, body)
+	slog.Info(fmt.Sprintf("systemParam:0x%x, body:%d", systemParam, body))
 }
 
 const (
@@ -446,6 +447,6 @@ func (c *RailClient) processExecResult(b []byte) {
 	core.ReadUint16LE(r)
 	exeOrFileLength, _ := core.ReadUint16LE(r)
 	exeOrFile, _ := core.ReadBytes(r.Len(), r)
-	glog.Info("flags:", flags, "execResult:", execResult, "rawResult:", rawResult)
-	glog.Info("length:", exeOrFileLength, "file:", core.UnicodeDecode(exeOrFile))
+	slog.Info("flags:", flags, "execResult:", execResult, "rawResult:", rawResult)
+	slog.Info("length:", exeOrFileLength, "file:", core.UnicodeDecode(exeOrFile))
 }

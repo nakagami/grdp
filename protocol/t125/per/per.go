@@ -3,8 +3,7 @@ package per
 import (
 	"bytes"
 	"io"
-
-	"github.com/nakagami/grdp/glog"
+	"log/slog"
 
 	"github.com/nakagami/grdp/core"
 )
@@ -159,7 +158,7 @@ func ReadInteger(r io.Reader) uint32 {
 		ret, _ := core.ReadUInt32BE(r)
 		return ret
 	default:
-		glog.Info("ReadInteger")
+		slog.Info("ReadInteger")
 	}
 	return 0
 }
