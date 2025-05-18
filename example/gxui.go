@@ -150,7 +150,6 @@ func ui_paint_bitmap(bs []grdp.Bitmap) {
 
 type Control interface {
 	Login(domain, user, password string) error
-	SetRequestedProtocol(p uint32)
 	KeyUp(sc int, name string)
 	KeyDown(sc int, name string)
 	MouseMove(x, y int)
