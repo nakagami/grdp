@@ -166,7 +166,7 @@ func (c *Client) recvDemandActivePDU(s []byte) {
 		return
 	}
 	if pdu.ShareCtrlHeader.PDUType != PDUTYPE_DEMANDACTIVEPDU {
-		slog.Info("PDU ignore message during connection sequence, type is", pdu.ShareCtrlHeader.PDUType)
+		slog.Info(fmt.Sprintf("PDU ignore message during connection sequence, type is", pdu.ShareCtrlHeader.PDUType))
 		c.transport.Once("data", c.recvDemandActivePDU)
 		return
 	}
