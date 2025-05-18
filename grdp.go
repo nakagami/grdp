@@ -154,11 +154,12 @@ func (g *RdpClient) Login(domain string, user string, password string) error {
 	if err != nil {
 		return fmt.Errorf("[x224 connect err] %v", err)
 	}
-	return nil
-}
 
-func (g *RdpClient) PDU() *pdu.Client {
-	return g.pdu
+	g.OnReady(func() {
+		g.eventReady = true
+	})
+
+	return nil
 }
 
 func (g *RdpClient) OnError(f func(e error)) *RdpClient {
@@ -182,6 +183,10 @@ func (g *RdpClient) OnReady(f func()) *RdpClient {
 
 func (g *RdpClient) OnBitmap(paint_bitmap func([]Bitmap)) *RdpClient {
 	g.pdu.On("bitmap", func(rectangles []pdu.BitmapData) {
+		if !g.eventReady {
+			return
+		}
+
 		slog.Info("on bitmap", "rectangles_length", len(rectangles))
 		bs := make([]Bitmap, 0, 50)
 		for _, v := range rectangles {
@@ -205,6 +210,9 @@ func (g *RdpClient) OnBitmap(paint_bitmap func([]Bitmap)) *RdpClient {
 }
 
 func (g *RdpClient) KeyUp(sc int, name string) {
+	if !g.eventReady {
+		return
+	}
 	slog.Debug(fmt.Sprintf("KeyUp: 0x%x, name: %s", sc, name))
 
 	p := &pdu.ScancodeKeyEvent{}
@@ -213,6 +221,9 @@ func (g *RdpClient) KeyUp(sc int, name string) {
 	g.pdu.SendInputEvents(pdu.INPUT_EVENT_SCANCODE, []pdu.InputEventsInterface{p})
 }
 func (g *RdpClient) KeyDown(sc int, name string) {
+	if !g.eventReady {
+		return
+	}
 	slog.Debug(fmt.Sprintf("KeyDown: 0x%x, name: %s", sc, name))
 
 	p := &pdu.ScancodeKeyEvent{}
@@ -221,6 +232,9 @@ func (g *RdpClient) KeyDown(sc int, name string) {
 }
 
 func (g *RdpClient) MouseMove(x, y int) {
+	if !g.eventReady {
+		return
+	}
 	slog.Debug("MouseMove", "x", x, "y", y)
 	p := &pdu.PointerEvent{}
 	p.PointerFlags |= pdu.PTRFLAGS_MOVE
@@ -230,6 +244,9 @@ func (g *RdpClient) MouseMove(x, y int) {
 }
 
 func (g *RdpClient) MouseWheel(scroll, x, y int) {
+	if !g.eventReady {
+		return
+	}
 	slog.Info("MouseWheel", "x", x, "y", y)
 	p := &pdu.PointerEvent{}
 	p.PointerFlags |= pdu.PTRFLAGS_WHEEL
@@ -239,6 +256,9 @@ func (g *RdpClient) MouseWheel(scroll, x, y int) {
 }
 
 func (g *RdpClient) MouseUp(button int, x, y int) {
+	if !g.eventReady {
+		return
+	}
 	slog.Debug("MouseUp", "x", x, "y", y, "button", button)
 	p := &pdu.PointerEvent{}
 
@@ -258,6 +278,9 @@ func (g *RdpClient) MouseUp(button int, x, y int) {
 	g.pdu.SendInputEvents(pdu.INPUT_EVENT_MOUSE, []pdu.InputEventsInterface{p})
 }
 func (g *RdpClient) MouseDown(button int, x, y int) {
+	if !g.eventReady {
+		return
+	}
 	slog.Info("MouseDown:", "x", x, "y", y, "button", button)
 	p := &pdu.PointerEvent{}
 
@@ -279,6 +302,9 @@ func (g *RdpClient) MouseDown(button int, x, y int) {
 	g.pdu.SendInputEvents(pdu.INPUT_EVENT_MOUSE, []pdu.InputEventsInterface{p})
 }
 func (g *RdpClient) Close() {
+	if !g.eventReady {
+		return
+	}
 	if g != nil && g.tpkt != nil {
 		g.tpkt.Close()
 	}

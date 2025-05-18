@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/google/gxui/drivers/gl"
 
@@ -127,7 +126,6 @@ func update() {
 				paint_bitmap(bs)
 			default:
 			}
-			time.Sleep(10 * time.Millisecond)
 		}
 	}()
 }
