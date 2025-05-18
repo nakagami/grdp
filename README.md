@@ -20,10 +20,10 @@ For example clipboard.
 
 Prepare environment variables
 ```
-export GRDP_USER=nakagami
-export GRDP_PASSWORD=ZYL7P8dd*
+export GRDP_USER=user
+export GRDP_PASSWORD=password
 export GRDP_PORT=3389
-export GRDP_HOST=35.155.71.61
+export GRDP_HOST=host
 ```
 
 Clone and execute example
