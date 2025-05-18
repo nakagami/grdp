@@ -6,7 +6,6 @@ import (
 	"image/color"
 	"log/slog"
 	"net"
-	"time"
 
 	"github.com/nakagami/grdp/plugin"
 
@@ -61,7 +60,7 @@ func toRGBA(pixel int, i int, data []byte) (r, g, b, a uint8) {
 	return
 }
 
-func BitmapToRGBA(bm Bitmap) *image.RGBA {
+func (bm *Bitmap) BitmapToRGBA() *image.RGBA {
 	i := 0
 	pixel := bm.BitsPerPixel
 	m := image.NewRGBA(image.Rect(0, 0, bm.Width, bm.Height))
@@ -84,7 +83,7 @@ func NewRdpClient(host string, width, height int) *RdpClient {
 	}
 }
 
-func Bpp(BitsPerPixel uint16) (pixel int) {
+func bpp(BitsPerPixel uint16) (pixel int) {
 	switch BitsPerPixel {
 	case 15:
 		pixel = 1
@@ -106,7 +105,7 @@ func Bpp(BitsPerPixel uint16) (pixel int) {
 
 func (g *RdpClient) Login(domain string, user string, password string) error {
 	slog.Info("Login", "Host", g.hostPort, "domain", domain, "user", user)
-	conn, err := net.DialTimeout("tcp", g.hostPort, 3*time.Second)
+	conn, err := net.Dial("tcp", g.hostPort)
 	if err != nil {
 		return fmt.Errorf("[dial err] %v", err)
 	}
@@ -169,6 +168,7 @@ func (g *RdpClient) OnSucces(f func()) *RdpClient {
 	g.pdu.On("succes", f)
 	return g
 }
+
 func (g *RdpClient) OnReady(f func()) *RdpClient {
 	g.pdu.On("ready", f)
 	return g
@@ -180,13 +180,13 @@ func (g *RdpClient) OnBitmap(paint func([]Bitmap)) *RdpClient {
 			return
 		}
 
-		slog.Info("on bitmap", "rectangles_length", len(rectangles))
+		slog.Debug("on bitmap", "rectangles_length", len(rectangles))
 		bs := make([]Bitmap, 0, 50)
 		for _, v := range rectangles {
 			IsCompress := v.IsCompress()
 			data := v.BitmapDataStream
 			if IsCompress {
-				data = core.Decompress(v.BitmapDataStream, int(v.Width), int(v.Height), Bpp(v.BitsPerPixel))
+				data = core.Decompress(v.BitmapDataStream, int(v.Width), int(v.Height), bpp(v.BitsPerPixel))
 				slog.Debug("on bitmap decompressed", "data_length", len(data))
 				IsCompress = false
 			} else {
@@ -194,7 +194,7 @@ func (g *RdpClient) OnBitmap(paint func([]Bitmap)) *RdpClient {
 			}
 
 			b := Bitmap{int(v.DestLeft), int(v.DestTop), int(v.DestRight), int(v.DestBottom),
-				int(v.Width), int(v.Height), Bpp(v.BitsPerPixel), data}
+				int(v.Width), int(v.Height), bpp(v.BitsPerPixel), data}
 			bs = append(bs, b)
 		}
 		paint(bs)
@@ -213,6 +213,7 @@ func (g *RdpClient) KeyUp(sc int, name string) {
 	p.KeyboardFlags |= pdu.KBDFLAGS_RELEASE
 	g.pdu.SendInputEvents(pdu.INPUT_EVENT_SCANCODE, []pdu.InputEventsInterface{p})
 }
+
 func (g *RdpClient) KeyDown(sc int, name string) {
 	if !g.eventReady {
 		return
@@ -294,6 +295,7 @@ func (g *RdpClient) MouseDown(button int, x, y int) {
 	p.YPos = uint16(y)
 	g.pdu.SendInputEvents(pdu.INPUT_EVENT_MOUSE, []pdu.InputEventsInterface{p})
 }
+
 func (g *RdpClient) Close() {
 	if !g.eventReady {
 		return

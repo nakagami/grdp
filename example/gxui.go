@@ -19,7 +19,7 @@ import (
 )
 
 var (
-	gc            Control
+	gc            *grdp.RdpClient
 	driverc       gxui.Driver
 	width, height int
 	ScreenImage   *image.RGBA
@@ -132,8 +132,7 @@ func update() {
 
 func paint_bitmap(bs []grdp.Bitmap) {
 	for _, bm := range bs {
-		m := grdp.BitmapToRGBA(bm)
-
+		m := bm.BitmapToRGBA()
 		draw.Draw(ScreenImage, ScreenImage.Bounds().Add(image.Pt(bm.DestLeft, bm.DestTop)), m, m.Bounds().Min, draw.Src)
 	}
 
@@ -146,17 +145,6 @@ func paint_bitmap(bs []grdp.Bitmap) {
 
 func ui_paint_bitmap(bs []grdp.Bitmap) {
 	BitmapCH <- bs
-}
-
-type Control interface {
-	Login(domain, user, password string) error
-	KeyUp(sc int, name string)
-	KeyDown(sc int, name string)
-	MouseMove(x, y int)
-	MouseWheel(scroll, x, y int)
-	MouseUp(button int, x, y int)
-	MouseDown(button int, x, y int)
-	Close()
 }
 
 var KeyMap = map[gxui.KeyboardKey]int{
