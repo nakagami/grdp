@@ -845,10 +845,10 @@ func decompress4(output *[]uint8, width, height int, input []uint8, size int) bo
 }
 
 /* main decompress function */
-func Decompress(input []uint8, width, height int, Bpp int) []uint8 {
-	size := width * height * Bpp
+func Decompress(input []uint8, width, height int, bpp int) []uint8 {
+	size := width * height * bpp
 	output := make([]uint8, size)
-	switch Bpp {
+	switch bpp {
 	case 1:
 		decompress1(&output, width, height, input, size)
 	case 2:
@@ -858,7 +858,7 @@ func Decompress(input []uint8, width, height int, Bpp int) []uint8 {
 	case 4:
 		decompress4(&output, width, height, input, size)
 	default:
-		fmt.Printf("Bpp %d\n", Bpp)
+		fmt.Printf("bpp %d\n", bpp)
 	}
 
 	return output
