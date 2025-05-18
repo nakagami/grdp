@@ -287,7 +287,7 @@ func (x *X224) recvConnectionConfirm(s []byte) {
 		slog.Info("*** SSL security selected ***")
 		err := x.transport.(*tpkt.TPKT).StartTLS()
 		if err != nil {
-			slog.Error("start tls failed:", err)
+			slog.Error("start tls failed:", "err", err)
 			return
 		}
 		x.Emit("connect", x.selectedProtocol)
@@ -298,7 +298,7 @@ func (x *X224) recvConnectionConfirm(s []byte) {
 		slog.Info("*** NLA Security selected ***")
 		err := x.transport.(*tpkt.TPKT).StartNLA()
 		if err != nil {
-			slog.Error("start NLA failed:", err)
+			slog.Error("start NLA failed:", "err", err)
 			return
 		}
 		x.Emit("connect", x.selectedProtocol)
