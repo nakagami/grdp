@@ -2,15 +2,15 @@ package grdp
 
 import (
 	"fmt"
-	"net"
-	"time"
 	"image"
 	"image/color"
+	"log/slog"
+	"net"
+	"time"
 
 	"github.com/nakagami/grdp/plugin"
 
 	"github.com/nakagami/grdp/core"
-	"github.com/nakagami/grdp/glog"
 	"github.com/nakagami/grdp/protocol/nla"
 	"github.com/nakagami/grdp/protocol/pdu"
 	"github.com/nakagami/grdp/protocol/sec"
@@ -43,36 +43,36 @@ type Bitmap struct {
 }
 
 func toRGBA(pixel int, i int, data []byte) (r, g, b, a uint8) {
-    a = 255
-    switch pixel {
-    case 1:
-        rgb555 := core.Uint16BE(data[i], data[i+1])
-        r, g, b = core.RGB555ToRGB(rgb555)
-    case 2:
-        rgb565 := core.Uint16BE(data[i], data[i+1])
-        r, g, b = core.RGB565ToRGB(rgb565)
-    case 3, 4:
-        fallthrough
-    default:
-        r, g, b = data[i+2], data[i+1], data[i]
-    }
+	a = 255
+	switch pixel {
+	case 1:
+		rgb555 := core.Uint16BE(data[i], data[i+1])
+		r, g, b = core.RGB555ToRGB(rgb555)
+	case 2:
+		rgb565 := core.Uint16BE(data[i], data[i+1])
+		r, g, b = core.RGB565ToRGB(rgb565)
+	case 3, 4:
+		fallthrough
+	default:
+		r, g, b = data[i+2], data[i+1], data[i]
+	}
 
-    return
+	return
 }
 
 func BitmapToRGBA(bm Bitmap) *image.RGBA {
-    i := 0
-    pixel := bm.BitsPerPixel
-    m := image.NewRGBA(image.Rect(0, 0, bm.Width, bm.Height))
-    for y := 0; y < bm.Height; y++ {
-        for x := 0; x < bm.Width; x++ {
-            r, g, b, a := toRGBA(pixel, i, bm.Data)
-            c := color.RGBA{r, g, b, a}
-            i += pixel
-            m.Set(x, y, c)
-        }
-    }
-    return m
+	i := 0
+	pixel := bm.BitsPerPixel
+	m := image.NewRGBA(image.Rect(0, 0, bm.Width, bm.Height))
+	for y := 0; y < bm.Height; y++ {
+		for x := 0; x < bm.Width; x++ {
+			r, g, b, a := toRGBA(pixel, i, bm.Data)
+			c := color.RGBA{r, g, b, a}
+			i += pixel
+			m.Set(x, y, c)
+		}
+	}
+	return m
 }
 
 func NewRdpClient(host string, width, height int) *RdpClient {
@@ -101,7 +101,7 @@ func Bpp(BitsPerPixel uint16) (pixel int) {
 		pixel = 4
 
 	default:
-		glog.Error("invalid bitmap data format")
+		slog.Error("invalid bitmap data format")
 	}
 	return
 }
@@ -111,7 +111,7 @@ func BitmapDecompress(bitmap *pdu.BitmapData) []byte {
 }
 
 func (g *RdpClient) Login(domain string, user string, password string) error {
-	glog.Info("Connect:", g.Host, "with", domain+"\\"+user, ":", password)
+	slog.Info("Login", "Host", g.Host, "domain", domain, "user", user)
 	conn, err := net.DialTimeout("tcp", g.Host, 3*time.Second)
 	if err != nil {
 		return fmt.Errorf("[dial err] %v", err)
@@ -181,17 +181,17 @@ func (g *RdpClient) OnReady(f func()) *RdpClient {
 
 func (g *RdpClient) OnBitmap(paint_bitmap func([]Bitmap)) *RdpClient {
 	g.pdu.On("bitmap", func(rectangles []pdu.BitmapData) {
-		glog.Info("on bitmap len(rectangles)", len(rectangles))
+		slog.Info("on bitmap", "rectangles_length", len(rectangles))
 		bs := make([]Bitmap, 0, 50)
 		for _, v := range rectangles {
 			IsCompress := v.IsCompress()
 			data := v.BitmapDataStream
 			if IsCompress {
 				data = BitmapDecompress(&v)
-				glog.Debug("uncompressed len(data)", len(data))
+				slog.Debug("on bitmap decompressed", "data_length", len(data))
 				IsCompress = false
 			} else {
-				glog.Debug("len(data)", len(data))
+				slog.Debug("on bitmap", "data_length", len(data))
 			}
 
 			b := Bitmap{int(v.DestLeft), int(v.DestTop), int(v.DestRight), int(v.DestBottom),
@@ -204,7 +204,7 @@ func (g *RdpClient) OnBitmap(paint_bitmap func([]Bitmap)) *RdpClient {
 }
 
 func (g *RdpClient) KeyUp(sc int, name string) {
-	glog.Debugf("KeyUp: 0x%x, name: %s", sc, name)
+	slog.Debug(fmt.Sprintf("KeyUp: 0x%x, name: %s", sc, name))
 
 	p := &pdu.ScancodeKeyEvent{}
 	p.KeyCode = uint16(sc)
@@ -212,7 +212,7 @@ func (g *RdpClient) KeyUp(sc int, name string) {
 	g.pdu.SendInputEvents(pdu.INPUT_EVENT_SCANCODE, []pdu.InputEventsInterface{p})
 }
 func (g *RdpClient) KeyDown(sc int, name string) {
-	glog.Debugf("KeyDown: 0x%x, name: %s", sc, name)
+	slog.Debug(fmt.Sprintf("KeyDown: 0x%x, name: %s", sc, name))
 
 	p := &pdu.ScancodeKeyEvent{}
 	p.KeyCode = uint16(sc)
@@ -220,7 +220,7 @@ func (g *RdpClient) KeyDown(sc int, name string) {
 }
 
 func (g *RdpClient) MouseMove(x, y int) {
-	glog.Debug("MouseMove", x, ":", y)
+	slog.Debug("MouseMove", "x", x, "y", y)
 	p := &pdu.PointerEvent{}
 	p.PointerFlags |= pdu.PTRFLAGS_MOVE
 	p.XPos = uint16(x)
@@ -229,7 +229,7 @@ func (g *RdpClient) MouseMove(x, y int) {
 }
 
 func (g *RdpClient) MouseWheel(scroll, x, y int) {
-	glog.Info("MouseWheel", x, ":", y)
+	slog.Info("MouseWheel", "x", x, "y", y)
 	p := &pdu.PointerEvent{}
 	p.PointerFlags |= pdu.PTRFLAGS_WHEEL
 	p.XPos = uint16(x)
@@ -238,7 +238,7 @@ func (g *RdpClient) MouseWheel(scroll, x, y int) {
 }
 
 func (g *RdpClient) MouseUp(button int, x, y int) {
-	glog.Debug("MouseUp", x, ":", y, ":", button)
+	slog.Debug("MouseUp", "x", x, "y", y, "button", button)
 	p := &pdu.PointerEvent{}
 
 	switch button {
@@ -257,7 +257,7 @@ func (g *RdpClient) MouseUp(button int, x, y int) {
 	g.pdu.SendInputEvents(pdu.INPUT_EVENT_MOUSE, []pdu.InputEventsInterface{p})
 }
 func (g *RdpClient) MouseDown(button int, x, y int) {
-	glog.Info("MouseDown:", x, ":", y, ":", button)
+	slog.Info("MouseDown:", "x", x, "y", y, "button", button)
 	p := &pdu.PointerEvent{}
 
 	p.PointerFlags |= pdu.PTRFLAGS_DOWN

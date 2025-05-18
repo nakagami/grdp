@@ -11,7 +11,6 @@ func StartReadBytes(len int, r io.Reader, cb ReadBytesComplete) {
 	b := make([]byte, len)
 	go func() {
 		_, err := io.ReadFull(r, b)
-		//glog.Debug("StartReadBytes Get", n, "Bytes:", hex.EncodeToString(b))
 		cb(b, err)
 	}()
 }

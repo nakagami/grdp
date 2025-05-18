@@ -2,9 +2,9 @@ package rdpgfx
 
 import (
 	"encoding/hex"
+	"log/slog"
 
 	"github.com/nakagami/grdp/core"
-	"github.com/nakagami/grdp/glog"
 	"github.com/nakagami/grdp/plugin"
 )
 
@@ -16,7 +16,7 @@ type gfxClient struct {
 }
 
 func (c *gfxClient) Send(s []byte) (int, error) {
-	glog.Debug("len:", len(s), "data:", hex.EncodeToString(s))
+	slog.Debug("len:", len(s), "data:", hex.EncodeToString(s))
 	name, _ := c.GetType()
 	return c.w.SendToChannel(name, s)
 }

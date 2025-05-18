@@ -4,9 +4,8 @@ import "C"
 import (
 	"bytes"
 	"fmt"
+	"log/slog"
 	"unsafe"
-
-	"github.com/nakagami/grdp/glog"
 
 	"github.com/nakagami/grdp/core"
 	"github.com/nakagami/grdp/emission"
@@ -165,7 +164,7 @@ typedef UINT VCAPITYPE VIRTUALCHANNELWRITEEX(LPVOID pInitHandle, DWORD openHandl
 typedef VIRTUALCHANNELWRITEEX* PVIRTUALCHANNELWRITEEX;
 */
 
-//static channel name
+// static channel name
 const (
 	CLIPRDR_SVC_CHANNEL_NAME = "cliprdr" //剪切板
 	RDPDR_SVC_CHANNEL_NAME   = "rdpdr"   //设备重定向(打印机，磁盘，端口，智能卡等)
@@ -232,7 +231,7 @@ func (c *Channels) Register(t ChannelTransport) {
 	name, option := t.GetType()
 	_, ok := c.channels[name]
 	if ok {
-		glog.Warn("Already register channel:", name)
+		slog.Warn("Already register", "channel", name)
 		return
 	}
 	t.Sender(c)
@@ -242,7 +241,7 @@ func (c *Channels) Register(t ChannelTransport) {
 func (c *Channels) SendToChannel(channel string, s []byte) (int, error) {
 	cli, ok := c.channels[channel]
 	if !ok {
-		glog.Warn("No register channel:", channel)
+		slog.Warn("No register", "channel", channel)
 		return 0, fmt.Errorf("No register channel: %s", channel)
 	}
 	idx := 0
@@ -265,7 +264,7 @@ func (c *Channels) SendToChannel(channel string, s []byte) (int, error) {
 			flag |= CHANNEL_FLAG_LAST
 			ss = s[idx : idx+ln]
 		}
-		glog.Debug("len:", len(ss), "flag:", flag)
+		slog.Debug("SendToChannel", "len", len(ss), "flag", flag)
 		ln -= len(ss)
 		b.Reset()
 		core.WriteUInt32LE(uint32(len(s)), b)
@@ -279,13 +278,13 @@ func (c *Channels) SendToChannel(channel string, s []byte) (int, error) {
 func (c *Channels) process(channel string, s []byte) {
 	cli, ok := c.channels[channel]
 	if !ok {
-		glog.Warn("No found channel:", channel)
+		slog.Warn("process No found channel", "channel", channel)
 		return
 	}
 	r := bytes.NewReader(s)
 	ln, _ := core.ReadUInt32LE(r)
 	flags, _ := core.ReadUInt32LE(r)
-	glog.Debugf("channel:%s length: %d, flags: %d", channel, ln, flags)
+	slog.Debug(fmt.Sprintf("channel:%s length: %d, flags: %d", channel, ln, flags))
 	if flags&CHANNEL_FLAG_FIRST == 0 || flags&CHANNEL_FLAG_LAST == 0 {
 		if flags&CHANNEL_FLAG_FIRST != 0 {
 			c.buff.Reset()

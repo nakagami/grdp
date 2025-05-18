@@ -2,6 +2,7 @@ package sec
 
 import (
 	"bytes"
+	"fmt"
 	"crypto/md5"
 	"crypto/rand"
 	"crypto/rc4"
@@ -9,17 +10,15 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"errors"
-	"io"
-	"unicode/utf16"
-
 	"github.com/lunixbochs/struc"
-
-	"github.com/nakagami/grdp/protocol/nla"
+	"io"
+	"log/slog"
+	"unicode/utf16"
 
 	"github.com/nakagami/grdp/core"
 	"github.com/nakagami/grdp/emission"
-	"github.com/nakagami/grdp/glog"
 	"github.com/nakagami/grdp/protocol/lic"
+	"github.com/nakagami/grdp/protocol/nla"
 	"github.com/nakagami/grdp/protocol/t125"
 	"github.com/nakagami/grdp/protocol/t125/gcc"
 )
@@ -293,7 +292,7 @@ func (s *SEC) Close() error {
 }
 
 func (s *SEC) sendFlagged(flag uint16, data []byte) (n int, err error) {
-	glog.Trace("sendFlagged:", hex.EncodeToString(data))
+	slog.Debug(fmt.Sprintf("sendFlagged:", hex.EncodeToString(data)))
 	b := s.encryt(flag, data)
 	return s.transport.Write(b)
 }
@@ -333,13 +332,13 @@ func macData(macSaltKey, data []byte) []byte {
 func (s *SEC) readEncryptedPayload(data []byte, checkSum bool) []byte {
 	r := bytes.NewReader(data)
 	sign, _ := core.ReadBytes(8, r)
-	glog.Debug("read sign:", sign)
+	slog.Debug("read sign:", sign)
 	encryptedPayload, _ := core.ReadBytes(r.Len(), r)
 	if s.decryptRc4 == nil {
 		s.decryptRc4, _ = rc4.NewCipher(s.currentDecrytKey)
 	}
 	s.nbDecryptedPacket++
-	glog.Debug("nbDecryptedPacket:", s.nbDecryptedPacket)
+	slog.Debug("nbDecryptedPacket:", s.nbDecryptedPacket)
 	plaintext := make([]byte, len(encryptedPayload))
 	s.decryptRc4.XORKeyStream(plaintext, encryptedPayload)
 
@@ -352,12 +351,12 @@ func (s *SEC) writeEncryptedPayload(data []byte, checkSum bool) []byte {
 	}
 
 	if checkSum {
-		glog.Debug("need checkSum")
+		slog.Debug("need checkSum")
 		return []byte{}
 	}
 
 	s.nbEncryptedPacket++
-	glog.Debug("nbEncryptedPacket:", s.nbEncryptedPacket)
+	slog.Debug("nbEncryptedPacket:", s.nbEncryptedPacket)
 	b := &bytes.Buffer{}
 
 	sign := macData(s.macKey, data)[:8]
@@ -369,7 +368,7 @@ func (s *SEC) writeEncryptedPayload(data []byte, checkSum bool) []byte {
 	s.encryptRc4.XORKeyStream(plaintext, data)
 	b.Write(sign)
 	b.Write(plaintext)
-	glog.Debug("sign:", hex.EncodeToString(sign), "plaintext:", hex.EncodeToString(plaintext))
+	slog.Debug("sign:", hex.EncodeToString(sign), "plaintext:", hex.EncodeToString(plaintext))
 	return b.Bytes()
 }
 
@@ -475,15 +474,15 @@ func (c *Client) SetDomain(domain string) {
 }
 
 func (c *Client) connect(clientData []interface{}, serverData []interface{}, userId uint16, channels []t125.MCSChannelInfo) {
-	glog.Debug("sec on connect:", clientData)
-	glog.Debug("sec on connect:", serverData)
-	glog.Debug("sec on connect:", userId)
-	glog.Debug("sec on connect:", channels)
+	slog.Debug("sec on connect:", clientData)
+	slog.Debug("sec on connect:", serverData)
+	slog.Debug("sec on connect:", userId)
+	slog.Debug("sec on connect:", channels)
 	c.clientData = clientData
 	c.serverData = serverData
 	c.userId = userId
 	for _, channel := range channels {
-		glog.Infof("channel: %s <%d>:", channel.Name, channel.ID)
+		slog.Info(fmt.Sprintf("channel: %s <%d>:", channel.Name, channel.ID))
 		if channel.Name == t125.GLOBAL_CHANNEL_NAME {
 			c.channelId = channel.ID
 			//break
@@ -616,21 +615,21 @@ func generateKeys(clientRandom, serverRandom []byte, method uint32) ([]byte, []b
 	b.Write(clientRandom[:24])
 	b.Write(serverRandom[:24])
 	preMasterHash := b.Bytes()
-	glog.Debug("preMasterHash:", hex.EncodeToString(preMasterHash))
+	slog.Debug("preMasterHash:", hex.EncodeToString(preMasterHash))
 
 	masterHash := masterSecret(preMasterHash, clientRandom, serverRandom)
-	glog.Debug("masterHash:", hex.EncodeToString(masterHash))
+	slog.Debug("masterHash:", hex.EncodeToString(masterHash))
 
 	sessionKey := sessionKeyBlob(masterHash, clientRandom, serverRandom)
-	glog.Debug("sessionKey:", hex.EncodeToString(sessionKey))
+	slog.Debug("sessionKey:", hex.EncodeToString(sessionKey))
 
 	macKey128 := sessionKey[:16]
 	initialFirstKey128 := finalHash(sessionKey[16:32], clientRandom, serverRandom)
 	initialSecondKey128 := finalHash(sessionKey[32:48], clientRandom, serverRandom)
 
-	glog.Debug("macKey128:", hex.EncodeToString(macKey128))
-	glog.Debug("FirstKey128:", hex.EncodeToString(initialFirstKey128))
-	glog.Debug("SecondKey128:", hex.EncodeToString(initialSecondKey128))
+	slog.Debug("macKey128:", hex.EncodeToString(macKey128))
+	slog.Debug("FirstKey128:", hex.EncodeToString(initialFirstKey128))
+	slog.Debug("SecondKey128:", hex.EncodeToString(initialSecondKey128))
 	//generate valid key
 	if method == gcc.ENCRYPTION_FLAG_40BIT {
 		return gen40bits(macKey128), gen40bits(initialFirstKey128), gen40bits(initialSecondKey128)
@@ -657,13 +656,13 @@ func (e *ClientSecurityExchangePDU) serialize() []byte {
 	return buff.Bytes()
 }
 func (c *Client) sendClientRandom() {
-	glog.Debug("send Client Random")
+	slog.Debug("send Client Random")
 
 	clientRandom := core.Random(32)
-	glog.Debug("clientRandom:", hex.EncodeToString(clientRandom))
+	slog.Debug("clientRandom:", hex.EncodeToString(clientRandom))
 
 	serverRandom := c.ServerSecurityData().ServerRandom
-	glog.Debug("ServerRandom:", hex.EncodeToString(serverRandom))
+	slog.Debug("ServerRandom:", hex.EncodeToString(serverRandom))
 
 	c.macKey, c.initialDecrytKey, c.initialEncryptKey = generateKeys(clientRandom,
 		serverRandom, c.ServerSecurityData().EncryptionMethod)
@@ -674,20 +673,20 @@ func (c *Client) sendClientRandom() {
 
 	//verify certificate
 	if !c.ServerSecurityData().ServerCertificate.CertData.Verify() {
-		glog.Warn("Cannot verify server identity")
+		slog.Warn("Cannot verify server identity")
 	}
 
 	serverPubKey, _ := c.ServerSecurityData().ServerCertificate.CertData.GetPublicKey()
 	ret, err := rsa.EncryptPKCS1v15(rand.Reader, serverPubKey, core.Reverse(clientRandom))
 	if err != nil {
-		glog.Error("err:", err)
+		slog.Error("err:", err)
 	}
 	message := ClientSecurityExchangePDU{}
 	message.EncryptedClientRandom = core.Reverse(ret)
 	message.Length = uint32(len(message.EncryptedClientRandom) + 8)
 	message.Padding = make([]byte, 8)
 
-	glog.Debug("message:", message)
+	slog.Debug("message:", message)
 
 	c.sendFlagged(EXCHANGE_PKT, message.serialize())
 }
@@ -697,12 +696,12 @@ func (c *Client) sendInfoPkt() {
 		secFlag |= ENCRYPT
 	}
 
-	glog.Debug("RdpVersion:", c.ClientCoreData().RdpVersion, ":", gcc.RDP_VERSION_5_PLUS)
+	slog.Debug("RdpVersion:", c.ClientCoreData().RdpVersion, ":", gcc.RDP_VERSION_5_PLUS)
 	c.sendFlagged(secFlag, c.info.Serialize(c.ClientCoreData().RdpVersion == gcc.RDP_VERSION_5_PLUS))
 }
 
 func (c *Client) recvLicenceInfo(channel string, s []byte) {
-	glog.Debug("sec recvLicenceInfo", hex.EncodeToString(s))
+	slog.Debug("sec recvLicenceInfo", hex.EncodeToString(s))
 	r := bytes.NewReader(s)
 	h := readSecurityHeader(r)
 	if (h.securityFlag & LICENSE_PKT) == 0 {
@@ -713,26 +712,26 @@ func (c *Client) recvLicenceInfo(channel string, s []byte) {
 	p := lic.ReadLicensePacket(r)
 	switch p.BMsgtype {
 	case lic.NEW_LICENSE:
-		glog.Info("sec NEW_LICENSE")
+		slog.Info("sec NEW_LICENSE")
 		c.Emit("success")
 		goto connect
 	case lic.ERROR_ALERT:
 		message := p.LicensingMessage.(*lic.ErrorMessage)
-		glog.Info("sec ERROR_ALERT and ErrorCode:", message.DwErrorCode)
+		slog.Info("sec ERROR_ALERT and ErrorCode:", message.DwErrorCode)
 		if message.DwErrorCode == lic.STATUS_VALID_CLIENT && message.DwStateTransaction == lic.ST_NO_TRANSITION {
 			goto connect
 		}
 		goto retry
 	case lic.LICENSE_REQUEST:
-		glog.Info("sec LICENSE_REQUEST")
+		slog.Info("sec LICENSE_REQUEST")
 		c.sendClientNewLicenseRequest(p.LicensingMessage.([]byte))
 		goto retry
 	case lic.PLATFORM_CHALLENGE:
-		glog.Info("sec PLATFORM_CHALLENGE")
+		slog.Info("sec PLATFORM_CHALLENGE")
 		c.sendClientChallengeResponse(p.LicensingMessage.([]byte))
 		goto retry
 	default:
-		glog.Error("Not a valid license packet")
+		slog.Error("Not a valid license packet")
 		c.Emit("error", errors.New("Not a valid license packet"))
 		return
 	}
@@ -758,7 +757,7 @@ func (c *Client) sendClientNewLicenseRequest(data []byte) {
 		rd := bytes.NewReader(req.ServerCertificate.BlobData)
 		err := sc.Unpack(rd)
 		if err != nil {
-			glog.Error("read serverCertificate err:", err)
+			slog.Error("read serverCertificate err:", err)
 			return
 		}
 	}
@@ -782,7 +781,7 @@ func (c *Client) sendClientNewLicenseRequest(data []byte) {
 	serverPubKey, _ := sc.CertData.GetPublicKey()
 	ret, err := rsa.EncryptPKCS1v15(rand.Reader, serverPubKey, core.Reverse(preMasterSecret))
 	if err != nil {
-		glog.Error("err:", err)
+		slog.Error("err:", err)
 	}
 
 	buff.Write(core.Reverse(ret))
@@ -808,7 +807,7 @@ func (c *Client) sendClientNewLicenseRequest(data []byte) {
 	buff.Reset()
 	err = struc.Pack(buff, message)
 	if err != nil {
-		glog.Error("err:", err)
+		slog.Error("err:", err)
 	}
 
 	c.sendFlagged(LICENSE_PKT, buff.Bytes())
@@ -854,8 +853,8 @@ func (c *Client) sendClientChallengeResponse(data []byte) {
 }
 
 func (c *Client) recvData(channel string, s []byte) {
-	glog.Trace("sec recvData", hex.EncodeToString(s))
-	glog.Debugf("channel<%s> data len: %d", channel, len(s))
+	slog.Debug(fmt.Sprintf("sec recvData", hex.EncodeToString(s)))
+	slog.Debug(fmt.Sprintf("channel<%s> data len: %d", channel, len(s)))
 	data := c.decrytData(s)
 	if channel != t125.GLOBAL_CHANNEL_NAME {
 		c.Emit("channel", channel, data)
@@ -881,7 +880,7 @@ func (c *Client) SetChannelSender(f core.ChannelSender) {
 
 func (c *Client) SendToChannel(channel string, b []byte) (int, error) {
 	if !c.enableEncryption {
-		glog.Debug("Sec Client write", hex.EncodeToString(b))
+		slog.Debug("Sec Client write", hex.EncodeToString(b))
 		return c.channelSender.SendToChannel(channel, b)
 	}
 	var flag uint16 = ENCRYPT
@@ -894,6 +893,6 @@ func (c *Client) SendToChannel(channel string, b []byte) (int, error) {
 	core.WriteUInt16LE(flag, buff)
 	core.WriteUInt16LE(0, buff)
 	core.WriteBytes(data, buff)
-	glog.Debug("Sec Client write", channel, hex.EncodeToString(buff.Bytes()))
+	slog.Debug("Sec Client write", channel, hex.EncodeToString(buff.Bytes()))
 	return c.channelSender.SendToChannel(channel, buff.Bytes())
 }
