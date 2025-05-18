@@ -83,9 +83,6 @@ func NewRdpClient(host string, width, height int) *RdpClient {
 		height:   height,
 	}
 }
-func (g *RdpClient) SetRequestedProtocol(p uint32) {
-	g.x224.SetRequestedProtocol(p)
-}
 
 func Bpp(BitsPerPixel uint16) (pixel int) {
 	switch BitsPerPixel {
@@ -105,10 +102,6 @@ func Bpp(BitsPerPixel uint16) (pixel int) {
 		slog.Error("invalid bitmap data format")
 	}
 	return
-}
-
-func BitmapDecompress(bitmap *pdu.BitmapData) []byte {
-	return core.Decompress(bitmap.BitmapDataStream, int(bitmap.Width), int(bitmap.Height), Bpp(bitmap.BitsPerPixel))
 }
 
 func (g *RdpClient) Login(domain string, user string, password string) error {
@@ -181,7 +174,7 @@ func (g *RdpClient) OnReady(f func()) *RdpClient {
 	return g
 }
 
-func (g *RdpClient) OnBitmap(paint_bitmap func([]Bitmap)) *RdpClient {
+func (g *RdpClient) OnBitmap(paint func([]Bitmap)) *RdpClient {
 	g.pdu.On("bitmap", func(rectangles []pdu.BitmapData) {
 		if !g.eventReady {
 			return
@@ -193,7 +186,7 @@ func (g *RdpClient) OnBitmap(paint_bitmap func([]Bitmap)) *RdpClient {
 			IsCompress := v.IsCompress()
 			data := v.BitmapDataStream
 			if IsCompress {
-				data = BitmapDecompress(&v)
+				data = core.Decompress(v.BitmapDataStream, int(v.Width), int(v.Height), Bpp(v.BitsPerPixel))
 				slog.Debug("on bitmap decompressed", "data_length", len(data))
 				IsCompress = false
 			} else {
@@ -204,7 +197,7 @@ func (g *RdpClient) OnBitmap(paint_bitmap func([]Bitmap)) *RdpClient {
 				int(v.Width), int(v.Height), Bpp(v.BitsPerPixel), data}
 			bs = append(bs, b)
 		}
-		paint_bitmap(bs)
+		paint(bs)
 	})
 	return g
 }
