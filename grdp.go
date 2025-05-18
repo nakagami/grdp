@@ -20,15 +20,16 @@ import (
 )
 
 type RdpClient struct {
-	Host     string // ip:port
-	Width    int
-	Height   int
-	tpkt     *tpkt.TPKT
-	x224     *x224.X224
-	mcs      *t125.MCSClient
-	sec      *sec.Client
-	pdu      *pdu.Client
-	channels *plugin.Channels
+	hostPort   string // ip:port
+	width      int
+	height     int
+	tpkt       *tpkt.TPKT
+	x224       *x224.X224
+	mcs        *t125.MCSClient
+	sec        *sec.Client
+	pdu        *pdu.Client
+	channels   *plugin.Channels
+	eventReady bool
 }
 
 type Bitmap struct {
@@ -77,9 +78,9 @@ func BitmapToRGBA(bm Bitmap) *image.RGBA {
 
 func NewRdpClient(host string, width, height int) *RdpClient {
 	return &RdpClient{
-		Host:   host,
-		Width:  width,
-		Height: height,
+		hostPort: host,
+		width:    width,
+		height:   height,
 	}
 }
 func (g *RdpClient) SetRequestedProtocol(p uint32) {
@@ -111,8 +112,8 @@ func BitmapDecompress(bitmap *pdu.BitmapData) []byte {
 }
 
 func (g *RdpClient) Login(domain string, user string, password string) error {
-	slog.Info("Login", "Host", g.Host, "domain", domain, "user", user)
-	conn, err := net.DialTimeout("tcp", g.Host, 3*time.Second)
+	slog.Info("Login", "Host", g.hostPort, "domain", domain, "user", user)
+	conn, err := net.DialTimeout("tcp", g.hostPort, 3*time.Second)
 	if err != nil {
 		return fmt.Errorf("[dial err] %v", err)
 	}
@@ -124,7 +125,7 @@ func (g *RdpClient) Login(domain string, user string, password string) error {
 	g.pdu = pdu.NewClient(g.sec)
 	g.channels = plugin.NewChannels(g.sec)
 
-	g.mcs.SetClientDesktop(uint16(g.Width), uint16(g.Height))
+	g.mcs.SetClientDesktop(uint16(g.width), uint16(g.height))
 	//clipboard
 	//g.channels.Register(cliprdr.NewCliprdrClient())
 	//g.mcs.SetClientCliprdr()
