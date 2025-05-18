@@ -241,7 +241,7 @@ func (g *RdpClient) MouseWheel(scroll, x, y int) {
 	if !g.eventReady {
 		return
 	}
-	slog.Info("MouseWheel", "x", x, "y", y)
+	slog.Debug("MouseWheel", "x", x, "y", y)
 	p := &pdu.PointerEvent{}
 	p.PointerFlags |= pdu.PTRFLAGS_WHEEL
 	p.XPos = uint16(x)
@@ -271,11 +271,12 @@ func (g *RdpClient) MouseUp(button int, x, y int) {
 	p.YPos = uint16(y)
 	g.pdu.SendInputEvents(pdu.INPUT_EVENT_MOUSE, []pdu.InputEventsInterface{p})
 }
+
 func (g *RdpClient) MouseDown(button int, x, y int) {
 	if !g.eventReady {
 		return
 	}
-	slog.Info("MouseDown:", "x", x, "y", y, "button", button)
+	slog.Debug("MouseDown", "x", x, "y", y, "button", button)
 	p := &pdu.PointerEvent{}
 
 	p.PointerFlags |= pdu.PTRFLAGS_DOWN
@@ -297,6 +298,7 @@ func (g *RdpClient) MouseDown(button int, x, y int) {
 }
 
 func (g *RdpClient) Close() {
+	slog.Debug("Close()")
 	if !g.eventReady {
 		return
 	}
