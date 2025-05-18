@@ -717,7 +717,7 @@ func (c *Client) recvLicenceInfo(channel string, s []byte) {
 		goto connect
 	case lic.ERROR_ALERT:
 		message := p.LicensingMessage.(*lic.ErrorMessage)
-		slog.Info("sec ERROR_ALERT and ErrorCode:", message.DwErrorCode)
+		slog.Info(fmt.Sprintf("sec ERROR_ALERT and ErrorCode:%v", message.DwErrorCode))
 		if message.DwErrorCode == lic.STATUS_VALID_CLIENT && message.DwStateTransaction == lic.ST_NO_TRANSITION {
 			goto connect
 		}
