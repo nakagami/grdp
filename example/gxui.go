@@ -19,12 +19,13 @@ import (
 )
 
 var (
-	gc            *grdp.RdpClient
-	driverc       gxui.Driver
-	width, height int
-	ScreenImage   *image.RGBA
-	img           gxui.Image
-	BitmapCH      chan []grdp.Bitmap
+	gc                     *grdp.RdpClient
+	driverc                gxui.Driver
+	width, height          int
+	ScreenImage            *image.RGBA
+	img                    gxui.Image
+	BitmapCH               chan []grdp.Bitmap
+	lastMouseX, lastMouseY int
 )
 
 func uiRdp(info *Info) (error, *grdp.RdpClient) {
@@ -66,10 +67,13 @@ func appMain(driver gxui.Driver) {
 		gc.MouseDown(int(e.Button), e.Point.X, e.Point.Y)
 	})
 	layoutImg.OnMouseUp(func(e gxui.MouseEvent) {
-		gc.MouseUp(int(e.Button), e.Point.X, e.Point.Y)
+		gc.MouseUp(int(e.Button), lastMouseX, lastMouseY)
+		//		gc.MouseUp(int(e.Button), e.Point.X, e.Point.Y)
 	})
 	layoutImg.OnMouseMove(func(e gxui.MouseEvent) {
 		gc.MouseMove(e.Point.X, e.Point.Y)
+		lastMouseX = e.Point.X
+		lastMouseY = e.Point.Y
 	})
 	layoutImg.OnMouseScroll(func(e gxui.MouseEvent) {
 		gc.MouseWheel(e.ScrollY, e.Point.X, e.Point.Y)
@@ -263,8 +267,8 @@ func transKey(in gxui.KeyboardKey) int {
 }
 
 func main() {
-//    handler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})
-//    slog.SetDefault(slog.New(handler))
+	//    handler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})
+	//    slog.SetDefault(slog.New(handler))
 
 	width, height = 1280, 1024
 	gl.StartDriver(appMain)
