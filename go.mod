@@ -21,5 +21,4 @@ require (
 	github.com/goxjs/glfw v0.0.0-20220119044647-4bcee99381f2 // indirect
 	github.com/stretchr/testify v1.5.1 // indirect
 	golang.org/x/image v0.0.0-20220617043117-41969df76e82 // indirect
-	honnef.co/go/js/dom v0.0.0-20210725211120-f030747120f2 // indirect
 )
