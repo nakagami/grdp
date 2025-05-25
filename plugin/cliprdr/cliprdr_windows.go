@@ -10,7 +10,7 @@ import (
 
 	"github.com/shirou/w32"
 
-	"github.com/tomatome/grdp/core"
+	"github.com/nakagami/grdp/core"
 
 	"github.com/tomatome/win"
 )

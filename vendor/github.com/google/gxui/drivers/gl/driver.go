@@ -188,7 +188,7 @@ func (d *driver) SetClipboard(str string) {
 func (d *driver) GetClipboard() (str string, err error) {
 	d.syncDriver(func() {
 		c := d.viewports.Front().Value.(*viewport)
-		str = c.window.GetClipboardString()
+		str, err = c.window.GetClipboardString()
 	})
 	return
 }
