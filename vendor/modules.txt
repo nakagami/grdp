@@ -31,8 +31,8 @@ github.com/google/gxui/samples/flags
 github.com/google/gxui/themes/basic
 github.com/google/gxui/themes/dark
 github.com/google/gxui/themes/light
-# github.com/googollee/go-socket.io v1.6.2
-## explicit; go 1.16
+# github.com/googollee/go-socket.io v1.4.4
+## explicit; go 1.13
 # github.com/gopherjs/gopherjs v1.17.2
 ## explicit; go 1.17
 github.com/gopherjs/gopherjs/js
