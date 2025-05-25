@@ -9,9 +9,10 @@ import (
 	"log/slog"
 	"reflect"
 
+	//	"github.com/nakagami/grdp/plugin/cliprdr"
 	"github.com/nakagami/grdp/plugin/rail"
 
-	"github.com/nakagami/grdp/plugin/drdynvc"
+	//	"github.com/nakagami/grdp/plugin/drdynvc"
 
 	"github.com/nakagami/grdp/core"
 	"github.com/nakagami/grdp/emission"
@@ -283,7 +284,7 @@ func (c *MCSClient) SetClientDesktop(width, height uint16) {
 
 func (c *MCSClient) SetClientDynvcProtocol() {
 	c.clientCoreData.EarlyCapabilityFlags = gcc.RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL
-	c.clientNetworkData.AddVirtualChannel(drdynvc.ChannelName, drdynvc.ChannelOption)
+	// c.clientNetworkData.AddVirtualChannel(drdynvc.ChannelName, drdynvc.ChannelOption)
 }
 
 func (c *MCSClient) SetClientRemoteProgram() {
@@ -292,7 +293,7 @@ func (c *MCSClient) SetClientRemoteProgram() {
 
 func (c *MCSClient) SetClientCliprdr() {
 	slog.Debug("mcs SetClientCliprdr")
-	// c.clientNetworkData.AddVirtualChannel(cliprdr.ChannelName, cliprdr.ChannelOption)
+	//c.clientNetworkData.AddVirtualChannel(cliprdr.ChannelName, cliprdr.ChannelOption)
 }
 
 func (c *MCSClient) connect(selectedProtocol uint32) {
