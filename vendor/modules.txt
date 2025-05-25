@@ -63,6 +63,3 @@ golang.org/x/crypto/md4
 ## explicit; go 1.12
 golang.org/x/image/font
 golang.org/x/image/math/fixed
-# honnef.co/go/js/dom v0.0.0-20210725211120-f030747120f2
-## explicit
-honnef.co/go/js/dom
