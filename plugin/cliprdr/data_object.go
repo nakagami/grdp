@@ -11,9 +11,9 @@ import (
 	"sync/atomic"
 	"syscall"
 	"unsafe"
+	"log/slog"
 
-	"github.com/tomatome/grdp/core"
-	"github.com/tomatome/grdp/glog"
+	"github.com/nakagami/grdp/core"
 	"github.com/tomatome/win"
 )
 
@@ -459,7 +459,7 @@ func (i *DataInstance) GetData(formatEtc *FORMATETC, medium *STGMEDIUM) uintptr 
 	if idx == -1 {
 		return E_FORMATETC
 	}
-	glog.Debugf("GetData:%+v, %s", formatEtc.CFormat, GetClipboardFormatName(formatEtc.CFormat))
+	slog.Debug(fmt.Sprintf("GetData:%+v, %s", formatEtc.CFormat, GetClipboardFormatName(formatEtc.CFormat)))
 
 	medium.Tymed = i.formatEtc[idx].Tymed
 
@@ -475,11 +475,11 @@ func (i *DataInstance) GetData(formatEtc *FORMATETC, medium *STGMEDIUM) uintptr 
 			var dsc FileGroupDescriptor
 			dsc.Unpack(b)
 			if dsc.CItems > 0 {
-				glog.Debug("Items:", dsc.CItems)
+				slog.Debug("Items:", dsc.CItems)
 				i.streams = make([]*StreamInstance, dsc.CItems)
 				var j uint32
 				for j = 0; j < dsc.CItems; j++ {
-					glog.Debug("FileName:", core.UnicodeDecode(dsc.Fgd[j].FileName))
+					slog.Debug("FileName:", core.UnicodeDecode(dsc.Fgd[j].FileName))
 					s := newStream(j, i.data, &dsc.Fgd[j])
 					i.streams[j] = s
 				}
@@ -746,7 +746,7 @@ func (i *StreamInstance) Release() uintptr {
 }
 
 func (i *StreamInstance) Read(pv uintptr, cb uint32, cbRead *uint32) uintptr {
-	glog.Debug("StreamInstance Read:", i.lOffset.QuadPart, i.lSize.QuadPart)
+	slog.Debug("StreamInstance Read:", i.lOffset.QuadPart, i.lSize.QuadPart)
 	if i.lOffset.QuadPart >= i.lSize.QuadPart {
 		return 1
 	}
@@ -768,7 +768,7 @@ func (i *StreamInstance) Read(pv uintptr, cb uint32, cbRead *uint32) uintptr {
 	win.RtlCopyMemory(pv, uintptr(unsafe.Pointer(&b[0])), win.SIZE_T(len(b)))
 	*cbRead = uint32(len(b))
 	i.lOffset.QuadPart += uint64(len(b))
-	glog.Debug("StreamInstance Read:", *cbRead, cb)
+	slog.Debug("StreamInstance Read:", *cbRead, cb)
 	if *cbRead < cb {
 		return 1
 	}
@@ -780,7 +780,7 @@ func (i *StreamInstance) Write(pv uintptr, cb uint32, cbWritten *uint32) uintptr
 }
 
 func (i *StreamInstance) Seek(dlibMove LARGE_INTEGER, dwOrigin uint32, plibNewPosition *ULARGE_INTEGER) uintptr {
-	glog.Debug("StreamInstance Seek:", dwOrigin, dlibMove, plibNewPosition)
+	slog.Debug("StreamInstance Seek:", dwOrigin, dlibMove, plibNewPosition)
 	var newoffset uint64 = i.lOffset.QuadPart
 	switch dwOrigin {
 	case STREAM_SEEK_SET:
@@ -798,7 +798,7 @@ func (i *StreamInstance) Seek(dlibMove LARGE_INTEGER, dwOrigin uint32, plibNewPo
 	default:
 		return E_INVALIDARG
 	}
-	glog.Debug("StreamInstance Seek:", newoffset, i.lSize.QuadPart)
+	slog.Debug("StreamInstance Seek:", newoffset, i.lSize.QuadPart)
 	if newoffset < 0 || newoffset >= i.lSize.QuadPart {
 		return 1
 	}
