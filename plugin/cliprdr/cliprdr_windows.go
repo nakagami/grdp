@@ -6,9 +6,9 @@ import (
 	"syscall"
 	"unicode/utf16"
 	"unsafe"
+	"log/slog"
 
 	"github.com/shirou/w32"
-	"github.com/tomatome/grdp/glog"
 
 	"github.com/tomatome/grdp/core"
 
@@ -83,22 +83,22 @@ func ClipWatcher(c *CliprdrClient) {
 		WndProc: syscall.NewCallback(func(hwnd w32.HWND, msg uint32, wParam, lParam uintptr) uintptr {
 			switch msg {
 			case w32.WM_CLIPBOARDUPDATE:
-				glog.Info("info: WM_CLIPBOARDUPDATE wParam:", wParam)
-				glog.Debug("IsClipboardOwner:", IsClipboardOwner(win.HWND(c.hwnd)))
-				glog.Debug("OleIsCurrentClipboard:", OleIsCurrentClipboard(c.dataObject))
+				slog.Info("info: WM_CLIPBOARDUPDATE wParam:", wParam)
+				slog.Debug("IsClipboardOwner:", IsClipboardOwner(win.HWND(c.hwnd)))
+				slog.Debug("OleIsCurrentClipboard:", OleIsCurrentClipboard(c.dataObject))
 				if !IsClipboardOwner(win.HWND(c.hwnd)) && int(wParam) != 0 &&
 					!OleIsCurrentClipboard(c.dataObject) {
 					c.sendFormatListPDU()
 				}
 
 			case w32.WM_RENDERALLFORMATS:
-				glog.Info("info: WM_RENDERALLFORMATS")
+				slog.Info("info: WM_RENDERALLFORMATS")
 				c.withOpenClipboard(func() {
 					EmptyClipboard()
 				})
 
 			case w32.WM_RENDERFORMAT:
-				glog.Info("info: WM_RENDERFORMAT wParam:", wParam)
+				slog.Info("info: WM_RENDERFORMAT wParam:", wParam)
 				formatId := uint32(wParam)
 				c.sendFormatDataRequest(formatId)
 				b := <-c.reply
@@ -106,7 +106,7 @@ func ClipWatcher(c *CliprdrClient) {
 				SetClipboardData(formatId, hmem)
 
 			case WM_CLIPRDR_MESSAGE:
-				glog.Info("info: WM_CLIPRDR_MESSAGE wParam:", wParam)
+				slog.Info("info: WM_CLIPRDR_MESSAGE wParam:", wParam)
 				if wParam == OLE_SETCLIPBOARD {
 					if !OleIsCurrentClipboard(c.dataObject) {
 						o := CreateDataObject(c)
@@ -188,7 +188,7 @@ func HmemAlloc(data []byte) uintptr {
 func SetClipboardData(formatId uint32, hmem uintptr) bool {
 	r := win.SetClipboardData(win.UINT(formatId), win.HANDLE(hmem))
 	if r == 0 {
-		//glog.Error("SetClipboardData failed:", formatId, hmem)
+		//slog.Error("SetClipboardData failed:", formatId, hmem)
 		return false
 	}
 	return true
@@ -250,7 +250,7 @@ func OleGetClipboard() *IDataObject {
 func OleSetClipboard(dataObject *IDataObject) bool {
 	r := win.OleSetClipboard((*win.IDataObject)(unsafe.Pointer(dataObject)))
 	if r != 0 {
-		glog.Error("OleSetClipboard failed")
+		slog.Error("OleSetClipboard failed")
 		return false
 	}
 	return true
