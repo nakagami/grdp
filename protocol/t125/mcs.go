@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"reflect"
 
+	"github.com/nakagami/grdp/plugin/cliprdr"
 	"github.com/nakagami/grdp/plugin/rail"
 
 	"github.com/nakagami/grdp/plugin/drdynvc"
@@ -292,7 +293,7 @@ func (c *MCSClient) SetClientRemoteProgram() {
 
 func (c *MCSClient) SetClientCliprdr() {
 	slog.Debug("mcs SetClientCliprdr")
-	// c.clientNetworkData.AddVirtualChannel(cliprdr.ChannelName, cliprdr.ChannelOption)
+	c.clientNetworkData.AddVirtualChannel(cliprdr.ChannelName, cliprdr.ChannelOption)
 }
 
 func (c *MCSClient) connect(selectedProtocol uint32) {
