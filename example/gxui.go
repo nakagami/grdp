@@ -51,7 +51,7 @@ func uiRdp(hostPort, domain, user, password string, height, width int) (error, *
 }
 
 func appMain(driver gxui.Driver) {
-	hostPort := strings.Join([]string{os.Getenv("GRDP_HOST"), ":", os.Getenv("GRDP_PORT")}, "")
+	hostPort := strings.Join([]string{os.Getenv("GRDP_HOST"), os.Getenv("GRDP_PORT")}, ":")
 	domain := os.Getenv("GRDP_DOMAIN")
 	user := os.Getenv("GRDP_USER")
 	password := os.Getenv("GRDP_PASSWORD")
@@ -78,18 +78,30 @@ func appMain(driver gxui.Driver) {
 	ScreenImage = image.NewRGBA(image.Rect(0, 0, width, height))
 
 	layoutImg.OnMouseDown(func(e gxui.MouseEvent) {
+		if rdpClient == nil {
+			return
+		}
 		rdpClient.MouseDown(int(e.Button), e.Point.X, e.Point.Y)
 	})
 	layoutImg.OnMouseUp(func(e gxui.MouseEvent) {
+		if rdpClient == nil {
+			return
+		}
 		rdpClient.MouseUp(int(e.Button), lastMouseX, lastMouseY)
 		//		rdpClient.MouseUp(int(e.Button), e.Point.X, e.Point.Y)
 	})
 	layoutImg.OnMouseMove(func(e gxui.MouseEvent) {
+		if rdpClient == nil {
+			return
+		}
 		rdpClient.MouseMove(e.Point.X, e.Point.Y)
 		lastMouseX = e.Point.X
 		lastMouseY = e.Point.Y
 	})
 	layoutImg.OnMouseScroll(func(e gxui.MouseEvent) {
+		if rdpClient == nil {
+			return
+		}
 		rdpClient.MouseWheel(e.ScrollY, e.Point.X, e.Point.Y)
 	})
 	window.OnKeyDown(func(e gxui.KeyboardEvent) {
