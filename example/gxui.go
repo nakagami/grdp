@@ -30,7 +30,7 @@ var (
 
 func uiRdp(info *Info) (error, *grdp.RdpClient) {
 	BitmapCH = make(chan []grdp.Bitmap, 500)
-	g := grdp.NewRdpClient(fmt.Sprintf("%s:%s", info.Host, info.Port), info.Width, info.Height)
+	g := grdp.NewRdpClient(info.HostPort, info.Width, info.Height)
 	err := g.Login(info.Domain, info.Username, info.Password)
 	if err != nil {
 		slog.Error("Login", "err", err)
@@ -93,11 +93,13 @@ func appMain(driver gxui.Driver) {
 		gc.KeyUp(key, "")
 	})
 
-	h := strings.Join([]string{os.Getenv("GRDP_HOST"), ":", os.Getenv("GRDP_PORT")}, "")
-	u := os.Getenv("GRDP_USER")
-	p := os.Getenv("GRDP_PASSWORD")
+	hostPort := strings.Join([]string{os.Getenv("GRDP_HOST"), ":", os.Getenv("GRDP_PORT")}, "")
+	domain := os.Getenv("GRDP_DOMAIN")
+	user := os.Getenv("GRDP_USER")
+	password := os.Getenv("GRDP_PASSWORD")
+	fmt.Println(domain)
 
-	err, info := NewInfo(h, u, p)
+	err, info := NewInfo(hostPort, domain, user, password)
 	info.Width, info.Height = width, height
 	if err != nil {
 		fmt.Println(err.Error())
@@ -276,37 +278,21 @@ func main() {
 
 type Info struct {
 	Domain   string
-	Host     string
-	Port     string
+	HostPort string
 	Username string
 	Password string
 	Height   int
 	Width    int
 }
 
-func NewInfo(ip, user, password string) (error, *Info) {
+func NewInfo(hostPort, domain, user, password string) (error, *Info) {
 	var i Info
-	if ip == "" || user == "" || password == "" {
+	if hostPort == "" || user == "" || password == "" {
 		return fmt.Errorf("Must ip/user/password"), nil
 	}
-	t := strings.Split(ip, ":")
-	i.Host = t[0]
-	i.Port = "3389"
-	if len(t) > 1 {
-		i.Port = t[1]
-	}
-	if strings.Index(user, "\\") != -1 {
-		t = strings.Split(user, "\\")
-		i.Domain = t[0]
-		i.Username = t[len(t)-1]
-	} else if strings.Index(user, "/") != -1 {
-		t = strings.Split(user, "/")
-		i.Domain = t[0]
-		i.Username = t[len(t)-1]
-	} else {
-		i.Username = user
-	}
-
+	i.HostPort = hostPort
+	i.Domain = domain
+	i.Username = user
 	i.Password = password
 
 	return nil, &i
