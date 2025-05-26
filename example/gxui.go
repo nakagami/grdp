@@ -18,7 +18,7 @@ import (
 )
 
 var (
-	rdpClient                     *grdp.RdpClient
+	rdpClient              *grdp.RdpClient
 	driverc                gxui.Driver
 	ScreenImage            *image.RGBA
 	img                    gxui.Image
