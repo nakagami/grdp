@@ -153,11 +153,11 @@ func (g *RdpClient) Login(domain string, user string, password string) error {
 	return nil
 }
 
-func (g *RdpClient) Width() {
+func (g *RdpClient) Width() int {
 	return g.width
 }
 
-func (g *RdpClient) Height() {
+func (g *RdpClient) Height() int {
 	return g.height
 }
 
