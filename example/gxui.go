@@ -20,14 +20,14 @@ import (
 var (
 	rdpClient              *grdp.RdpClient
 	driverc                gxui.Driver
-	ScreenImage            *image.RGBA
+	screenImage            *image.RGBA
 	img                    gxui.Image
-	BitmapCH               chan []grdp.Bitmap
+	bitmapCH               chan []grdp.Bitmap
 	lastMouseX, lastMouseY int
 )
 
 func uiRdp(hostPort, domain, user, password string, height, width int) (error, *grdp.RdpClient) {
-	BitmapCH = make(chan []grdp.Bitmap, 500)
+	bitmapCH = make(chan []grdp.Bitmap, 500)
 	g := grdp.NewRdpClient(hostPort, width, height)
 	err := g.Login(domain, user, password)
 	if err != nil {
@@ -44,7 +44,7 @@ func uiRdp(hostPort, domain, user, password string, height, width int) (error, *
 	}).OnReady(func() {
 		slog.Info("on ready")
 	}).OnBitmap(func(bs []grdp.Bitmap) {
-		BitmapCH <- bs
+		bitmapCH <- bs
 	})
 
 	return nil, g
@@ -75,7 +75,7 @@ func appMain(driver gxui.Driver) {
 	layoutImg.SetHorizontalAlignment(gxui.AlignCenter)
 	layoutImg.AddChild(img)
 	layoutImg.SetVisible(true)
-	ScreenImage = image.NewRGBA(image.Rect(0, 0, width, height))
+	screenImage = image.NewRGBA(image.Rect(0, 0, width, height))
 
 	layoutImg.OnMouseDown(func(e gxui.MouseEvent) {
 		if rdpClient == nil {
@@ -136,7 +136,7 @@ func update() {
 	go func() {
 		for {
 			select {
-			case bs := <-BitmapCH:
+			case bs := <-bitmapCH:
 				paint_bitmap(bs)
 			default:
 			}
@@ -147,11 +147,11 @@ func update() {
 func paint_bitmap(bs []grdp.Bitmap) {
 	for _, bm := range bs {
 		m := bm.BitmapToRGBA()
-		draw.Draw(ScreenImage, ScreenImage.Bounds().Add(image.Pt(bm.DestLeft, bm.DestTop)), m, m.Bounds().Min, draw.Src)
+		draw.Draw(screenImage, screenImage.Bounds().Add(image.Pt(bm.DestLeft, bm.DestTop)), m, m.Bounds().Min, draw.Src)
 	}
 
 	driverc.Call(func() {
-		texture := driverc.CreateTexture(ScreenImage, 1)
+		texture := driverc.CreateTexture(screenImage, 1)
 		img.SetTexture(texture)
 	})
 }
