@@ -154,11 +154,11 @@ func (g *RdpClient) Login(domain string, user string, password string) error {
 }
 
 func (g *RdpClient) Width() {
-    return g.width
+	return g.width
 }
 
 func (g *RdpClient) Height() {
-    return g.height
+	return g.height
 }
 
 func (g *RdpClient) OnError(f func(e error)) *RdpClient {
