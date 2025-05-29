@@ -43,7 +43,6 @@ type Bitmap struct {
 }
 
 func toRGBA(pixel int, i int, data []byte) (r, g, b, a uint8) {
-	a = 255
 	switch pixel {
 	case 1:
 		rgb555 := core.Uint16BE(data[i], data[i+1])
@@ -152,6 +151,14 @@ func (g *RdpClient) Login(domain string, user string, password string) error {
 	})
 
 	return nil
+}
+
+func (g *RdpClient) Width() {
+    return g.width
+}
+
+func (g *RdpClient) Height() {
+    return g.height
 }
 
 func (g *RdpClient) OnError(f func(e error)) *RdpClient {
