@@ -146,7 +146,7 @@ func update() {
 
 func paint_bitmap(bs []grdp.Bitmap) {
 	for _, bm := range bs {
-		m := bm.BitmapToRGBA()
+		m := bm.RGBA()
 		draw.Draw(screenImage, screenImage.Bounds().Add(image.Pt(bm.DestLeft, bm.DestTop)), m, m.Bounds().Min, draw.Src)
 	}
 

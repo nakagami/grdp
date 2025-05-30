@@ -42,7 +42,7 @@ type Bitmap struct {
 	Data         []byte
 }
 
-func toRGBA(pixel int, i int, data []byte) (r, g, b, a uint8) {
+func pixelToRGBA(pixel int, i int, data []byte) (r, g, b, a uint8) {
 	switch pixel {
 	case 1:
 		rgb555 := core.Uint16BE(data[i], data[i+1])
@@ -59,13 +59,13 @@ func toRGBA(pixel int, i int, data []byte) (r, g, b, a uint8) {
 	return
 }
 
-func (bm *Bitmap) BitmapToRGBA() *image.RGBA {
+func (bm *Bitmap) RGBA() *image.RGBA {
 	i := 0
 	pixel := bm.BitsPerPixel
 	m := image.NewRGBA(image.Rect(0, 0, bm.Width, bm.Height))
 	for y := 0; y < bm.Height; y++ {
 		for x := 0; x < bm.Width; x++ {
-			r, g, b, a := toRGBA(pixel, i, bm.Data)
+			r, g, b, a := pixelToRGBA(pixel, i, bm.Data)
 			c := color.RGBA{r, g, b, a}
 			i += pixel
 			m.Set(x, y, c)
