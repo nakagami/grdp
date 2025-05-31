@@ -25,6 +25,7 @@ export GRDP_USER=user
 export GRDP_PASSWORD=password
 export GRDP_PORT=3389
 export GRDP_HOST=host
+export GRDP_WINDOW_SIZE=1280x800
 ```
 
 Clone and execute example
