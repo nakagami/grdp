@@ -42,8 +42,8 @@ type Bitmap struct {
 	Data         []byte
 }
 
-func pixelRGBA(pixel int, i int, data []byte) (r, g, b, a uint8) {
-	a = 255
+func pixelToRGBA(pixel int, i int, data []byte) (r, g, b, a uint8) {
+    a = 255
 	switch pixel {
 	case 1:
 		rgb555 := core.Uint16BE(data[i], data[i+1])
@@ -66,7 +66,7 @@ func (bm *Bitmap) RGBA() *image.RGBA {
 	m := image.NewRGBA(image.Rect(0, 0, bm.Width, bm.Height))
 	for y := 0; y < bm.Height; y++ {
 		for x := 0; x < bm.Width; x++ {
-			r, g, b, a := pixelRGBA(pixel, i, bm.Data)
+			r, g, b, a := pixelToRGBA(pixel, i, bm.Data)
 			c := color.RGBA{r, g, b, a}
 			i += pixel
 			m.Set(x, y, c)
@@ -152,6 +152,14 @@ func (g *RdpClient) Login(domain string, user string, password string) error {
 	})
 
 	return nil
+}
+
+func (g *RdpClient) Width() int {
+	return g.width
+}
+
+func (g *RdpClient) Height() int {
+	return g.height
 }
 
 func (g *RdpClient) OnError(f func(e error)) *RdpClient {
