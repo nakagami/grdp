@@ -19,6 +19,7 @@ For example clipboard.
 ## How to execute example
 
 Prepare environment variables
+(In your environment. You may also need to set GRDP_DOMAIN)
 ```
 export GRDP_USER=user
 export GRDP_PASSWORD=password
