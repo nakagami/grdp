@@ -43,6 +43,7 @@ type Bitmap struct {
 }
 
 func pixelToRGBA(pixel int, i int, data []byte) (r, g, b, a uint8) {
+    a = 255
 	switch pixel {
 	case 1:
 		rgb555 := core.Uint16BE(data[i], data[i+1])
