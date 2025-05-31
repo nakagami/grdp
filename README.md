@@ -4,17 +4,11 @@ grdp is a pure Golang implementation of the Microsoft RDP (Remote Desktop Protoc
 
 Forked from [tomatome/grdp](https://github.com/tomatome/grdp)
 
-## Unsupported feature
-
-Remove VNC client feature.
-
-Remove features that work only on certain platforms.
-For example clipboard.
-
 ## TODO
 
-- Ubuntu RDP server support
-- RDP client (Currently, there is only an example that demonstrates the library's functionality).
+- Ubuntu RDP server support.
+- OS independent clipboard implementation.
+- More feature rich RDP client. (Currently, there is only an example that demonstrates the library's functionality).
 
 ## How to execute example
 
@@ -34,6 +28,9 @@ git clone https://github.com/nakagami/grdp
 cd grdp
 go run example/gxui.go
 ```
+
+This example uses gxui.
+Since gxui is no longer being updated, I hope to have some kind of cross-platform GUI example.
 
 ## Take ideas from
 
