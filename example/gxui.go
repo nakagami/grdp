@@ -270,7 +270,7 @@ func main() {
 	//    handler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})
 	//    slog.SetDefault(slog.New(handler))
 
-	width, height = 1280, 1024
+	width, height = 1280, 800
 	gl.StartDriver(appMain)
 }
 
