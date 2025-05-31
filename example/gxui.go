@@ -55,8 +55,12 @@ func appMain(driver gxui.Driver) {
 	domain := os.Getenv("GRDP_DOMAIN")
 	user := os.Getenv("GRDP_USER")
 	password := os.Getenv("GRDP_PASSWORD")
-	width := 1280
-	height := 800
+
+	var width, height int
+	_, err := fmt.Sscanf(os.Getenv("GRDP_WINDOW_SIZE"), "%dx%d", &width, &height)
+	if err != nil {
+		width, height = 1280, 800
+	}
 
 	err, rdpClient := uiRdp(hostPort, domain, user, password, width, height)
 	if err != nil {
