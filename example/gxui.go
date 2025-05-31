@@ -26,7 +26,7 @@ var (
 	lastMouseX, lastMouseY int
 )
 
-func uiRdp(hostPort, domain, user, password string, height, width int) (error, *grdp.RdpClient) {
+func uiRdp(hostPort, domain, user, password string, width, height int) (error, *grdp.RdpClient) {
 	bitmapCH = make(chan []grdp.Bitmap, 500)
 	g := grdp.NewRdpClient(hostPort, width, height)
 	err := g.Login(domain, user, password)
@@ -56,7 +56,7 @@ func appMain(driver gxui.Driver) {
 	user := os.Getenv("GRDP_USER")
 	password := os.Getenv("GRDP_PASSWORD")
 	width := 1280
-	height := 1024
+	height := 800
 
 	err, rdpClient := uiRdp(hostPort, domain, user, password, width, height)
 	if err != nil {
@@ -273,7 +273,5 @@ func transKey(in gxui.KeyboardKey) int {
 func main() {
 	//    handler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})
 	//    slog.SetDefault(slog.New(handler))
-
-	width, height = 1280, 800
 	gl.StartDriver(appMain)
 }
