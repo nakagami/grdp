@@ -106,7 +106,7 @@ func appMain(driver gxui.Driver) {
 		if rdpClient == nil {
 			return
 		}
-		rdpClient.MouseWheel(e.ScrollY, e.Point.X, e.Point.Y)
+		rdpClient.MouseWheel(e.ScrollY)
 	})
 	window.OnKeyDown(func(e gxui.KeyboardEvent) {
 		if rdpClient == nil {
