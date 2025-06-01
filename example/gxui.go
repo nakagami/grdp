@@ -113,14 +113,14 @@ func appMain(driver gxui.Driver) {
 			return
 		}
 		key := transKey(e.Key)
-		rdpClient.KeyDown(key, "")
+		rdpClient.KeyDown(key)
 	})
 	window.OnKeyUp(func(e gxui.KeyboardEvent) {
 		if rdpClient == nil {
 			return
 		}
 		key := transKey(e.Key)
-		rdpClient.KeyUp(key, "")
+		rdpClient.KeyUp(key)
 	})
 
 	driverc = driver

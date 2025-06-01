@@ -210,11 +210,11 @@ func (g *RdpClient) OnBitmap(paint func([]Bitmap)) *RdpClient {
 	return g
 }
 
-func (g *RdpClient) KeyUp(sc int, name string) {
+func (g *RdpClient) KeyUp(sc int) {
 	if !g.eventReady {
 		return
 	}
-	slog.Debug(fmt.Sprintf("KeyUp: 0x%x, name: %s", sc, name))
+	slog.Debug("KeyUp", "sc", sc)
 
 	p := &pdu.ScancodeKeyEvent{}
 	p.KeyCode = uint16(sc)
@@ -222,11 +222,11 @@ func (g *RdpClient) KeyUp(sc int, name string) {
 	g.pdu.SendInputEvents(pdu.INPUT_EVENT_SCANCODE, []pdu.InputEventsInterface{p})
 }
 
-func (g *RdpClient) KeyDown(sc int, name string) {
+func (g *RdpClient) KeyDown(sc int) {
 	if !g.eventReady {
 		return
 	}
-	slog.Debug(fmt.Sprintf("KeyDown: 0x%x, name: %s", sc, name))
+	slog.Debug("KeyDown", "sc", sc)
 
 	p := &pdu.ScancodeKeyEvent{}
 	p.KeyCode = uint16(sc)
