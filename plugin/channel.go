@@ -165,16 +165,16 @@ typedef VIRTUALCHANNELWRITEEX* PVIRTUALCHANNELWRITEEX;
 
 // static channel name
 const (
-	CLIPRDR_SVC_CHANNEL_NAME = "cliprdr" //剪切板
-	RDPDR_SVC_CHANNEL_NAME   = "rdpdr"   //设备重定向(打印机，磁盘，端口，智能卡等)
-	RDPSND_SVC_CHANNEL_NAME  = "rdpsnd"  //音频输出
-	RAIL_SVC_CHANNEL_NAME    = "rail"    //远程应用
-	DRDYNVC_SVC_CHANNEL_NAME = "drdynvc" //动态虚拟通道
-	REMDESK_SVC_CHANNEL_NAME = "remdesk" //远程协助
+	CLIPRDR_SVC_CHANNEL_NAME = "cliprdr" // clipboard
+	RDPDR_SVC_CHANNEL_NAME   = "rdpdr"   // device redirection
+	RDPSND_SVC_CHANNEL_NAME  = "rdpsnd"  // sound
+	RAIL_SVC_CHANNEL_NAME    = "rail"    // remote appication
+	DRDYNVC_SVC_CHANNEL_NAME = "drdynvc" // dynamic virtual channel
+	REMDESK_SVC_CHANNEL_NAME = "remdesk" // remote assistance
 )
 
 const (
-	RDPGFX_DVC_CHANNEL_NAME = "Microsoft::Windows::RDS::Graphics" //图形扩展
+	RDPGFX_DVC_CHANNEL_NAME = "Microsoft::Windows::RDS::Graphics" // Graphics Extension
 )
 
 var StaticVirtualChannels = map[string]int{
