@@ -3,8 +3,8 @@ package pdu
 import (
 	"bytes"
 	"encoding/hex"
-	"log/slog"
 	"fmt"
+	"log/slog"
 
 	"github.com/nakagami/grdp/core"
 	"github.com/nakagami/grdp/emission"
@@ -46,7 +46,7 @@ func NewPDULayer(t core.Transport) *PDULayer {
 				OrderFlags:              NEGOTIATEORDERSUPPORT,
 				DesktopSaveSize:         480 * 480,
 			},
-			CAPSTYPE_POINTER:        &PointerCapability{ColorPointerCacheSize: 20},
+			CAPSTYPE_POINTER:        &PointerCapability{ColorPointerFlag: 1, ColorPointerCacheSize: 20, PointerCacheSize: 20},
 			CAPSTYPE_INPUT:          &InputCapability{},
 			CAPSTYPE_VIRTUALCHANNEL: &VirtualChannelCapability{},
 			CAPSTYPE_FONT:           &FontCapability{SupportFlags: 0x0001},
@@ -74,7 +74,7 @@ func NewPDULayer(t core.Transport) *PDULayer {
 			},
 			CAPSTYPE_CONTROL:         &ControlCapability{0, 0, 2, 2},
 			CAPSTYPE_ACTIVATION:      &WindowActivationCapability{},
-			CAPSTYPE_POINTER:         &PointerCapability{1, 20, 20},
+			CAPSTYPE_POINTER:         &PointerCapability{ColorPointerFlag: 1, ColorPointerCacheSize: 20, PointerCacheSize: 20},
 			CAPSTYPE_SHARE:           &ShareCapability{},
 			CAPSTYPE_COLORCACHE:      &ColorCacheCapability{6, 0},
 			CAPSTYPE_SOUND:           &SoundCapability{0x0001, 0},
@@ -361,6 +361,7 @@ func (c *Client) recvServerFontMapPDU(s []byte) {
 
 func (c *Client) recvPDU(s []byte) {
 	slog.Debug("PDU recvPDU", "s", hex.EncodeToString(s))
+	fmt.Println("PDU recvPDU", hex.EncodeToString(s))
 	r := bytes.NewReader(s)
 	if r.Len() > 0 {
 		p, err := readPDU(r)
