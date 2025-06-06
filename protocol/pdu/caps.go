@@ -204,6 +204,7 @@ const (
 	INPUT_FLAG_UNUSED1                = 0x0040
 	INPUT_FLAG_UNUSED2                = 0x0080
 	INPUT_FLAG_MOUSE_HWHEEL           = 0x0100
+	INPUT_FLAG_QOE_TIMESTAMPS         = 0x0200
 )
 
 /**
