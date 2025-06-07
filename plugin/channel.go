@@ -175,6 +175,7 @@ const (
 
 const (
 	RDPGFX_DVC_CHANNEL_NAME = "Microsoft::Windows::RDS::Graphics" // Graphics Extension
+	RDPMOUSECURSOR_DVC_CHNANNEL_NAME = "Microsoft::Windows::RDS::MouseCursor" // Mouse Cursor
 )
 
 var StaticVirtualChannels = map[string]int{
