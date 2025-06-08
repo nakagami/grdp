@@ -441,7 +441,7 @@ func (c *Client) RecvFastPath(secFlag byte, s []byte) {
 		} else if updateCode == FASTPATH_UPDATETYPE_PTR_NULL {
 			c.Emit("pointer_hide")
 		} else if updateCode == FASTPATH_UPDATETYPE_CACHED {
-			c.Emit("pointer_cached", p.Data.(*FastPathUpdateCached).CacheIdx)
+			c.Emit("pointer_cached", p.Data.(*FastPathUpdateCachedPDU).CacheIdx)
 		}
 	}
 }
