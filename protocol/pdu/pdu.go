@@ -3,8 +3,8 @@ package pdu
 import (
 	"bytes"
 	"encoding/hex"
-	"log/slog"
 	"fmt"
+	"log/slog"
 
 	"github.com/nakagami/grdp/core"
 	"github.com/nakagami/grdp/emission"
@@ -427,8 +427,8 @@ func (c *Client) RecvFastPath(secFlag byte, s []byte) {
 		}
 
 		p, err := readFastPathUpdatePDU(r, updateCode)
-		if err != nil || p == nil || p.Data == nil {
-			slog.Debug("readFastPathUpdatePDU:", err)
+		if err != nil {
+			slog.Warn("readFastPathUpdatePDU:", "Code", FastPathUpdateType(updateCode), "err", err)
 			return
 		}
 
