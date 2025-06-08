@@ -438,6 +438,10 @@ func (c *Client) RecvFastPath(secFlag byte, s []byte) {
 			c.Emit("color", p.Data.(*FastPathColorPdu))
 		} else if updateCode == FASTPATH_UPDATETYPE_ORDERS {
 			c.Emit("orders", p.Data.(*FastPathOrdersPDU).OrderPdus)
+		} else if updateCode == FASTPATH_UPDATETYPE_PTR_NULL {
+			c.Emit("pointer_hide")
+		} else if updateCode == FASTPATH_UPDATETYPE_CACHED {
+			c.Emit("pointer_cached", p.Data.(*FastPathUpdateCached).CacheIdx)
 		}
 	}
 }
