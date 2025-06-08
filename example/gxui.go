@@ -43,6 +43,12 @@ func uiRdp(hostPort, domain, user, password string, width, height int) (error, *
 		slog.Info("on success")
 	}).OnReady(func() {
 		slog.Info("on ready")
+	}).OnPointerHide(func() {
+		slog.Info("on pointer_hide")
+	}).OnPointerCached(func(idx uint16) {
+		slog.Info("on pointer_cached", "idx", idx)
+	}).OnPointerUpdate(func(idx uint16, x uint16, y uint16, width uint16, height uint16, mask []byte, data []byte) {
+		slog.Info("on pointer_update", "idx", idx)
 	}).OnBitmap(func(bs []grdp.Bitmap) {
 		bitmapCH <- bs
 	})
