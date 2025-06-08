@@ -43,7 +43,7 @@ type Bitmap struct {
 }
 
 func pixelToRGBA(pixel int, i int, data []byte) (r, g, b, a uint8) {
-    a = 255
+	a = 255
 	switch pixel {
 	case 1:
 		rgb555 := core.Uint16BE(data[i], data[i+1])
@@ -206,6 +206,23 @@ func (g *RdpClient) OnBitmap(paint func([]Bitmap)) *RdpClient {
 			bs = append(bs, b)
 		}
 		paint(bs)
+	})
+	return g
+}
+
+func (g *RdpClient) OnPointerHide(f func()) *RdpClient {
+	g.pdu.On("pointer_hide", f)
+	return g
+}
+
+func (g *RdpClient) OnPointerCached(f func(uint16)) *RdpClient {
+	g.pdu.On("pointer_cached", f)
+	return g
+}
+
+func (g *RdpClient) OnPointerUpdate(f func(uint16, uint16, uint16, uint16, uint16, []byte, []byte)) *RdpClient {
+	g.pdu.On("pointer_update", func(p *pdu.FastPathUpdatePointerPDU) {
+		f(p.CacheIdx, p.X, p.Y, p.Width, p.Height, p.Mask, p.Data)
 	})
 	return g
 }
