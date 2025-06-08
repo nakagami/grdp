@@ -862,6 +862,27 @@ func (f *FastPathSurfaceCmds) Unpack(r io.Reader) error {
 	return nil
 }
 
+type FastPathUpdatePointerPDU struct {
+	XorBpp   uint16 `struc:"little"`
+	CacheIdx uint16 `struc:"little"`
+	X        uint16 `struc:"little"`
+	Y        uint16 `struc:"little"`
+	Width    uint16 `struc:"little"`
+	Height   uint16 `struc:"little"`
+	MaskLen  uint16 `struc:"little,sizeof=Mask"`
+	DataLen  uint16 `struc:"little,sizeof=Data"`
+	Mask     []byte
+	Data     []byte
+}
+
+func (*FastPathUpdatePointerPDU) FastPathUpdateType() uint8 {
+	return FASTPATH_UPDATETYPE_POINTER
+}
+
+func (f *FastPathUpdatePointerPDU) Unpack(r io.Reader) error {
+	return struc.Unpack(r, f)
+}
+
 type FastPathUpdatePointerNullPDU struct {
 }
 
@@ -926,6 +947,7 @@ func readFastPathUpdatePDU(r io.Reader, code uint8) (*FastPathUpdatePDU, error) 
 	case FASTPATH_UPDATETYPE_CACHED:
 		d = &FastPathUpdateCachedPDU{}
 	case FASTPATH_UPDATETYPE_POINTER:
+		d = &FastPathUpdatePointerPDU{}
 	case FASTPATH_UPDATETYPE_LARGE_POINTER:
 	default:
 		return f, errors.New(fmt.Sprintf("Unknown FastPathPDU type 0x%x", code))
