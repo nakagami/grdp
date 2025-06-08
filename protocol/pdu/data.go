@@ -862,6 +862,28 @@ func (f *FastPathSurfaceCmds) Unpack(r io.Reader) error {
 	return nil
 }
 
+type FastPathUpdatePointerNull struct {
+}
+
+func (*FastPathUpdatePointerNull) FastPathUpdateType() uint8 {
+	return FASTPATH_UPDATETYPE_PTR_NULL
+}
+func (f *FastPathUpdatePointerNull) Unpack(r io.Reader) error {
+	return nil
+}
+
+type FastPathUpdateCached struct {
+	CacheIdx uint16 `struc:"little"`
+}
+
+func (*FastPathUpdateCached) FastPathUpdateType() uint8 {
+	return FASTPATH_UPDATETYPE_CACHED
+}
+
+func (f *FastPathUpdateCached) Unpack(r io.Reader) error {
+	return struc.Unpack(r, f)
+}
+
 type FastPathUpdatePDU struct {
 	UpdateHeader     uint8
 	Fragmentation    uint8
@@ -896,11 +918,13 @@ func readFastPathUpdatePDU(r io.Reader, code uint8) (*FastPathUpdatePDU, error) 
 	case FASTPATH_UPDATETYPE_SURFCMDS:
 		//d = &FastPathSurfaceCmds{}
 	case FASTPATH_UPDATETYPE_PTR_NULL:
+		d = &FastPathUpdatePointerNull{}
 	case FASTPATH_UPDATETYPE_PTR_DEFAULT:
 	case FASTPATH_UPDATETYPE_PTR_POSITION:
 	case FASTPATH_UPDATETYPE_COLOR:
 		//d = &FastPathColorPdu{}
 	case FASTPATH_UPDATETYPE_CACHED:
+		d = &FastPathUpdateCached{}
 	case FASTPATH_UPDATETYPE_POINTER:
 	case FASTPATH_UPDATETYPE_LARGE_POINTER:
 	default:
