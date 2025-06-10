@@ -220,9 +220,9 @@ func (g *RdpClient) OnPointerCached(f func(uint16)) *RdpClient {
 	return g
 }
 
-func (g *RdpClient) OnPointerUpdate(f func(uint16, uint16, uint16, uint16, uint16, []byte, []byte)) *RdpClient {
+func (g *RdpClient) OnPointerUpdate(f func(uint16, uint16, uint16, uint16, uint16, uint16, []byte, []byte)) *RdpClient {
 	g.pdu.On("pointer_update", func(p *pdu.FastPathUpdatePointerPDU) {
-		f(p.CacheIdx, p.X, p.Y, p.Width, p.Height, p.Mask, p.Data)
+		f(p.CacheIdx, p.XorBpp, p.X, p.Y, p.Width, p.Height, p.Mask, p.Data)
 	})
 	return g
 }
