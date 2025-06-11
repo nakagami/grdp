@@ -32,6 +32,8 @@ go run example/gxui.go
 This example uses gxui.
 Since gxui is no longer being updated, I hope to have some kind of cross-platform GUI example.
 
+See also https://github.com/nakagami/grdpsdl2
+
 ## Take ideas from
 
 * [rdpy](https://github.com/citronneur/rdpy)
