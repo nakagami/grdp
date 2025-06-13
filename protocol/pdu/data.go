@@ -869,10 +869,10 @@ type FastPathUpdatePointerPDU struct {
 	Y        uint16 `struc:"little"`
 	Width    uint16 `struc:"little"`
 	Height   uint16 `struc:"little"`
-	MaskLen  uint16 `struc:"little,sizeof=Mask"`
-	DataLen  uint16 `struc:"little,sizeof=Data"`
-	Mask     []byte
-	Data     []byte
+	MaskLen  uint16 `struc:"little,sizeof=Mask"` // lengthAndMask
+	DataLen  uint16 `struc:"little,sizeof=Data"` // lengthXorMask
+	Data     []byte // xorMaskData
+	Mask     []byte // andMaskData
 }
 
 func (*FastPathUpdatePointerPDU) FastPathUpdateType() uint8 {
