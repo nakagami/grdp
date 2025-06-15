@@ -191,7 +191,6 @@ func (t *TPKT) recvExtendedHeader(s []byte, err error) {
 	}
 	r := bytes.NewReader(s)
 	size, _ := core.ReadUint16BE(r)
-	slog.Debug("tpkt wait recvData:", size)
 	core.StartReadBytes(int(size-4), t.Conn, t.recvData)
 }
 

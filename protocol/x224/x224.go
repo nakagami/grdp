@@ -307,7 +307,7 @@ func (x *X224) recvConnectionConfirm(s []byte) {
 }
 
 func (x *X224) recvData(s []byte) {
-	slog.Debug(fmt.Sprintf("x224 recvData", hex.EncodeToString(s), "emit data"))
+	slog.Debug("x224 recvData", "data", hex.EncodeToString(s))
 	// x224 header takes 3 bytes
 	x.Emit("data", s[3:])
 }
