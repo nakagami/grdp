@@ -297,7 +297,7 @@ func (c *MCSClient) SetClientCliprdr() {
 }
 
 func (c *MCSClient) connect(selectedProtocol uint32) {
-	slog.Debug("mcs client on connect", selectedProtocol)
+	slog.Debug("mcs connect", "selectedProtocol", selectedProtocol)
 	c.clientCoreData.ServerSelectedProtocol = selectedProtocol
 
 	slog.Debug(fmt.Sprintf("clientCoreData:%+v", c.clientCoreData))
@@ -327,7 +327,7 @@ func (c *MCSClient) connect(selectedProtocol uint32) {
 }
 
 func (c *MCSClient) recvConnectResponse(s []byte) {
-	slog.Debug(fmt.Sprintf("mcs recvConnectResponse", hex.EncodeToString(s)))
+	slog.Debug("mcs recvConnectResponse", "s", hex.EncodeToString(s))
 	cResp, err := ReadConnectResponse(bytes.NewReader(s))
 	if err != nil {
 		c.Emit("error", errors.New(fmt.Sprintf("ReadConnectResponse %v", err)))

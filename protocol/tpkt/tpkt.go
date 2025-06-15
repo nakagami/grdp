@@ -114,9 +114,10 @@ func (t *TPKT) recvPubKeyInc(data []byte) error {
 		slog.Info("DecodeDERTRequest", "err", err)
 		return err
 	}
-	slog.Debug("PubKeyAuth", "key", tsreq.PubKeyAuth)
+	slog.Debug("PubKeyAuth", "key", hex.EncodeToString(tsreq.PubKeyAuth))
 	//ignore
-	//pubkey := t.ntlmSec.GssDecrypt([]byte(tsreq.PubKeyAuth))
+	pubkey := t.ntlmSec.GssDecrypt([]byte(tsreq.PubKeyAuth))
+	slog.Debug("GssDecrypy", "pubkey", hex.EncodeToString(pubkey))
 	domain, username, password := t.ntlm.GetEncodedCredentials()
 	credentials := nla.EncodeDERTCredentials(domain, username, password)
 	authInfo := t.ntlmSec.GssEncrypt(credentials)
