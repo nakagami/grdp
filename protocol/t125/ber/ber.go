@@ -157,7 +157,7 @@ func ReadApplicationTag(tag uint8, r io.Reader) (int, error) {
 	bb, _ := core.ReadUInt8(r)
 	if tag > 30 {
 		if bb != (CLASS_APPL|PC_CONSTRUCT)|TAG_MASK {
-			return 0, errors.New("ReadApplicationTag invalid data")
+			return 0, errors.New(fmt.Sprintf("ReadApplicationTag error tag=%x,bb=%x", tag, bb))
 		}
 		bb, _ := core.ReadUInt8(r)
 		if bb != tag {
@@ -165,7 +165,7 @@ func ReadApplicationTag(tag uint8, r io.Reader) (int, error) {
 		}
 	} else {
 		if bb != (CLASS_APPL|PC_CONSTRUCT)|(TAG_MASK&tag) {
-			return 0, errors.New("ReadApplicationTag invalid data2")
+			return 0, errors.New(fmt.Sprintf("ReadApplicationTag error valiable length tag=%x,bb=%x", tag, bb))
 		}
 	}
 	return ReadLength(r)
