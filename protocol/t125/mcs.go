@@ -300,9 +300,9 @@ func (c *MCSClient) connect(selectedProtocol uint32) {
 	slog.Debug("mcs connect", "selectedProtocol", selectedProtocol)
 	c.clientCoreData.ServerSelectedProtocol = selectedProtocol
 
-	slog.Debug(fmt.Sprintf("clientCoreData:%+v", c.clientCoreData))
-	slog.Debug(fmt.Sprint("clientNetworkData:%+v", c.clientNetworkData))
-	slog.Debug(fmt.Sprint("clientSecurityData:%+v", c.clientSecurityData))
+	slog.Debug("mcs connnect", "clientCoreData", c.clientCoreData)
+	slog.Debug("mcs connect", "clientNetworkData", c.clientNetworkData)
+	slog.Debug("mcs connect", "clientSecurityData", c.clientSecurityData)
 	// sendConnectclientCoreDataInitial
 	userDataBuff := bytes.Buffer{}
 	userDataBuff.Write(c.clientCoreData.Pack())
