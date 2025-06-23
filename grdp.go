@@ -14,8 +14,15 @@ import (
 	"github.com/nakagami/grdp/protocol/pdu"
 	"github.com/nakagami/grdp/protocol/sec"
 	"github.com/nakagami/grdp/protocol/t125"
+	"github.com/nakagami/grdp/protocol/t125/gcc"
 	"github.com/nakagami/grdp/protocol/tpkt"
 	"github.com/nakagami/grdp/protocol/x224"
+)
+
+var (
+	KbdLayout       uint32 = gcc.US
+	KeyboardType    uint32 = gcc.KT_IBM_101_102_KEYS
+	KeyboardSubType uint32 = 0
 )
 
 type RdpClient struct {
@@ -112,7 +119,7 @@ func (g *RdpClient) Login(domain string, user string, password string) error {
 
 	g.tpkt = tpkt.New(core.NewSocketLayer(conn), nla.NewNTLMv2(domain, user, password))
 	g.x224 = x224.New(g.tpkt)
-	g.mcs = t125.NewMCSClient(g.x224)
+	g.mcs = t125.NewMCSClient(g.x224, KbdLayout, KeyboardType, KeyboardSubType)
 	g.sec = sec.NewClient(g.mcs)
 	g.pdu = pdu.NewClient(g.sec)
 	g.channels = plugin.NewChannels(g.sec)
