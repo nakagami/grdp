@@ -265,10 +265,10 @@ type MCSClient struct {
 	nbChannelRequested int
 }
 
-func NewMCSClient(t core.Transport) *MCSClient {
+func NewMCSClient(t core.Transport, kbdLayout uint32, keyboardType uint32, keyboardSubType uint32) *MCSClient {
 	c := &MCSClient{
 		MCS:                NewMCS(t, SEND_DATA_INDICATION, SEND_DATA_REQUEST),
-		clientCoreData:     gcc.NewClientCoreData(),
+		clientCoreData:     gcc.NewClientCoreData(kbdLayout, keyboardType, keyboardSubType),
 		clientNetworkData:  gcc.NewClientNetworkData(),
 		clientSecurityData: gcc.NewClientSecurityData(),
 		userId:             1 + MCS_USERCHANNEL_BASE,

@@ -253,14 +253,14 @@ type ClientCoreData struct {
 	ServerSelectedProtocol uint32         `struc:"little"`
 }
 
-func NewClientCoreData() *ClientCoreData {
+func NewClientCoreData(kbdLayout uint32, keyboardType uint32, keyboardSubType uint32) *ClientCoreData {
 	name, _ := os.Hostname()
 	var ClientName [32]byte
 	copy(ClientName[:], core.UnicodeEncode(name)[:])
 	return &ClientCoreData{
 		RDP_VERSION_5_PLUS, 1280, 800, RNS_UD_COLOR_8BPP,
-		RNS_UD_SAS_DEL, US, 3790, ClientName, KT_IBM_101_102_KEYS,
-		0, 12, [64]byte{}, RNS_UD_COLOR_8BPP, 1, 0, HIGH_COLOR_24BPP,
+		RNS_UD_SAS_DEL, KeyboardLayout(kbdLayout), 3790, ClientName, keyboardType,
+		keyboardSubType, 12, [64]byte{}, RNS_UD_COLOR_8BPP, 1, 0, HIGH_COLOR_24BPP,
 		RNS_UD_15BPP_SUPPORT | RNS_UD_16BPP_SUPPORT | RNS_UD_24BPP_SUPPORT | RNS_UD_32BPP_SUPPORT,
 		RNS_UD_CS_SUPPORT_ERRINFO_PDU, [64]byte{}, 0, 0, 0}
 }
