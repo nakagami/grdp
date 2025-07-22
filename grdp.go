@@ -194,18 +194,13 @@ func (g *RdpClient) OnBitmap(paint func([]Bitmap)) *RdpClient {
 		if !g.eventReady {
 			return
 		}
-
-		slog.Debug("on bitmap", "rectangles_length", len(rectangles))
 		bs := make([]Bitmap, 0, 50)
 		for _, v := range rectangles {
 			IsCompress := v.IsCompress()
 			data := v.BitmapDataStream
 			if IsCompress {
 				data = core.Decompress(v.BitmapDataStream, int(v.Width), int(v.Height), bpp(v.BitsPerPixel))
-				slog.Debug("on bitmap decompressed", "data_length", len(data))
 				IsCompress = false
-			} else {
-				slog.Debug("on bitmap", "data_length", len(data))
 			}
 
 			b := Bitmap{int(v.DestLeft), int(v.DestTop), int(v.DestRight), int(v.DestBottom),
@@ -261,7 +256,7 @@ func (g *RdpClient) MouseMove(x, y int) {
 	if !g.eventReady {
 		return
 	}
-	slog.Debug("MouseMove", "x", x, "y", y)
+	//slog.Debug("MouseMove", "x", x, "y", y)
 	p := &pdu.PointerEvent{}
 	p.PointerFlags |= pdu.PTRFLAGS_MOVE
 	p.XPos = uint16(x)
