@@ -281,7 +281,7 @@ func transKey(in gxui.KeyboardKey) int {
 }
 
 func main() {
-	//    handler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})
-	//    slog.SetDefault(slog.New(handler))
+	handler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})
+	slog.SetDefault(slog.New(handler))
 	gl.StartDriver(appMain)
 }

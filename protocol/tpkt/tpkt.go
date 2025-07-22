@@ -81,10 +81,10 @@ func (t *TPKT) recvChallenge(data []byte) error {
 		slog.Info("DecodeDERTRequest", err)
 		return err
 	}
-	slog.Debug(fmt.Sprintf("tsreq:%+v", tsreq))
+	slog.Debug("recvChallenge", "tsreq", tsreq)
 	// get pubkey
 	pubkey, err := t.Conn.TlsPubKey()
-	slog.Debug(fmt.Sprintf("pubkey=%+v", pubkey))
+	slog.Debug("recvChallenge", "pubkey", pubkey)
 
 	authMsg, ntlmSec := t.ntlm.GetAuthenticateMessage(tsreq.NegoTokens[0].Data)
 	t.ntlmSec = ntlmSec
@@ -93,17 +93,20 @@ func (t *TPKT) recvChallenge(data []byte) error {
 	req := nla.EncodeDERTRequest([]nla.Message{authMsg}, nil, encryptPubkey)
 	_, err = t.Conn.Write(req)
 	if err != nil {
-		slog.Info("send AuthenticateMessage", err)
+		slog.Error("send AuthenticateMessage", err)
 		return err
 	}
+
+	slog.Debug("recvChallenge read challenge start")
 	resp := make([]byte, 1024)
 	n, err := t.Conn.Read(resp)
 	if err != nil {
-		slog.Error("Read:", err)
+		slog.Error("recvChallenge", "err", err)
 		return fmt.Errorf("read %s", err)
-	} else {
-		slog.Debug("recvChallenge Read success")
 	}
+
+	slog.Debug("recvChallenge", "recieved", hex.EncodeToString(resp[:n]))
+
 	return t.recvPubKeyInc(resp[:n])
 }
 
