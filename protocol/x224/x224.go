@@ -213,7 +213,6 @@ func (x *X224) Write(b []byte) (n int, err error) {
 	}
 	buff.Write(b)
 
-	slog.Debug("x224 Write", "buff", hex.EncodeToString(buff.Bytes()))
 	return x.transport.Write(buff.Bytes())
 }
 

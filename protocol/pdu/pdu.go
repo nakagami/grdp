@@ -360,7 +360,7 @@ func (c *Client) recvServerFontMapPDU(s []byte) {
 }
 
 func (c *Client) recvPDU(s []byte) {
-	slog.Debug("PDU recvPDU", "s", hex.EncodeToString(s))
+	slog.Debug("PDU recvPDU", "s", len(s))
 	r := bytes.NewReader(s)
 	if r.Len() > 0 {
 		p, err := readPDU(r)
@@ -386,7 +386,7 @@ func (c *Client) recvPDU(s []byte) {
 }
 
 func (c *Client) RecvFastPath(secFlag byte, s []byte) {
-	slog.Debug("PDU RecvFastPath", "s", hex.EncodeToString(s))
+	slog.Debug("PDU RecvFastPath", "s", len(s))
 	r := bytes.NewReader(s)
 	for r.Len() > 0 {
 		updateHeader, err := core.ReadUInt8(r)

@@ -553,7 +553,6 @@ func (c *MCSClient) Pack(data []byte, channelId uint16) []byte {
 	core.WriteUInt8(0x70, buff)
 	per.WriteLength(len(data), buff)
 	core.WriteBytes(data, buff)
-	slog.Debug("MCSClient write", "channelId", channelId, "buff", hex.EncodeToString(buff.Bytes()))
 	return buff.Bytes()
 }
 
