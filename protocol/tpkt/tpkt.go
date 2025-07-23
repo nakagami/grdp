@@ -58,7 +58,7 @@ func (t *TPKT) StartNLA() error {
 		return err
 	}
 	req := nla.EncodeDERTRequest([]nla.Message{t.ntlm.GetNegotiateMessage()}, nil, nil)
-	slog.Debug("StartNLA send", "req", hex.EncodeToString(req))
+	slog.Debug("StartNLA send", "req", hex.EncodeToString(req), "len", len(req))
 	_, err = t.Conn.Write(req)
 	if err != nil {
 		slog.Error("send NegotiateMessage", "err", err)
@@ -93,6 +93,7 @@ func (t *TPKT) recvChallenge(data []byte) error {
 
 	encryptPubkey := ntlmSec.GssEncrypt(pubkey)
 	req := nla.EncodeDERTRequest([]nla.Message{authMsg}, nil, encryptPubkey)
+	slog.Debug("recvChallenge", "send", hex.EncodeToString(req), "len", len(req))
 	_, err = t.Conn.Write(req)
 	if err != nil {
 		slog.Error("send AuthenticateMessage", err)
@@ -107,7 +108,7 @@ func (t *TPKT) recvChallenge(data []byte) error {
 		return fmt.Errorf("read %s", err)
 	}
 
-	slog.Debug("recvChallenge", "recieved", hex.EncodeToString(resp[:n]))
+	slog.Debug("recvChallenge", "recieved", hex.EncodeToString(resp[:n]), "len", n)
 
 	return t.recvPubKeyInc(resp[:n])
 }
