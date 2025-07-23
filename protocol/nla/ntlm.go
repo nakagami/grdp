@@ -365,6 +365,8 @@ var (
 )
 
 func (n *NTLMv2) GetAuthenticateMessage(s []byte) (*AuthenticateMessage, *NTLMv2Security) {
+	slog.Debug("GetAuthenticateMessage", "s", s)
+
 	challengeMsg := &ChallengeMessage{totalLen: len(s)}
 	r := bytes.NewReader(s)
 	err := struc.Unpack(r, challengeMsg)
@@ -383,7 +385,7 @@ func (n *NTLMv2) GetAuthenticateMessage(s []byte) (*AuthenticateMessage, *NTLMv2
 	}
 	challengeMsg.Payload, _ = core.ReadBytes(r.Len(), r)
 	n.challengeMessage = challengeMsg
-	slog.Debug(fmt.Sprintf("challengeMsg:%+v", challengeMsg))
+	slog.Debug("GetAuthenticateMessage", "challengeMsg", challengeMsg)
 
 	serverName := challengeMsg.getTargetName()
 	serverInfo := challengeMsg.getTargetInfo()
@@ -397,7 +399,7 @@ func (n *NTLMv2) GetAuthenticateMessage(s []byte) (*AuthenticateMessage, *NTLMv2
 	} else {
 		computeMIC = true
 	}
-	slog.Info(fmt.Sprintf("serverName=%+v", core.UnicodeDecode(serverName)))
+	slog.Debug("GetAuthenticateMessage", "serverName", core.UnicodeDecode(serverName))
 	serverChallenge := challengeMsg.ServerChallenge[:]
 	clientChallenge := core.Random(8)
 	ntChallengeResponse, lmChallengeResponse, SessionBaseKey := n.ComputeResponseV2(
