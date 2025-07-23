@@ -58,14 +58,16 @@ func (t *TPKT) StartNLA() error {
 		return err
 	}
 	req := nla.EncodeDERTRequest([]nla.Message{t.ntlm.GetNegotiateMessage()}, nil, nil)
+	slog.Debug("StartNLA send", "req", hex.EncodeToString(req))
 	_, err = t.Conn.Write(req)
 	if err != nil {
-		slog.Info("send NegotiateMessage", err)
+		slog.Error("send NegotiateMessage", "err", err)
 		return err
 	}
 
 	resp := make([]byte, 1024)
 	n, err := t.Conn.Read(resp)
+	slog.Debug("StartNLA recv", "n", n, "err", err)
 	if err != nil {
 		return fmt.Errorf("read %s", err)
 	} else {
