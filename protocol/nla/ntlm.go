@@ -100,7 +100,7 @@ type NegotiateMessage struct {
 	WorkstationLen          uint16   `struc:"little"`
 	WorkstationMaxLen       uint16   `struc:"little"`
 	WorkstationBufferOffset uint32   `struc:"little"`
-	Version                 NVersion `struc:"little"`
+	Version                 NVersion `struc:"skip"`
 	Payload                 [32]byte `struc:"skip"`
 }
 
