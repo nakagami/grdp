@@ -326,7 +326,6 @@ func (n *NTLMv2) ComputeResponseV2(respKeyNT, respKeyLM, serverChallenge, client
 	tempBuff.Write(clientChallenge)
 	tempBuff.Write([]byte{0x00, 0x00, 0x00, 0x00})
 	tempBuff.Write(serverInfo)
-	tempBuff.Write([]byte{0x00, 0x00, 0x00, 0x00})
 
 	ntBuf := bytes.NewBuffer(serverChallenge)
 	ntBuf.Write(tempBuff.Bytes())
