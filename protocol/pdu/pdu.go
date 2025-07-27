@@ -2,7 +2,6 @@ package pdu
 
 import (
 	"bytes"
-	"encoding/hex"
 	"fmt"
 	"log/slog"
 
@@ -158,7 +157,6 @@ func (c *Client) connect(data *gcc.ClientCoreData, userId uint16, channelId uint
 }
 
 func (c *Client) recvDemandActivePDU(s []byte) {
-	slog.Debug("PDU recvDemandActivePDU", "s", hex.EncodeToString(s))
 	r := bytes.NewReader(s)
 	pdu, err := readPDU(r)
 	if err != nil {
@@ -183,8 +181,6 @@ func (c *Client) recvDemandActivePDU(s []byte) {
 }
 
 func (c *Client) sendConfirmActivePDU() {
-	slog.Debug("PDU start sendConfirmActivePDU")
-
 	pdu := NewConfirmActivePDU()
 	generalCapa := c.clientCapabilities[CAPSTYPE_GENERAL].(*GeneralCapability)
 	generalCapa.OSMajorType = OSMAJORTYPE_WINDOWS
@@ -256,7 +252,6 @@ func (c *Client) sendConfirmActivePDU() {
 }
 
 func (c *Client) sendClientFinalizeSynchronizePDU() {
-	slog.Debug("PDU start sendClientFinalizeSynchronizePDU")
 	c.sendDataPDU(NewSynchronizeDataPDU(c.channelId))
 	c.sendDataPDU(&ControlDataPDU{Action: CTRLACTION_COOPERATE})
 	c.sendDataPDU(&ControlDataPDU{Action: CTRLACTION_REQUEST_CONTROL})
@@ -265,7 +260,6 @@ func (c *Client) sendClientFinalizeSynchronizePDU() {
 }
 
 func (c *Client) recvServerSynchronizePDU(s []byte) {
-	slog.Debug("PDU recvServerSynchronizePDU")
 	r := bytes.NewReader(s)
 	pdu, err := readPDU(r)
 	if err != nil {
@@ -287,7 +281,6 @@ func (c *Client) recvServerSynchronizePDU(s []byte) {
 }
 
 func (c *Client) recvServerControlCooperatePDU(s []byte) {
-	slog.Debug("PDU recvServerControlCooperatePDU")
 	r := bytes.NewReader(s)
 	pdu, err := readPDU(r)
 	if err != nil {
@@ -313,7 +306,6 @@ func (c *Client) recvServerControlCooperatePDU(s []byte) {
 }
 
 func (c *Client) recvServerControlGrantedPDU(s []byte) {
-	slog.Debug("PDU recvServerControlGrantedPDU")
 	r := bytes.NewReader(s)
 	pdu, err := readPDU(r)
 	if err != nil {
@@ -339,7 +331,6 @@ func (c *Client) recvServerControlGrantedPDU(s []byte) {
 }
 
 func (c *Client) recvServerFontMapPDU(s []byte) {
-	slog.Debug("PDU recvServerFontMapPDU")
 	r := bytes.NewReader(s)
 	pdu, err := readPDU(r)
 	if err != nil {
@@ -360,7 +351,6 @@ func (c *Client) recvServerFontMapPDU(s []byte) {
 }
 
 func (c *Client) recvPDU(s []byte) {
-	slog.Debug("PDU recvPDU", "s", len(s))
 	r := bytes.NewReader(s)
 	if r.Len() > 0 {
 		p, err := readPDU(r)
@@ -386,7 +376,6 @@ func (c *Client) recvPDU(s []byte) {
 }
 
 func (c *Client) RecvFastPath(secFlag byte, s []byte) {
-	slog.Debug("PDU RecvFastPath", "s", len(s))
 	r := bytes.NewReader(s)
 	for r.Len() > 0 {
 		updateHeader, err := core.ReadUInt8(r)
