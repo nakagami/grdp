@@ -353,13 +353,7 @@ func (c *MCSClient) recvConnectResponse(s []byte) {
 			return
 		}
 	}
-	slog.Debug(fmt.Sprintf("serverSecurityData: %+v", c.serverSecurityData))
-	slog.Debug(fmt.Sprintf("serverCoreData: %+v", c.serverCoreData))
-	slog.Debug(fmt.Sprintf("serverNetworkData: %+v", c.serverNetworkData))
-	slog.Debug("mcs sendErectDomainRequest")
 	c.sendErectDomainRequest()
-
-	slog.Debug("mcs sendAttachUserRequest")
 	c.sendAttachUserRequest()
 
 	c.transport.Once("data", c.recvAttachUserConfirm)
@@ -380,7 +374,7 @@ func (c *MCSClient) sendAttachUserRequest() {
 }
 
 func (c *MCSClient) recvAttachUserConfirm(s []byte) {
-	slog.Debug("mcs recvAttachUserConfirm", hex.EncodeToString(s))
+	slog.Debug("mcs recvAttachUserConfirm", "s", hex.EncodeToString(s))
 	r := bytes.NewReader(s)
 
 	option, err := core.ReadUInt8(r)
@@ -413,7 +407,7 @@ func (c *MCSClient) recvAttachUserConfirm(s []byte) {
 }
 
 func (c *MCSClient) connectChannels() {
-	slog.Debug("mcs connectChannels:", c.channelsConnected, ":", len(c.channels))
+	slog.Debug("connectChannels", "channelsConnected", c.channelsConnected, "channels", c.channels)
 	if c.channelsConnected == len(c.channels) {
 		if c.nbChannelRequested < int(c.serverNetworkData.ChannelCount) {
 			//static virtual channel
@@ -433,20 +427,18 @@ func (c *MCSClient) connectChannels() {
 		serverData := make([]interface{}, 0)
 		serverData = append(serverData, c.serverCoreData)
 		serverData = append(serverData, c.serverSecurityData)
-		slog.Debug("msc connectChannels callback to sec")
 		c.Emit("connect", clientData, serverData, c.userId, c.channels)
 		return
 	}
 
 	// sendChannelJoinRequest
-	slog.Debug("sendChannelJoinRequest:", c.channels[c.channelsConnected].Name)
 	c.sendChannelJoinRequest(c.channels[c.channelsConnected].ID)
 
 	c.transport.Once("data", c.recvChannelJoinConfirm)
 }
 
 func (c *MCSClient) sendChannelJoinRequest(channelId uint16) {
-	slog.Debug("mcs sendChannelJoinRequest", channelId)
+	slog.Debug("sendChannelJoinRequest", "channelId", channelId)
 	buff := &bytes.Buffer{}
 	writeMCSPDUHeader(CHANNEL_JOIN_REQUEST, 0, buff)
 	per.WriteInteger16(c.userId-MCS_USERCHANNEL_BASE, buff)
@@ -455,7 +447,7 @@ func (c *MCSClient) sendChannelJoinRequest(channelId uint16) {
 }
 
 func (c *MCSClient) recvData(s []byte) {
-	slog.Debug(fmt.Sprintf("msc on data recvData:", hex.EncodeToString(s)))
+	slog.Debug("mcs recvData", "s", hex.EncodeToString(s))
 
 	r := bytes.NewReader(s)
 	option, err := core.ReadUInt8(r)
@@ -498,12 +490,12 @@ func (c *MCSClient) recvData(s []byte) {
 		c.Emit("error", errors.New(fmt.Sprintf("mcs recvData get data error %v", err)))
 		return
 	}
-	slog.Debug(fmt.Sprintf("mcs emit channel<%s>", channelName))
+	slog.Debug("mcs emit sec",  "channel", channelName, "left", hex.EncodeToString(left))
 	c.Emit("sec", channelName, left)
 }
 
 func (c *MCSClient) recvChannelJoinConfirm(s []byte) {
-	slog.Debug("mcs recvChannelJoinConfirm", hex.EncodeToString(s))
+	slog.Debug("recvChannelJoinConfirm", "s", hex.EncodeToString(s))
 	r := bytes.NewReader(s)
 	option, err := core.ReadUInt8(r)
 	if err != nil {
@@ -530,7 +522,6 @@ func (c *MCSClient) recvChannelJoinConfirm(s []byte) {
 		c.Emit("error", errors.New("NODE_RDP_PROTOCOL_T125_MCS_SERVER_MUST_CONFIRM_STATIC_CHANNEL"))
 		return
 	}
-	slog.Debug("Confirm channelId:", channelId)
 	if confirm == 0 {
 		for i := 0; i < int(c.serverNetworkData.ChannelCount); i++ {
 			if channelId == c.serverNetworkData.ChannelIdArray[i] {

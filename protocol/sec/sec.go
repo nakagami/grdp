@@ -2,7 +2,6 @@ package sec
 
 import (
 	"bytes"
-	"fmt"
 	"crypto/md5"
 	"crypto/rand"
 	"crypto/rc4"
@@ -292,7 +291,7 @@ func (s *SEC) Close() error {
 }
 
 func (s *SEC) sendFlagged(flag uint16, data []byte) (n int, err error) {
-	slog.Debug(fmt.Sprintf("sendFlagged:", hex.EncodeToString(data)))
+	slog.Debug("sendFlagged", "flag", flag, "data", hex.EncodeToString(data))
 	b := s.encryt(flag, data)
 	return s.transport.Write(b)
 }
@@ -474,15 +473,11 @@ func (c *Client) SetDomain(domain string) {
 }
 
 func (c *Client) connect(clientData []interface{}, serverData []interface{}, userId uint16, channels []t125.MCSChannelInfo) {
-	slog.Debug("sec on connect:", clientData)
-	slog.Debug("sec on connect:", serverData)
-	slog.Debug("sec on connect:", userId)
-	slog.Debug("sec on connect:", channels)
+	slog.Debug("connected!", "clientData", clientData, "serverData", serverData, "userId", userId, "channels", channels)
 	c.clientData = clientData
 	c.serverData = serverData
 	c.userId = userId
 	for _, channel := range channels {
-		slog.Info(fmt.Sprintf("channel: %s <%d>:", channel.Name, channel.ID))
 		if channel.Name == t125.GLOBAL_CHANNEL_NAME {
 			c.channelId = channel.ID
 			//break
@@ -696,12 +691,12 @@ func (c *Client) sendInfoPkt() {
 		secFlag |= ENCRYPT
 	}
 
-	slog.Debug("RdpVersion:", c.ClientCoreData().RdpVersion, ":", gcc.RDP_VERSION_5_PLUS)
+	slog.Debug("RdpVersion", "client_core_data", c.ClientCoreData().RdpVersion, "gcc", gcc.RDP_VERSION_5_PLUS)
 	c.sendFlagged(secFlag, c.info.Serialize(c.ClientCoreData().RdpVersion == gcc.RDP_VERSION_5_PLUS))
 }
 
 func (c *Client) recvLicenceInfo(channel string, s []byte) {
-	slog.Debug("sec recvLicenceInfo", hex.EncodeToString(s))
+	slog.Debug("recvLicenceInfo", "s", hex.EncodeToString(s))
 	r := bytes.NewReader(s)
 	h := readSecurityHeader(r)
 	if (h.securityFlag & LICENSE_PKT) == 0 {
@@ -717,17 +712,17 @@ func (c *Client) recvLicenceInfo(channel string, s []byte) {
 		goto connect
 	case lic.ERROR_ALERT:
 		message := p.LicensingMessage.(*lic.ErrorMessage)
-		slog.Info(fmt.Sprintf("sec ERROR_ALERT and ErrorCode:%v", message.DwErrorCode))
+		slog.Info("recvLicenceInfo ERROR_ALERT" , "ErrorCode", message.DwErrorCode)
 		if message.DwErrorCode == lic.STATUS_VALID_CLIENT && message.DwStateTransaction == lic.ST_NO_TRANSITION {
 			goto connect
 		}
 		goto retry
 	case lic.LICENSE_REQUEST:
-		slog.Info("sec LICENSE_REQUEST")
+		slog.Info("recvLicenceInfo LICENSE_REQUEST")
 		c.sendClientNewLicenseRequest(p.LicensingMessage.([]byte))
 		goto retry
 	case lic.PLATFORM_CHALLENGE:
-		slog.Info("sec PLATFORM_CHALLENGE")
+		slog.Info("recvLicenceInfo PLATFORM_CHALLENGE")
 		c.sendClientChallengeResponse(p.LicensingMessage.([]byte))
 		goto retry
 	default:
@@ -853,8 +848,7 @@ func (c *Client) sendClientChallengeResponse(data []byte) {
 }
 
 func (c *Client) recvData(channel string, s []byte) {
-	slog.Debug(fmt.Sprintf("sec recvData", hex.EncodeToString(s)))
-	slog.Debug(fmt.Sprintf("channel<%s> data len: %d", channel, len(s)))
+	slog.Debug("sec recvData", "channel", channel, "s", hex.EncodeToString(s))
 	data := c.decrytData(s)
 	if channel != t125.GLOBAL_CHANNEL_NAME {
 		c.Emit("channel", channel, data)
