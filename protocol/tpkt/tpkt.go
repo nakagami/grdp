@@ -168,7 +168,6 @@ func (t *TPKT) SendFastPath(secFlag byte, data []byte) (n int, err error) {
 }
 
 func (t *TPKT) recvHeader(s []byte, err error) {
-	slog.Debug("tpkt recvHeader", "s", hex.EncodeToString(s), "err", err)
 	if err != nil {
 		t.Emit("error", err)
 		return
@@ -176,7 +175,6 @@ func (t *TPKT) recvHeader(s []byte, err error) {
 	r := bytes.NewReader(s)
 	version, _ := core.ReadUInt8(r)
 	if version == FASTPATH_ACTION_X224 {
-		slog.Debug("tptk recvHeader FASTPATH_ACTION_X224, wait for recvExtendedHeader")
 		core.StartReadBytes(2, t.Conn, t.recvExtendedHeader)
 	} else {
 		t.secFlag = (version >> 6) & 0x3
@@ -191,7 +189,6 @@ func (t *TPKT) recvHeader(s []byte, err error) {
 }
 
 func (t *TPKT) recvExtendedHeader(s []byte, err error) {
-	slog.Debug("tpkt recvExtendedHeader", "s", hex.EncodeToString(s), "err", err)
 	if err != nil {
 		return
 	}
@@ -201,7 +198,6 @@ func (t *TPKT) recvExtendedHeader(s []byte, err error) {
 }
 
 func (t *TPKT) recvData(s []byte, err error) {
-	slog.Debug("tpkt recvData", "s", hex.EncodeToString(s), "err", err)
 	if err != nil {
 		return
 	}

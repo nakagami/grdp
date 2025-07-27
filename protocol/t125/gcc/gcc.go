@@ -7,7 +7,6 @@ import (
 	"crypto/x509/pkix"
 	"encoding/asn1"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"math/big"
@@ -607,7 +606,6 @@ func ReadConferenceCreateResponse(data []byte) []interface{} {
 	ln, _ := per.ReadLength(r)
 	for ln > 0 {
 		t, _ := core.ReadUint16LE(r)
-		slog.Debug(fmt.Sprintf("Message type 0x%x,ln:%v", t, ln))
 		l, _ := core.ReadUint16LE(r)
 		dataBytes, _ := core.ReadBytes(int(l)-4, r)
 		ln = ln - l

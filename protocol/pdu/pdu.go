@@ -150,7 +150,7 @@ func NewClient(t core.Transport) *Client {
 }
 
 func (c *Client) connect(data *gcc.ClientCoreData, userId uint16, channelId uint16) {
-	slog.Debug("pdu connect:", userId, ",", channelId)
+	slog.Debug("pdu connect", "userId", userId, "channelId", channelId)
 	c.clientCoreData = data
 	c.userId = userId
 	c.channelId = channelId
