@@ -255,7 +255,6 @@ func readDemandActivePDU(r io.Reader) (*DemandActivePDU, error) {
 	d.NumberCapabilities, err = core.ReadUint16LE(r)
 	d.Pad2Octets, err = core.ReadUint16LE(r)
 	d.CapabilitySets = make([]Capability, 0, d.NumberCapabilities)
-	slog.Debug("NumberCapabilities is", d.NumberCapabilities)
 	for i := 0; i < int(d.NumberCapabilities); i++ {
 		c, err := readCapability(r)
 		if err != nil {
