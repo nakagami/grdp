@@ -173,7 +173,7 @@ func (c *Client) recvDemandActivePDU(s []byte) {
 	c.sharedId = pdu.Message.(*DemandActivePDU).SharedId
 	c.demandActivePDU = pdu.Message.(*DemandActivePDU)
 	for _, caps := range c.demandActivePDU.CapabilitySets {
-		slog.Debug(fmt.Sprintf("serverCapabilities<%s>: %+v", caps.Type(), caps))
+		slog.Debug("serverCaps", "type", caps.Type(), "value", caps)
 		c.serverCapabilities[caps.Type()] = caps
 	}
 
@@ -244,7 +244,7 @@ func (c *Client) sendConfirmActivePDU() {
 
 	pdu.SharedId = c.sharedId
 	for _, v := range c.clientCapabilities {
-		slog.Debug(fmt.Sprintf("clientCapabilities<%s>: %+v", v.Type(), v))
+		slog.Debug("clientCaps", "type", v.Type(), "value", v)
 		pdu.CapabilitySets = append(pdu.CapabilitySets, v)
 	}
 	pdu.NumberCapabilities = uint16(len(pdu.CapabilitySets))
