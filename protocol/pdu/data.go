@@ -430,7 +430,7 @@ func readDataPDU(r io.Reader) (*DataPDU, error) {
 		return nil, err
 	}
 	var d DataPDUData
-	slog.Debug(fmt.Sprintf("PDUType2 0x%02x", header.PDUType2))
+	slog.Debug("readDataPDU", "PDUTYPE2", header.PDUType2)
 	switch header.PDUType2 {
 	case PDUTYPE2_UPDATE:
 		d = &UpdateDataPDU{}
@@ -927,7 +927,6 @@ func readFastPathUpdatePDU(r io.Reader, code uint8) (*FastPathUpdatePDU, error) 
 	f := &FastPathUpdatePDU{}
 	var err error
 	var d UpdateData
-	slog.Debug(fmt.Sprintf("FastPathPDU type %s(0x%x)", FastPathUpdateType(code), code))
 	switch code {
 	case FASTPATH_UPDATETYPE_ORDERS:
 		d = &FastPathOrdersPDU{}
@@ -1001,16 +1000,16 @@ func readPDU(r io.Reader) (*PDU, error) {
 	var d PDUMessage
 	switch pdu.ShareCtrlHeader.PDUType {
 	case PDUTYPE_DEMANDACTIVEPDU:
-		slog.Debug("PDUTYPE_DEMANDACTIVEPDU")
+		slog.Debug("readPDU:PDUTYPE_DEMANDACTIVEPDU")
 		d, err = readDemandActivePDU(r)
 	case PDUTYPE_DATAPDU:
-		slog.Debug("PDUTYPE_DATAPDU")
+		slog.Debug("readPDU:PDUTYPE_DATAPDU")
 		d, err = readDataPDU(r)
 	case PDUTYPE_CONFIRMACTIVEPDU:
-		slog.Debug("PDUTYPE_CONFIRMACTIVEPDU")
+		slog.Debug("readPDU:PDUTYPE_CONFIRMACTIVEPDU")
 		d, err = readConfirmActivePDU(r)
 	case PDUTYPE_DEACTIVATEALLPDU:
-		slog.Debug("PDUTYPE_DEACTIVATEALLPDU")
+		slog.Debug("readPDU:PDUTYPE_DEACTIVATEALLPDU")
 		d, err = readDeactiveAllPDU(r)
 	default:
 		slog.Error(fmt.Sprintf("PDU invalid pdu type: 0x%02x", pdu.ShareCtrlHeader.PDUType))

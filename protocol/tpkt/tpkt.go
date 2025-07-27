@@ -206,7 +206,6 @@ func (t *TPKT) recvData(s []byte, err error) {
 }
 
 func (t *TPKT) recvExtendedFastPathHeader(s []byte, err error) {
-	slog.Debug("tpkt recvExtendedFastPathHeader", "s", hex.EncodeToString(s))
 	r := bytes.NewReader(s)
 	rightPart, err := core.ReadUInt8(r)
 	if err != nil {
@@ -220,7 +219,6 @@ func (t *TPKT) recvExtendedFastPathHeader(s []byte, err error) {
 }
 
 func (t *TPKT) recvFastPath(s []byte, err error) {
-	slog.Debug("tpkt recvFastPath")
 	if err != nil {
 		return
 	}
