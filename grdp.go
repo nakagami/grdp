@@ -191,9 +191,6 @@ func (g *RdpClient) OnReady(f func()) *RdpClient {
 
 func (g *RdpClient) OnBitmap(paint func([]Bitmap)) *RdpClient {
 	g.pdu.On("bitmap", func(rectangles []pdu.BitmapData) {
-		if !g.eventReady {
-			return
-		}
 		bs := make([]Bitmap, 0, 50)
 		for _, v := range rectangles {
 			IsCompress := v.IsCompress()
@@ -230,9 +227,6 @@ func (g *RdpClient) OnPointerUpdate(f func(uint16, uint16, uint16, uint16, uint1
 }
 
 func (g *RdpClient) KeyUp(sc int) {
-	if !g.eventReady {
-		return
-	}
 	slog.Debug("KeyUp", "sc", sc)
 
 	p := &pdu.ScancodeKeyEvent{}
@@ -242,9 +236,6 @@ func (g *RdpClient) KeyUp(sc int) {
 }
 
 func (g *RdpClient) KeyDown(sc int) {
-	if !g.eventReady {
-		return
-	}
 	slog.Debug("KeyDown", "sc", sc)
 
 	p := &pdu.ScancodeKeyEvent{}
@@ -253,9 +244,6 @@ func (g *RdpClient) KeyDown(sc int) {
 }
 
 func (g *RdpClient) MouseMove(x, y int) {
-	if !g.eventReady {
-		return
-	}
 	//slog.Debug("MouseMove", "x", x, "y", y)
 	p := &pdu.PointerEvent{}
 	p.PointerFlags |= pdu.PTRFLAGS_MOVE
@@ -265,9 +253,6 @@ func (g *RdpClient) MouseMove(x, y int) {
 }
 
 func (g *RdpClient) MouseWheel(scroll int) {
-	if !g.eventReady {
-		return
-	}
 	slog.Debug("MouseWheel")
 	p := &pdu.PointerEvent{}
 	p.PointerFlags |= pdu.PTRFLAGS_WHEEL
@@ -280,9 +265,6 @@ func (g *RdpClient) MouseWheel(scroll int) {
 }
 
 func (g *RdpClient) MouseUp(button int, x, y int) {
-	if !g.eventReady {
-		return
-	}
 	slog.Debug("MouseUp", "x", x, "y", y, "button", button)
 	p := &pdu.PointerEvent{}
 
@@ -303,9 +285,6 @@ func (g *RdpClient) MouseUp(button int, x, y int) {
 }
 
 func (g *RdpClient) MouseDown(button int, x, y int) {
-	if !g.eventReady {
-		return
-	}
 	slog.Debug("MouseDown", "x", x, "y", y, "button", button)
 	p := &pdu.PointerEvent{}
 
@@ -329,9 +308,6 @@ func (g *RdpClient) MouseDown(button int, x, y int) {
 
 func (g *RdpClient) Close() {
 	slog.Debug("Close()")
-	if !g.eventReady {
-		return
-	}
 	if g != nil && g.tpkt != nil {
 		g.tpkt.Close()
 	}
