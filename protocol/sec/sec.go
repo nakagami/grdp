@@ -691,7 +691,7 @@ func (c *Client) sendInfoPkt() {
 		secFlag |= ENCRYPT
 	}
 
-	slog.Debug("RdpVersion", "client_core_data", c.ClientCoreData().RdpVersion, "gcc", gcc.RDP_VERSION_5_PLUS)
+	slog.Debug("sendInfoPkt", "secFlag", seqFlag, "hasExtended", c.ClientCoreData().RdpVersion == gcc.RDP_VERSION_5_PLUS)
 	c.sendFlagged(secFlag, c.info.Serialize(c.ClientCoreData().RdpVersion == gcc.RDP_VERSION_5_PLUS))
 }
 
@@ -712,7 +712,7 @@ func (c *Client) recvLicenceInfo(channel string, s []byte) {
 		goto connect
 	case lic.ERROR_ALERT:
 		message := p.LicensingMessage.(*lic.ErrorMessage)
-		slog.Info("recvLicenceInfo ERROR_ALERT" , "ErrorCode", message.DwErrorCode)
+		slog.Info("recvLicenceInfo ERROR_ALERT", "ErrorCode", message.DwErrorCode)
 		if message.DwErrorCode == lic.STATUS_VALID_CLIENT && message.DwStateTransaction == lic.ST_NO_TRANSITION {
 			goto connect
 		}
