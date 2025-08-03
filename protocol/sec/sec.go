@@ -691,7 +691,7 @@ func (c *Client) sendInfoPkt() {
 		secFlag |= ENCRYPT
 	}
 
-	slog.Debug("sendInfoPkt", "secFlag", seqFlag, "hasExtended", c.ClientCoreData().RdpVersion == gcc.RDP_VERSION_5_PLUS)
+	slog.Debug("sendInfoPkt", "secFlag", secFlag, "hasExtended", c.ClientCoreData().RdpVersion == gcc.RDP_VERSION_5_PLUS)
 	c.sendFlagged(secFlag, c.info.Serialize(c.ClientCoreData().RdpVersion == gcc.RDP_VERSION_5_PLUS))
 }
 
