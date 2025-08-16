@@ -54,7 +54,7 @@ func (t *TPKT) StartTLS() error {
 func (t *TPKT) StartNLA() error {
 	err := t.StartTLS()
 	if err != nil {
-		slog.Info("start tls failed", err)
+		slog.Error("StartNLA", "start tls failed", err)
 		return err
 	}
 	req := nla.EncodeDERTRequest([]nla.Message{t.ntlm.GetNegotiateMessage()}, nil, nil)
@@ -80,7 +80,7 @@ func (t *TPKT) recvChallenge(data []byte) error {
 	slog.Debug("recvChallenge", "data", hex.EncodeToString(data))
 	tsreq, err := nla.DecodeDERTRequest(data)
 	if err != nil {
-		slog.Info("DecodeDERTRequest", err)
+		slog.Info("DecodeDERTRequest", "err", err)
 		return err
 	}
 	slog.Debug("recvChallenge", "tsreq", tsreq)
@@ -96,7 +96,7 @@ func (t *TPKT) recvChallenge(data []byte) error {
 	slog.Debug("recvChallenge", "send", hex.EncodeToString(req), "len", len(req))
 	_, err = t.Conn.Write(req)
 	if err != nil {
-		slog.Error("send AuthenticateMessage", err)
+		slog.Error("send AuthenticateMessage", "err", err)
 		return err
 	}
 
@@ -209,7 +209,7 @@ func (t *TPKT) recvExtendedFastPathHeader(s []byte, err error) {
 	r := bytes.NewReader(s)
 	rightPart, err := core.ReadUInt8(r)
 	if err != nil {
-		slog.Error("TPTK recvExtendedFastPathHeader", err)
+		slog.Error("TPTK recvExtendedFastPathHeader", "err", err)
 		return
 	}
 
