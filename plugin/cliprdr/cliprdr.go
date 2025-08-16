@@ -3,11 +3,11 @@ package cliprdr
 import (
 	"bytes"
 	"encoding/hex"
+	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	"unicode/utf16"
-	"fmt"
-	"log/slog"
 
 	"github.com/lunixbochs/struc"
 

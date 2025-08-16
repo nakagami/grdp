@@ -3,9 +3,9 @@ package drdynvc
 import (
 	"bytes"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"log/slog"
-	"fmt"
 
 	"github.com/nakagami/grdp/core"
 	"github.com/nakagami/grdp/plugin"

@@ -1,3 +1,4 @@
+//go:build windows
 // +build windows
 
 // dataobject.go
@@ -7,11 +8,11 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"log/slog"
 	"reflect"
 	"sync/atomic"
 	"syscall"
 	"unsafe"
-	"log/slog"
 
 	"github.com/nakagami/grdp/core"
 	"github.com/tomatome/win"
