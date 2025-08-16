@@ -370,14 +370,14 @@ func (n *NTLMv2) GetAuthenticateMessage(s []byte) (*AuthenticateMessage, *NTLMv2
 	r := bytes.NewReader(s)
 	err := struc.Unpack(r, challengeMsg)
 	if err != nil {
-		slog.Error("read challengeMsg", err)
+		slog.Error("GetAuthenticateMessage", "err", err)
 		return nil, nil
 	}
 	if challengeMsg.NegotiateFlags&NTLMSSP_NEGOTIATE_VERSION != 0 {
 		version := NVersion{}
 		err := struc.Unpack(r, &version)
 		if err != nil {
-			slog.Error("read version", err)
+			slog.Error("GetAuthenticateMessage", "err", err)
 			return nil, nil
 		}
 		challengeMsg.Version = version
