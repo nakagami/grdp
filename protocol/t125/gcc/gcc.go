@@ -410,7 +410,7 @@ func (x *X509CertificateChain) GetPublicKey() (*rsa.PublicKey, error) {
 	data := x.CertBlobArray[len(x.CertBlobArray)-1].AbCert
 	cert, err := x509.ParseCertificate(data)
 	if err != nil {
-		slog.Error("X509 ParseCertificate err:", err)
+		slog.Error("X509 ParseCertificate", "err", err)
 		return nil, err
 	}
 	var rsaPublicKey *rsa.PublicKey
@@ -509,13 +509,13 @@ func (sc *ServerCertificate) Unpack(r io.Reader) error {
 		slog.Debug("X509CertificateChain")
 		cd = &X509CertificateChain{}
 	default:
-		slog.Error("Unsupported version:", sc.DwVersion&0x7fffffff)
+		slog.Error("Unpack", "Unsupported version", sc.DwVersion&0x7fffffff)
 		return errors.New("Unsupported version")
 	}
 	if cd != nil {
 		err := cd.Unpack(r)
 		if err != nil {
-			slog.Error("Unpack:", err)
+			slog.Error("Unpack", "err", err)
 			return err
 		}
 	}
@@ -618,7 +618,7 @@ func ReadConferenceCreateResponse(data []byte) []interface{} {
 		case SC_NET:
 			d = &ServerNetworkData{}
 		default:
-			slog.Error("Unknown type", t)
+			slog.Error("ReadConferenceCreateResponse", "type", t)
 			continue
 		}
 
@@ -626,7 +626,7 @@ func ReadConferenceCreateResponse(data []byte) []interface{} {
 			r := bytes.NewReader(dataBytes)
 			err := d.Unpack(r)
 			if err != nil {
-				slog.Warn("Unpack:", err)
+				slog.Warn("ReadConferenceCreateResponse", "err", err)
 			}
 			ret = append(ret, d)
 		}
