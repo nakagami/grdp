@@ -2,8 +2,8 @@ package core
 
 import (
 	"crypto/rsa"
-	"math/big"
 	"encoding/asn1"
+	"math/big"
 
 	"crypto/tls"
 	"errors"
@@ -49,10 +49,10 @@ func (s *SocketLayer) Close() error {
 
 func (s *SocketLayer) StartTLS() error {
 	config := &tls.Config{
-		InsecureSkipVerify:       true,
-		MinVersion:               tls.VersionTLS12,
-		MaxVersion:               tls.VersionTLS12,
-//		MaxVersion:               tls.VersionTLS13,
+		InsecureSkipVerify: true,
+		MinVersion:         tls.VersionTLS12,
+		MaxVersion:         tls.VersionTLS12,
+		//		MaxVersion:               tls.VersionTLS13,
 	}
 	s.tlsConn = tls.Client(s.conn, config)
 	return s.tlsConn.Handshake()

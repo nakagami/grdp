@@ -3,10 +3,10 @@ package cliprdr
 
 import (
 	"bytes"
+	"log/slog"
 	"syscall"
 	"unicode/utf16"
 	"unsafe"
-	"log/slog"
 
 	"github.com/shirou/w32"
 

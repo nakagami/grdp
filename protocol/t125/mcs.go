@@ -490,7 +490,7 @@ func (c *MCSClient) recvData(s []byte) {
 		c.Emit("error", errors.New(fmt.Sprintf("mcs recvData get data error %v", err)))
 		return
 	}
-	slog.Debug("mcs emit sec",  "channel", channelName, "left", hex.EncodeToString(left))
+	slog.Debug("mcs emit sec", "channel", channelName, "left", hex.EncodeToString(left))
 	c.Emit("sec", channelName, left)
 }
 

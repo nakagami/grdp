@@ -4,8 +4,8 @@ package rail
 import (
 	"bytes"
 	"encoding/hex"
-	"log/slog"
 	"fmt"
+	"log/slog"
 
 	"github.com/nakagami/grdp/core"
 	"github.com/nakagami/grdp/plugin"

@@ -331,31 +331,24 @@ func macData(macSaltKey, data []byte) []byte {
 func (s *SEC) readEncryptedPayload(data []byte, checkSum bool) []byte {
 	r := bytes.NewReader(data)
 	sign, _ := core.ReadBytes(8, r)
-	slog.Debug("read sign:", sign)
+	slog.Debug("readEncryptedPayload", "sign", sign)
 	encryptedPayload, _ := core.ReadBytes(r.Len(), r)
 	if s.decryptRc4 == nil {
 		s.decryptRc4, _ = rc4.NewCipher(s.currentDecrytKey)
 	}
 	s.nbDecryptedPacket++
-	slog.Debug("nbDecryptedPacket:", s.nbDecryptedPacket)
 	plaintext := make([]byte, len(encryptedPayload))
 	s.decryptRc4.XORKeyStream(plaintext, encryptedPayload)
 
 	return plaintext
-
 }
 func (s *SEC) writeEncryptedPayload(data []byte, checkSum bool) []byte {
-	if s.nbEncryptedPacket == 4096 {
-
-	}
-
 	if checkSum {
-		slog.Debug("need checkSum")
 		return []byte{}
 	}
 
 	s.nbEncryptedPacket++
-	slog.Debug("nbEncryptedPacket:", s.nbEncryptedPacket)
+	slog.Debug("writeEncryptedPayload", "nbEncryptedPacket", s.nbEncryptedPacket)
 	b := &bytes.Buffer{}
 
 	sign := macData(s.macKey, data)[:8]
@@ -367,7 +360,7 @@ func (s *SEC) writeEncryptedPayload(data []byte, checkSum bool) []byte {
 	s.encryptRc4.XORKeyStream(plaintext, data)
 	b.Write(sign)
 	b.Write(plaintext)
-	slog.Debug("sign:", hex.EncodeToString(sign), "plaintext:", hex.EncodeToString(plaintext))
+	slog.Debug("writeEncryptedPayload", "sign", hex.EncodeToString(sign), "plaintext", hex.EncodeToString(plaintext))
 	return b.Bytes()
 }
 
@@ -610,21 +603,14 @@ func generateKeys(clientRandom, serverRandom []byte, method uint32) ([]byte, []b
 	b.Write(clientRandom[:24])
 	b.Write(serverRandom[:24])
 	preMasterHash := b.Bytes()
-	slog.Debug("preMasterHash:", hex.EncodeToString(preMasterHash))
+	slog.Debug("getnerateKeys", "method", method)
 
 	masterHash := masterSecret(preMasterHash, clientRandom, serverRandom)
-	slog.Debug("masterHash:", hex.EncodeToString(masterHash))
-
 	sessionKey := sessionKeyBlob(masterHash, clientRandom, serverRandom)
-	slog.Debug("sessionKey:", hex.EncodeToString(sessionKey))
-
 	macKey128 := sessionKey[:16]
 	initialFirstKey128 := finalHash(sessionKey[16:32], clientRandom, serverRandom)
 	initialSecondKey128 := finalHash(sessionKey[32:48], clientRandom, serverRandom)
 
-	slog.Debug("macKey128:", hex.EncodeToString(macKey128))
-	slog.Debug("FirstKey128:", hex.EncodeToString(initialFirstKey128))
-	slog.Debug("SecondKey128:", hex.EncodeToString(initialSecondKey128))
 	//generate valid key
 	if method == gcc.ENCRYPTION_FLAG_40BIT {
 		return gen40bits(macKey128), gen40bits(initialFirstKey128), gen40bits(initialSecondKey128)
@@ -651,13 +637,11 @@ func (e *ClientSecurityExchangePDU) serialize() []byte {
 	return buff.Bytes()
 }
 func (c *Client) sendClientRandom() {
-	slog.Debug("send Client Random")
-
 	clientRandom := core.Random(32)
-	slog.Debug("clientRandom:", hex.EncodeToString(clientRandom))
+	slog.Debug("sendClientRandom", "clientRandom", hex.EncodeToString(clientRandom))
 
 	serverRandom := c.ServerSecurityData().ServerRandom
-	slog.Debug("ServerRandom:", hex.EncodeToString(serverRandom))
+	slog.Debug("sendlientRandom", "ServerRandom", hex.EncodeToString(serverRandom))
 
 	c.macKey, c.initialDecrytKey, c.initialEncryptKey = generateKeys(clientRandom,
 		serverRandom, c.ServerSecurityData().EncryptionMethod)
@@ -674,14 +658,14 @@ func (c *Client) sendClientRandom() {
 	serverPubKey, _ := c.ServerSecurityData().ServerCertificate.CertData.GetPublicKey()
 	ret, err := rsa.EncryptPKCS1v15(rand.Reader, serverPubKey, core.Reverse(clientRandom))
 	if err != nil {
-		slog.Error("err:", err)
+		slog.Error("sendlientRandom", "err", err)
 	}
 	message := ClientSecurityExchangePDU{}
 	message.EncryptedClientRandom = core.Reverse(ret)
 	message.Length = uint32(len(message.EncryptedClientRandom) + 8)
 	message.Padding = make([]byte, 8)
 
-	slog.Debug("message:", message)
+	slog.Debug("sendlientRandom", "message", message)
 
 	c.sendFlagged(EXCHANGE_PKT, message.serialize())
 }
@@ -752,7 +736,7 @@ func (c *Client) sendClientNewLicenseRequest(data []byte) {
 		rd := bytes.NewReader(req.ServerCertificate.BlobData)
 		err := sc.Unpack(rd)
 		if err != nil {
-			slog.Error("read serverCertificate err:", err)
+			slog.Error("sendClientNewLicenseRequest", "err", err)
 			return
 		}
 	}
@@ -776,7 +760,7 @@ func (c *Client) sendClientNewLicenseRequest(data []byte) {
 	serverPubKey, _ := sc.CertData.GetPublicKey()
 	ret, err := rsa.EncryptPKCS1v15(rand.Reader, serverPubKey, core.Reverse(preMasterSecret))
 	if err != nil {
-		slog.Error("err:", err)
+		slog.Error("sendClientNewLicenseRequest", "err", err)
 	}
 
 	buff.Write(core.Reverse(ret))
@@ -802,7 +786,7 @@ func (c *Client) sendClientNewLicenseRequest(data []byte) {
 	buff.Reset()
 	err = struc.Pack(buff, message)
 	if err != nil {
-		slog.Error("err:", err)
+		slog.Error("sendClientNewLicenseRequest", "err", err)
 	}
 
 	c.sendFlagged(LICENSE_PKT, buff.Bytes())
@@ -874,7 +858,7 @@ func (c *Client) SetChannelSender(f core.ChannelSender) {
 
 func (c *Client) SendToChannel(channel string, b []byte) (int, error) {
 	if !c.enableEncryption {
-		slog.Debug("Sec Client write", hex.EncodeToString(b))
+		slog.Debug("SendToChannel", "b", hex.EncodeToString(b))
 		return c.channelSender.SendToChannel(channel, b)
 	}
 	var flag uint16 = ENCRYPT
@@ -887,6 +871,6 @@ func (c *Client) SendToChannel(channel string, b []byte) (int, error) {
 	core.WriteUInt16LE(flag, buff)
 	core.WriteUInt16LE(0, buff)
 	core.WriteBytes(data, buff)
-	slog.Debug("Sec Client write", channel, hex.EncodeToString(buff.Bytes()))
+	slog.Debug("SendToChannel", "channel", channel, "buff", hex.EncodeToString(buff.Bytes()))
 	return c.channelSender.SendToChannel(channel, buff.Bytes())
 }
