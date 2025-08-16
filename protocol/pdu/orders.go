@@ -210,7 +210,7 @@ func (o *OrderPdu) processSecondaryOrder(r io.Reader) error {
 	flags, _ := core.ReadUint16LE(r)
 	orderType, _ := core.ReadUInt8(r)
 
-	slog.Info("Secondary:", SecondaryOrderType(orderType))
+	slog.Info("processSecondaryOrder", "SecondaryOrderType", SecondaryOrderType(orderType))
 
 	b, _ := core.ReadBytes(int(length)+13-6, r)
 	r0 := bytes.NewReader(b)
@@ -235,7 +235,7 @@ func (o *OrderPdu) processSecondaryOrder(r io.Reader) error {
 	case ORDER_TYPE_CACHE_BRUSH:
 		sec.updateCacheBrushOrder(r0, flags)
 	default:
-		slog.Debug(fmt.Sprintf("Unsupport order type 0x%x", orderType))
+		slog.Debug(fmt.Sprintf("processSecondaryOrder", "Unsupport order type", orderType))
 	}
 
 	return nil
@@ -379,7 +379,7 @@ func (o *OrderPdu) processPrimaryOrder(r io.Reader) error {
 	case ORDER_TYPE_TEXT2:
 		p = &GlayphIndex{}
 	default:
-		slog.Error("Not Support order type:", orderType)
+		slog.Error("processPrimaryOrder", "orderType", orderType)
 		return errors.New("Not Support order type")
 	}
 	if p != nil {
