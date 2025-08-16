@@ -235,7 +235,7 @@ func (o *OrderPdu) processSecondaryOrder(r io.Reader) error {
 	case ORDER_TYPE_CACHE_BRUSH:
 		sec.updateCacheBrushOrder(r0, flags)
 	default:
-		slog.Debug(fmt.Sprintf("processSecondaryOrder", "Unsupport order type", orderType))
+		slog.Debug("processSecondaryOrder", "Unsupport order type", orderType)
 	}
 
 	return nil
