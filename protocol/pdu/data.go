@@ -371,7 +371,7 @@ func readConfirmActivePDU(r io.Reader) (*ConfirmActivePDU, error) {
 		p.CapabilitySets = append(p.CapabilitySets, c)
 	}
 	s, _ := core.ReadUInt32LE(r)
-	slog.Info("sessionid:", s)
+	slog.Info("readConfirmActivePDU", "sessionid", s)
 	return p, nil
 }
 
@@ -426,7 +426,7 @@ func readDataPDU(r io.Reader) (*DataPDU, error) {
 	header := &ShareDataHeader{}
 	err := struc.Unpack(r, header)
 	if err != nil {
-		slog.Error("read data pdu header error", err)
+		slog.Error("readDataPDU", "err", err)
 		return nil, err
 	}
 	var d DataPDUData
@@ -455,13 +455,13 @@ func readDataPDU(r io.Reader) (*DataPDU, error) {
 
 	default:
 		err = errors.New(fmt.Sprintf("Unknown data pdu type2 0x%02x", header.PDUType2))
-		slog.Error("err", err)
+		slog.Error("readDataPDU", "err", err)
 		return nil, err
 	}
 
 	err = d.Unpack(r)
 	if err != nil {
-		slog.Error("Read data pdu:", err)
+		slog.Error("readDataPDU", "err", err)
 		return nil, err
 	}
 
