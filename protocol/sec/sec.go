@@ -125,6 +125,7 @@ func NewExtendedInfo(auto *ClientAutoReconnect) *RDPExtendedInfo {
 		ClientDir:           []byte{0, 0},
 		ClientTimeZone:      make([]byte, 172),
 		ClientSessionId:     0,
+		PerformanceFlags:    PERF_ENABLE_FONT_SMOOTHING,
 		AutoReconnect:       auto,
 	}
 }
