@@ -365,7 +365,7 @@ type ProprietaryServerCertificate struct {
 func (p *ProprietaryServerCertificate) GetPublicKey() (*rsa.PublicKey, error) {
 	b := new(big.Int).SetBytes(core.Reverse(p.PublicKeyBlob.Modulus))
 	e := new(big.Int).SetInt64(int64(p.PublicKeyBlob.PubExp))
-	return &rsa.PublicKey{b, int(e.Int64())}, nil
+	return &rsa.PublicKey{N: b, E: int(e.Int64())}, nil
 }
 func (p *ProprietaryServerCertificate) Verify() bool {
 	return true
