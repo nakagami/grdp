@@ -310,6 +310,7 @@ func (c *MCSClient) connect(selectedProtocol uint32) {
 	userDataBuff.Write(c.clientSecurityData.Pack())
 
 	ccReq := gcc.MakeConferenceCreateRequest(userDataBuff.Bytes())
+	slog.Debug("ccReq", "data", hex.EncodeToString(ccReq), "len", len(ccReq))
 	connectInitial := NewConnectInitial(ccReq)
 	connectInitialBerEncoded := connectInitial.BER()
 
