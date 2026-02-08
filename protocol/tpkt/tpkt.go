@@ -108,13 +108,11 @@ func (t *TPKT) recvChallenge(data []byte) error {
 		return fmt.Errorf("read %s", err)
 	}
 
-	slog.Debug("recvChallenge", "recieved", hex.EncodeToString(resp[:n]), "len", n)
-
 	return t.recvPubKeyInc(resp[:n])
 }
 
 func (t *TPKT) recvPubKeyInc(data []byte) error {
-	slog.Debug("recvPubKeyInc", "data", hex.EncodeToString(data))
+	slog.Debug("recvPubKeyInc", "data", hex.EncodeToString(data), "len", len(data))
 	tsreq, err := nla.DecodeDERTRequest(data)
 	if err != nil {
 		slog.Info("DecodeDERTRequest", "err", err)
