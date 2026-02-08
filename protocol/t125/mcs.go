@@ -297,12 +297,12 @@ func (c *MCSClient) SetClientCliprdr() {
 }
 
 func (c *MCSClient) connect(selectedProtocol uint32) {
-	slog.Debug("mcs connect", "selectedProtocol", selectedProtocol)
+	slog.Debug("connect", "selectedProtocol", selectedProtocol)
 	c.clientCoreData.ServerSelectedProtocol = selectedProtocol
 
-	slog.Debug("mcs connnect", "clientCoreData", c.clientCoreData)
-	slog.Debug("mcs connect", "clientNetworkData", c.clientNetworkData)
-	slog.Debug("mcs connect", "clientSecurityData", c.clientSecurityData)
+	slog.Debug("connnect", "clientCoreData", c.clientCoreData)
+	slog.Debug("connect", "clientNetworkData", c.clientNetworkData)
+	slog.Debug("connect", "clientSecurityData", c.clientSecurityData)
 	// sendConnectclientCoreDataInitial
 	userDataBuff := bytes.Buffer{}
 	userDataBuff.Write(c.clientCoreData.Pack())
@@ -316,6 +316,7 @@ func (c *MCSClient) connect(selectedProtocol uint32) {
 	dataBuff := &bytes.Buffer{}
 	ber.WriteApplicationTag(uint8(MCS_TYPE_CONNECT_INITIAL), len(connectInitialBerEncoded), dataBuff)
 	dataBuff.Write(connectInitialBerEncoded)
+	slog.Debug("send connet initial", "data", hex.EncodeToString(dataBuff.Bytes()), "len", len(dataBuff.Bytes()))
 
 	_, err := c.transport.Write(dataBuff.Bytes())
 	if err != nil {
