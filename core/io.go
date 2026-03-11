@@ -22,55 +22,56 @@ func ReadBytes(len int, r io.Reader) ([]byte, error) {
 }
 
 func ReadByte(r io.Reader) (byte, error) {
-	b, err := ReadBytes(1, r)
-	return b[0], err
+	var buf [1]byte
+	_, err := io.ReadFull(r, buf[:])
+	return buf[0], err
 }
 
 func ReadUInt8(r io.Reader) (uint8, error) {
-	b, err := ReadBytes(1, r)
-	return uint8(b[0]), err
+	var buf [1]byte
+	_, err := io.ReadFull(r, buf[:])
+	return buf[0], err
 }
 
 func ReadUint16LE(r io.Reader) (uint16, error) {
-	b := make([]byte, 2)
-	_, err := io.ReadFull(r, b)
+	var buf [2]byte
+	_, err := io.ReadFull(r, buf[:])
 	if err != nil {
 		return 0, nil
 	}
-	return binary.LittleEndian.Uint16(b), nil
+	return binary.LittleEndian.Uint16(buf[:]), nil
 }
 
 func ReadUint16BE(r io.Reader) (uint16, error) {
-	b := make([]byte, 2)
-	_, err := io.ReadFull(r, b)
+	var buf [2]byte
+	_, err := io.ReadFull(r, buf[:])
 	if err != nil {
 		return 0, nil
 	}
-	return binary.BigEndian.Uint16(b), nil
+	return binary.BigEndian.Uint16(buf[:]), nil
 }
 
 func ReadUInt32LE(r io.Reader) (uint32, error) {
-	b := make([]byte, 4)
-	_, err := io.ReadFull(r, b)
+	var buf [4]byte
+	_, err := io.ReadFull(r, buf[:])
 	if err != nil {
 		return 0, nil
 	}
-	return binary.LittleEndian.Uint32(b), nil
+	return binary.LittleEndian.Uint32(buf[:]), nil
 }
 
 func ReadUInt32BE(r io.Reader) (uint32, error) {
-	b := make([]byte, 4)
-	_, err := io.ReadFull(r, b)
+	var buf [4]byte
+	_, err := io.ReadFull(r, buf[:])
 	if err != nil {
 		return 0, nil
 	}
-	return binary.BigEndian.Uint32(b), nil
+	return binary.BigEndian.Uint32(buf[:]), nil
 }
 
 func WriteByte(data byte, w io.Writer) (int, error) {
-	b := make([]byte, 1)
-	b[0] = byte(data)
-	return w.Write(b)
+	buf := [1]byte{data}
+	return w.Write(buf[:])
 }
 
 func WriteBytes(data []byte, w io.Writer) (int, error) {
@@ -78,47 +79,42 @@ func WriteBytes(data []byte, w io.Writer) (int, error) {
 }
 
 func WriteUInt8(data uint8, w io.Writer) (int, error) {
-	b := make([]byte, 1)
-	b[0] = byte(data)
-	return w.Write(b)
+	buf := [1]byte{data}
+	return w.Write(buf[:])
 }
 
 func WriteUInt16BE(data uint16, w io.Writer) (int, error) {
-	b := make([]byte, 2)
-	binary.BigEndian.PutUint16(b, data)
-	return w.Write(b)
+	var buf [2]byte
+	binary.BigEndian.PutUint16(buf[:], data)
+	return w.Write(buf[:])
 }
 
 func WriteUInt16LE(data uint16, w io.Writer) (int, error) {
-	b := make([]byte, 2)
-	binary.LittleEndian.PutUint16(b, data)
-	return w.Write(b)
+	var buf [2]byte
+	binary.LittleEndian.PutUint16(buf[:], data)
+	return w.Write(buf[:])
 }
 
 func WriteUInt32LE(data uint32, w io.Writer) (int, error) {
-	b := make([]byte, 4)
-	binary.LittleEndian.PutUint32(b, data)
-	return w.Write(b)
+	var buf [4]byte
+	binary.LittleEndian.PutUint32(buf[:], data)
+	return w.Write(buf[:])
 }
 
 func WriteUInt32BE(data uint32, w io.Writer) (int, error) {
-	b := make([]byte, 4)
-	binary.BigEndian.PutUint32(b, data)
-	return w.Write(b)
+	var buf [4]byte
+	binary.BigEndian.PutUint32(buf[:], data)
+	return w.Write(buf[:])
 }
 
 func PutUint16BE(data uint16) (uint8, uint8) {
-	b := make([]byte, 2)
-	binary.BigEndian.PutUint16(b, data)
-	return uint8(b[0]), uint8(b[1])
+	var buf [2]byte
+	binary.BigEndian.PutUint16(buf[:], data)
+	return buf[0], buf[1]
 }
 
 func Uint16BE(d0, d1 uint8) uint16 {
-	b := make([]byte, 2)
-	b[0] = d0
-	b[1] = d1
-
-	return binary.BigEndian.Uint16(b)
+	return binary.BigEndian.Uint16([]byte{d0, d1})
 }
 
 func RGB565ToRGB(data uint16) (r, g, b uint8) {

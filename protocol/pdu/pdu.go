@@ -4,11 +4,16 @@ import (
 	"bytes"
 	"fmt"
 	"log/slog"
+	"sync"
 
 	"github.com/nakagami/grdp/core"
 	"github.com/nakagami/grdp/emission"
 	"github.com/nakagami/grdp/protocol/t125/gcc"
 )
+
+var readerPool = sync.Pool{
+	New: func() any { return new(bytes.Reader) },
+}
 
 type PDULayer struct {
 	emission.Emitter
@@ -157,7 +162,9 @@ func (c *Client) connect(data *gcc.ClientCoreData, userId uint16, channelId uint
 }
 
 func (c *Client) recvDemandActivePDU(s []byte) {
-	r := bytes.NewReader(s)
+	r := readerPool.Get().(*bytes.Reader)
+	r.Reset(s)
+	defer readerPool.Put(r)
 	pdu, err := readPDU(r)
 	if err != nil {
 		slog.Error("recvDemandActivePDU", "err", err)
@@ -260,7 +267,9 @@ func (c *Client) sendClientFinalizeSynchronizePDU() {
 }
 
 func (c *Client) recvServerSynchronizePDU(s []byte) {
-	r := bytes.NewReader(s)
+	r := readerPool.Get().(*bytes.Reader)
+	r.Reset(s)
+	defer readerPool.Put(r)
 	pdu, err := readPDU(r)
 	if err != nil {
 		slog.Error("recvServerSynchronizePDU", "err", err)
@@ -281,7 +290,9 @@ func (c *Client) recvServerSynchronizePDU(s []byte) {
 }
 
 func (c *Client) recvServerControlCooperatePDU(s []byte) {
-	r := bytes.NewReader(s)
+	r := readerPool.Get().(*bytes.Reader)
+	r.Reset(s)
+	defer readerPool.Put(r)
 	pdu, err := readPDU(r)
 	if err != nil {
 		slog.Error("recvServerControlCooperatePDU", "err", err)
@@ -306,7 +317,9 @@ func (c *Client) recvServerControlCooperatePDU(s []byte) {
 }
 
 func (c *Client) recvServerControlGrantedPDU(s []byte) {
-	r := bytes.NewReader(s)
+	r := readerPool.Get().(*bytes.Reader)
+	r.Reset(s)
+	defer readerPool.Put(r)
 	pdu, err := readPDU(r)
 	if err != nil {
 		slog.Error("recvServerControlGrantedPDU", "err", err)
@@ -331,7 +344,9 @@ func (c *Client) recvServerControlGrantedPDU(s []byte) {
 }
 
 func (c *Client) recvServerFontMapPDU(s []byte) {
-	r := bytes.NewReader(s)
+	r := readerPool.Get().(*bytes.Reader)
+	r.Reset(s)
+	defer readerPool.Put(r)
 	pdu, err := readPDU(r)
 	if err != nil {
 		slog.Error("recvServerFontMapPDU", "err", err)
@@ -351,7 +366,9 @@ func (c *Client) recvServerFontMapPDU(s []byte) {
 }
 
 func (c *Client) recvPDU(s []byte) {
-	r := bytes.NewReader(s)
+	r := readerPool.Get().(*bytes.Reader)
+	r.Reset(s)
+	defer readerPool.Put(r)
 	if r.Len() > 0 {
 		p, err := readPDU(r)
 		if err != nil {
@@ -376,7 +393,9 @@ func (c *Client) recvPDU(s []byte) {
 }
 
 func (c *Client) RecvFastPath(secFlag byte, s []byte) {
-	r := bytes.NewReader(s)
+	r := readerPool.Get().(*bytes.Reader)
+	r.Reset(s)
+	defer readerPool.Put(r)
 	for r.Len() > 0 {
 		updateHeader, err := core.ReadUInt8(r)
 		if err != nil {
@@ -412,7 +431,7 @@ func (c *Client) RecvFastPath(secFlag byte, s []byte) {
 			if fragmentation != FASTPATH_FRAGMENT_LAST {
 				return
 			}
-			r = bytes.NewReader(c.buff.Bytes())
+			r.Reset(c.buff.Bytes())
 		}
 
 		p, err := readFastPathUpdatePDU(r, updateCode)
