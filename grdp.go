@@ -3,7 +3,6 @@ package grdp
 import (
 	"fmt"
 	"image"
-	"image/color"
 	"log/slog"
 	"net"
 
@@ -68,16 +67,17 @@ func pixelToRGBA(pixel int, i int, data []byte) (r, g, b, a uint8) {
 }
 
 func (bm *Bitmap) RGBA() *image.RGBA {
-	i := 0
 	pixel := bm.BitsPerPixel
 	m := image.NewRGBA(image.Rect(0, 0, bm.Width, bm.Height))
-	for y := 0; y < bm.Height; y++ {
-		for x := 0; x < bm.Width; x++ {
-			r, g, b, a := pixelToRGBA(pixel, i, bm.Data)
-			c := color.RGBA{r, g, b, a}
-			i += pixel
-			m.Set(x, y, c)
-		}
+	pix := m.Pix
+	dataIdx := 0
+	for i := 0; i < len(pix); i += 4 {
+		r, g, b, a := pixelToRGBA(pixel, dataIdx, bm.Data)
+		pix[i] = r
+		pix[i+1] = g
+		pix[i+2] = b
+		pix[i+3] = a
+		dataIdx += pixel
 	}
 	return m
 }
