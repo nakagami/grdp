@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"sync"
 	"unsafe"
 )
 
@@ -253,8 +254,27 @@ func decompress1(output *[]uint8, width, height int, input []uint8, size int) bo
 	return true
 }
 
+// decompress2Pool reuses the intermediate []uint16 buffer across calls to
+// decompress2, avoiding a large per-frame allocation.
+var decompress2Pool sync.Pool
+
 /* 2 byte bitmap decompress */
 func decompress2(output *[]uint8, width, height int, input []uint8, size int) bool {
+	needed := width * height
+
+	var out []uint16
+	if v := decompress2Pool.Get(); v != nil {
+		out = v.([]uint16)
+		if cap(out) < needed {
+			out = make([]uint16, needed)
+		} else {
+			out = out[:needed]
+		}
+	} else {
+		out = make([]uint16, needed)
+	}
+	defer func() { decompress2Pool.Put(out[:cap(out)]) }()
+
 	var (
 		prevline, line, count            int
 		offset, code                     int
@@ -268,7 +288,6 @@ func decompress2(output *[]uint8, width, height int, input []uint8, size int) bo
 		fom_mask                         uint8
 	)
 
-	out := make([]uint16, width*height)
 	for len(input) != 0 {
 		fom_mask = 0
 		code = CVAL(&input)

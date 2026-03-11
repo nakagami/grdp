@@ -193,41 +193,32 @@ ONCES:
 }
 
 func (emitter *Emitter) callListeners(listeners []reflect.Value, event interface{}, arguments ...interface{}) {
-	var wg sync.WaitGroup
-
-	wg.Add(len(listeners))
-
 	for _, fn := range listeners {
-		go func(fn reflect.Value) {
-			defer wg.Done()
+		emitter.callOne(fn, event, arguments...)
+	}
+}
 
-			// Recover from potential panics, supplying them to a
-			// RecoveryListener if one has been set, else allowing
-			// the panic to occur.
-			if nil != emitter.recoverer {
-				defer func() {
-					if r := recover(); nil != r {
-						err := fmt.Errorf("%v", r)
-						emitter.recoverer(event, fn.Interface(), err)
-					}
-				}()
+func (emitter *Emitter) callOne(fn reflect.Value, event interface{}, arguments ...interface{}) {
+	if nil != emitter.recoverer {
+		defer func() {
+			if r := recover(); nil != r {
+				err := fmt.Errorf("%v", r)
+				emitter.recoverer(event, fn.Interface(), err)
 			}
-
-			var values []reflect.Value
-
-			for i := 0; i < len(arguments); i++ {
-				if arguments[i] == nil {
-					values = append(values, reflect.New(fn.Type().In(i)).Elem())
-				} else {
-					values = append(values, reflect.ValueOf(arguments[i]))
-				}
-			}
-
-			fn.Call(values)
-		}(fn)
+		}()
 	}
 
-	wg.Wait()
+	var values []reflect.Value
+
+	for i := 0; i < len(arguments); i++ {
+		if arguments[i] == nil {
+			values = append(values, reflect.New(fn.Type().In(i)).Elem())
+		} else {
+			values = append(values, reflect.ValueOf(arguments[i]))
+		}
+	}
+
+	fn.Call(values)
 }
 
 // RecoverWith sets the listener to call when a panic occurs, recovering from
