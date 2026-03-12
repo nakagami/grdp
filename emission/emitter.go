@@ -90,7 +90,7 @@ func (emitter *Emitter) RemoveListener(event, listener interface{}) *Emitter {
 	}
 
 	if events, ok := emitter.events[event]; ok {
-		newEvents := []reflect.Value{}
+		newEvents := make([]reflect.Value, 0, len(events))
 
 		for _, listener := range events {
 			if fn.Pointer() != listener.Pointer() {
@@ -102,7 +102,7 @@ func (emitter *Emitter) RemoveListener(event, listener interface{}) *Emitter {
 	}
 
 	if events, ok := emitter.onces[event]; ok {
-		newEvents := []reflect.Value{}
+		newEvents := make([]reflect.Value, 0, len(events))
 
 		for _, listener := range events {
 			if fn.Pointer() != listener.Pointer() {
@@ -208,7 +208,7 @@ func (emitter *Emitter) callOne(fn reflect.Value, event interface{}, arguments .
 		}()
 	}
 
-	var values []reflect.Value
+	values := make([]reflect.Value, 0, len(arguments))
 
 	for i := 0; i < len(arguments); i++ {
 		if arguments[i] == nil {
