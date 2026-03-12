@@ -863,22 +863,32 @@ func decompress4(output *[]uint8, width, height int, input []uint8, size int) bo
 	return size == total
 }
 
-/* main decompress function */
-func Decompress(input []uint8, width, height int, bpp int) []uint8 {
+// DecompressInto decompresses bitmap data into dst, reusing dst if it has
+// sufficient capacity (size = width*height*bpp). If dst is nil or too small
+// a new slice is allocated. Returns the (re)used output slice.
+func DecompressInto(input []uint8, dst []uint8, width, height int, bpp int) []uint8 {
 	size := width * height * bpp
-	output := make([]uint8, size)
+	if cap(dst) >= size {
+		dst = dst[:size]
+	} else {
+		dst = make([]uint8, size)
+	}
 	switch bpp {
 	case 1:
-		decompress1(&output, width, height, input, size)
+		decompress1(&dst, width, height, input, size)
 	case 2:
-		decompress2(&output, width, height, input, size)
+		decompress2(&dst, width, height, input, size)
 	case 3:
-		decompress3(&output, width, height, input, size)
+		decompress3(&dst, width, height, input, size)
 	case 4:
-		decompress4(&output, width, height, input, size)
+		decompress4(&dst, width, height, input, size)
 	default:
 		fmt.Printf("bpp %d\n", bpp)
 	}
+	return dst
+}
 
-	return output
+/* main decompress function */
+func Decompress(input []uint8, width, height int, bpp int) []uint8 {
+	return DecompressInto(input, nil, width, height, bpp)
 }

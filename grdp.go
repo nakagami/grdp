@@ -5,6 +5,7 @@ import (
 	"image"
 	"log/slog"
 	"net"
+	"sync"
 
 	"github.com/nakagami/grdp/plugin"
 
@@ -25,16 +26,17 @@ var (
 )
 
 type RdpClient struct {
-	hostPort   string // ip:port
-	width      int
-	height     int
-	tpkt       *tpkt.TPKT
-	x224       *x224.X224
-	mcs        *t125.MCSClient
-	sec        *sec.Client
-	pdu        *pdu.Client
-	channels   *plugin.Channels
-	eventReady bool
+	hostPort        string // ip:port
+	width           int
+	height          int
+	tpkt            *tpkt.TPKT
+	x224            *x224.X224
+	mcs             *t125.MCSClient
+	sec             *sec.Client
+	pdu             *pdu.Client
+	channels        *plugin.Channels
+	eventReady      bool
+	decompressPool  sync.Pool // pools []uint8 buffers for bitmap decompression
 }
 
 type Bitmap struct {
@@ -87,6 +89,9 @@ func NewRdpClient(host string, width, height int) *RdpClient {
 		hostPort: host,
 		width:    width,
 		height:   height,
+		decompressPool: sync.Pool{
+			New: func() any { return []uint8(nil) },
+		},
 	}
 }
 
@@ -189,15 +194,24 @@ func (g *RdpClient) OnReady(f func()) *RdpClient {
 	return g
 }
 
+// OnBitmap registers a callback for bitmap update events.
+// For compressed bitmaps, Bitmap.Data is borrowed from an internal pool and
+// is valid only for the duration of the paint call. If you need to retain
+// the raw pixel data beyond paint, copy it or call bm.RGBA() inside paint.
 func (g *RdpClient) OnBitmap(paint func([]Bitmap)) *RdpClient {
 	g.pdu.On("bitmap", func(rectangles []pdu.BitmapData) {
 		bs := make([]Bitmap, 0, len(rectangles))
+		var pooled [][]uint8 // track buffers borrowed from pool
+
 		for _, v := range rectangles {
 			IsCompress := v.IsCompress()
 			data := v.BitmapDataStream
 			if IsCompress {
-				data = core.Decompress(v.BitmapDataStream, int(v.Width), int(v.Height), bpp(v.BitsPerPixel))
+				buf := g.decompressPool.Get().([]uint8)
+				buf = core.DecompressInto(v.BitmapDataStream, buf, int(v.Width), int(v.Height), bpp(v.BitsPerPixel))
+				data = buf
 				IsCompress = false
+				pooled = append(pooled, buf)
 			}
 
 			b := Bitmap{int(v.DestLeft), int(v.DestTop), int(v.DestRight), int(v.DestBottom),
@@ -205,6 +219,10 @@ func (g *RdpClient) OnBitmap(paint func([]Bitmap)) *RdpClient {
 			bs = append(bs, b)
 		}
 		paint(bs)
+
+		for _, buf := range pooled {
+			g.decompressPool.Put(buf[:cap(buf)])
+		}
 	})
 	return g
 }
