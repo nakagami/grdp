@@ -1,7 +1,6 @@
 package core
 
 import (
-	"bytes"
 	"crypto/rand"
 	"encoding/binary"
 	"unicode/utf16"
@@ -52,13 +51,10 @@ func UnicodeEncode(p string) []byte {
 }
 
 func UnicodeDecode(p []byte) string {
-	r := bytes.NewReader(p)
-	n := make([]uint16, 0, 100)
-	for r.Len() > 0 {
-		a, _ := ReadUint16LE(r)
-		n = append(n, a)
+	n := make([]uint16, len(p)/2)
+	for i := range n {
+		n[i] = binary.LittleEndian.Uint16(p[i*2:])
 	}
-	//n := LittleEndianBytesToUTF16(p)
 	return string(utf16.Decode(n))
 }
 
