@@ -224,7 +224,7 @@ func (c *Client) sendConfirmActivePDU() {
 	orderCapa.OrderSupport[TS_NEG_POLYGON_CB_INDEX] = 1
 	orderCapa.OrderSupport[TS_NEG_ELLIPSE_SC_INDEX] = 1
 	orderCapa.OrderSupport[TS_NEG_ELLIPSE_CB_INDEX] = 1*/
-	orderCapa.OrderSupport[TS_NEG_FAST_GLYPH_INDEX] = 1
+	//orderCapa.OrderSupport[TS_NEG_FAST_GLYPH_INDEX] = 1
 
 	inputCapa := c.clientCapabilities[CAPSTYPE_INPUT].(*InputCapability)
 	inputCapa.Flags = INPUT_FLAG_SCANCODES | INPUT_FLAG_MOUSEX | INPUT_FLAG_UNICODE
