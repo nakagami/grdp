@@ -7,6 +7,7 @@ import (
 	"crypto/rc4"
 	"crypto/rsa"
 	"crypto/sha1"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"github.com/lunixbochs/struc"
@@ -21,6 +22,21 @@ import (
 	"github.com/nakagami/grdp/protocol/t125"
 	"github.com/nakagami/grdp/protocol/t125/gcc"
 )
+
+// Pre-computed padding bytes used in MAC generation (avoids per-call allocations).
+var (
+	macPad36 [40]byte
+	macPad5C [48]byte
+)
+
+func init() {
+	for i := range macPad36 {
+		macPad36[i] = 0x36
+	}
+	for i := range macPad5C {
+		macPad5C[i] = 0x5c
+	}
+}
 
 /**
  * SecurityFlag
@@ -307,33 +323,26 @@ func macData(macSaltKey, data []byte) []byte {
 	sha1Digest := sha1.New()
 	md5Digest := md5.New()
 
-	b := &bytes.Buffer{}
-	core.WriteUInt32LE(uint32(len(data)), b)
+	var lenBuf [4]byte
+	binary.LittleEndian.PutUint32(lenBuf[:], uint32(len(data)))
 
 	sha1Digest.Write(macSaltKey)
-	for i := 0; i < 40; i++ {
-		sha1Digest.Write([]byte("\x36"))
-	}
-
-	sha1Digest.Write(b.Bytes())
+	sha1Digest.Write(macPad36[:])
+	sha1Digest.Write(lenBuf[:])
 	sha1Digest.Write(data)
 
 	sha1Sig := sha1Digest.Sum(nil)
 
 	md5Digest.Write(macSaltKey)
-	for i := 0; i < 48; i++ {
-		md5Digest.Write([]byte("\x5c"))
-	}
-
+	md5Digest.Write(macPad5C[:])
 	md5Digest.Write(sha1Sig)
 
 	return md5Digest.Sum(nil)
 }
 func (s *SEC) readEncryptedPayload(data []byte, checkSum bool) []byte {
-	r := bytes.NewReader(data)
-	sign, _ := core.ReadBytes(8, r)
+	sign := data[:8]
 	slog.Debug("readEncryptedPayload", "sign", sign)
-	encryptedPayload, _ := core.ReadBytes(r.Len(), r)
+	encryptedPayload := data[8:]
 	if s.decryptRc4 == nil {
 		s.decryptRc4, _ = rc4.NewCipher(s.currentDecrytKey)
 	}
@@ -350,19 +359,17 @@ func (s *SEC) writeEncryptedPayload(data []byte, checkSum bool) []byte {
 
 	s.nbEncryptedPacket++
 	slog.Debug("writeEncryptedPayload", "nbEncryptedPacket", s.nbEncryptedPacket)
-	b := &bytes.Buffer{}
 
 	sign := macData(s.macKey, data)[:8]
 	if s.encryptRc4 == nil {
 		s.encryptRc4, _ = rc4.NewCipher(s.currentEncryptKey)
 	}
 
-	plaintext := make([]byte, len(data))
-	s.encryptRc4.XORKeyStream(plaintext, data)
-	b.Write(sign)
-	b.Write(plaintext)
-	slog.Debug("writeEncryptedPayload", "sign", hex.EncodeToString(sign), "plaintext", hex.EncodeToString(plaintext))
-	return b.Bytes()
+	result := make([]byte, 8+len(data))
+	copy(result[:8], sign)
+	s.encryptRc4.XORKeyStream(result[8:], data)
+	slog.Debug("writeEncryptedPayload", "sign", hex.EncodeToString(sign), "plaintext", hex.EncodeToString(result[8:]))
+	return result
 }
 
 func (s *SEC) encryt(flag uint16, b []byte) []byte {
@@ -370,12 +377,11 @@ func (s *SEC) encryt(flag uint16, b []byte) []byte {
 	if flag&ENCRYPT != 0 {
 		data = s.writeEncryptedPayload(b, flag&SECURE_CHECKSUM != 0)
 	}
-	buff := &bytes.Buffer{}
-	core.WriteUInt16LE(flag, buff)
-	core.WriteUInt16LE(0, buff)
-	core.WriteBytes(data, buff)
-
-	return buff.Bytes()
+	result := make([]byte, 4+len(data))
+	binary.LittleEndian.PutUint16(result[0:], flag)
+	binary.LittleEndian.PutUint16(result[2:], 0)
+	copy(result[4:], data)
+	return result
 }
 func (s *SEC) encrytData(b []byte) []byte {
 	if !s.enableEncryption {
@@ -394,10 +400,12 @@ func (s *SEC) decrytData(b []byte) []byte {
 		return b
 	}
 
-	r := bytes.NewReader(b)
-	securityFlag, _ := core.ReadUint16LE(r)
-	_, _ = core.ReadUint16LE(r) //securityFlagHi
-	data, _ := core.ReadBytes(r.Len(), r)
+	if len(b) < 4 {
+		return b
+	}
+	securityFlag := binary.LittleEndian.Uint16(b[0:])
+	// securityFlagHi = b[2:4] (ignored)
+	data := b[4:]
 	if securityFlag&ENCRYPT != 0 {
 		data = s.readEncryptedPayload(data, securityFlag&SECURE_CHECKSUM != 0)
 	}
