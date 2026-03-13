@@ -109,6 +109,9 @@ func NewPDULayer(t core.Transport) *PDULayer {
 					RAIL_LEVEL_DOCKED_LANGBAR_SUPPORTED,
 			},
 			CAPSETTYPE_LARGE_POINTER: &LargePointerCapability{1},
+			CAPSETTYPE_COMPDESK: &DesktopCompositionCapability{
+				CompDeskSupportLevel: 1, // COMPDESK_SUPPORTED
+			},
 			CAPSETTYPE_SURFACE_COMMANDS: &SurfaceCommandsCapability{
 				CmdFlags: SURFCMDS_SET_SURFACE_BITS | SURFCMDS_STREAM_SURFACE_BITS | SURFCMDS_FRAME_MARKER,
 			},

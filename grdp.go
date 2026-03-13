@@ -153,7 +153,7 @@ func (g *RdpClient) SetKeyboardType(keyboardType string) {
 func bpp(BitsPerPixel uint16) (pixel int) {
 	switch BitsPerPixel {
 	case 15:
-		pixel = 1
+		pixel = 2
 
 	case 16:
 		pixel = 2
@@ -261,16 +261,27 @@ func (g *RdpClient) OnBitmap(paint func([]Bitmap)) *RdpClient {
 		for _, v := range rectangles {
 			IsCompress := v.IsCompress()
 			data := v.BitmapDataStream
+			Bpp := bpp(v.BitsPerPixel)
 			if IsCompress {
 				buf := g.decompressPool.Get().([]uint8)
-				buf = core.DecompressInto(v.BitmapDataStream, buf, int(v.Width), int(v.Height), bpp(v.BitsPerPixel))
+				buf = core.DecompressInto(v.BitmapDataStream, buf, int(v.Width), int(v.Height), Bpp)
 				data = buf
-				IsCompress = false
 				pooled = append(pooled, buf)
+			} else {
+				// Uncompressed bitmaps are bottom-up; flip to top-down.
+				stride := int(v.Width) * Bpp
+				h := int(v.Height)
+				for y := 0; y < h/2; y++ {
+					top := y * stride
+					bot := (h - 1 - y) * stride
+					for x := 0; x < stride; x++ {
+						data[top+x], data[bot+x] = data[bot+x], data[top+x]
+					}
+				}
 			}
 
 			b := Bitmap{int(v.DestLeft), int(v.DestTop), int(v.DestRight), int(v.DestBottom),
-				int(v.Width), int(v.Height), bpp(v.BitsPerPixel), data}
+				int(v.Width), int(v.Height), Bpp, data}
 			bs = append(bs, b)
 		}
 		paint(bs)
