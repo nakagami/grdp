@@ -109,6 +109,9 @@ func NewPDULayer(t core.Transport) *PDULayer {
 					RAIL_LEVEL_DOCKED_LANGBAR_SUPPORTED,
 			},
 			CAPSETTYPE_LARGE_POINTER: &LargePointerCapability{1},
+			CAPSETTYPE_COMPDESK: &DesktopCompositionCapability{
+				CompDeskSupportLevel: 1, // COMPDESK_SUPPORTED
+			},
 			CAPSETTYPE_SURFACE_COMMANDS: &SurfaceCommandsCapability{
 				CmdFlags: SURFCMDS_SET_SURFACE_BITS | SURFCMDS_STREAM_SURFACE_BITS | SURFCMDS_FRAME_MARKER,
 			},
@@ -198,7 +201,7 @@ func (c *Client) sendConfirmActivePDU() {
 	generalCapa.SuppressOutputSupport = 0
 
 	bitmapCapa := c.clientCapabilities[CAPSTYPE_BITMAP].(*BitmapCapability)
-	bitmapCapa.PreferredBitsPerPixel = c.clientCoreData.HighColorDepth
+	bitmapCapa.PreferredBitsPerPixel = 32
 	bitmapCapa.DesktopWidth = c.clientCoreData.DesktopWidth
 	bitmapCapa.DesktopHeight = c.clientCoreData.DesktopHeight
 	bitmapCapa.DesktopResizeFlag = 0x0001
@@ -221,7 +224,7 @@ func (c *Client) sendConfirmActivePDU() {
 	orderCapa.OrderSupport[TS_NEG_POLYGON_CB_INDEX] = 1
 	orderCapa.OrderSupport[TS_NEG_ELLIPSE_SC_INDEX] = 1
 	orderCapa.OrderSupport[TS_NEG_ELLIPSE_CB_INDEX] = 1*/
-	orderCapa.OrderSupport[TS_NEG_FAST_GLYPH_INDEX] = 1
+	//orderCapa.OrderSupport[TS_NEG_FAST_GLYPH_INDEX] = 1
 
 	inputCapa := c.clientCapabilities[CAPSTYPE_INPUT].(*InputCapability)
 	inputCapa.Flags = INPUT_FLAG_SCANCODES | INPUT_FLAG_MOUSEX | INPUT_FLAG_UNICODE
