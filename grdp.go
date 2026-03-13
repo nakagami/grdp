@@ -5,6 +5,7 @@ import (
 	"image"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
 
 	"github.com/nakagami/grdp/plugin"
@@ -19,16 +20,13 @@ import (
 	"github.com/nakagami/grdp/protocol/x224"
 )
 
-var (
-	KbdLayout       uint32 = gcc.US
-	KeyboardType    uint32 = gcc.KT_IBM_101_102_KEYS
-	KeyboardSubType uint32 = 0
-)
-
 type RdpClient struct {
 	hostPort        string // ip:port
 	width           int
 	height          int
+	kbdLayout       uint32
+	keyboardType    uint32
+	keyboardSubType uint32
 	tpkt            *tpkt.TPKT
 	x224            *x224.X224
 	mcs             *t125.MCSClient
@@ -86,12 +84,69 @@ func (bm *Bitmap) RGBA() *image.RGBA {
 
 func NewRdpClient(host string, width, height int) *RdpClient {
 	return &RdpClient{
-		hostPort: host,
-		width:    width,
-		height:   height,
+		hostPort:        host,
+		width:           width,
+		height:          height,
+		kbdLayout:       uint32(gcc.US),
+		keyboardType:    uint32(gcc.KT_IBM_101_102_KEYS),
+		keyboardSubType: 0,
 		decompressPool: sync.Pool{
 			New: func() any { return []uint8(nil) },
 		},
+	}
+}
+
+var keyboardLayoutMap = map[string]uint32{
+	"ARABIC":              uint32(gcc.ARABIC),
+	"BULGARIAN":           uint32(gcc.BULGARIAN),
+	"CHINESE_US_KEYBOARD": uint32(gcc.CHINESE_US_KEYBOARD),
+	"CZECH":               uint32(gcc.CZECH),
+	"DANISH":              uint32(gcc.DANISH),
+	"GERMAN":              uint32(gcc.GERMAN),
+	"GREEK":               uint32(gcc.GREEK),
+	"US":                  uint32(gcc.US),
+	"SPANISH":             uint32(gcc.SPANISH),
+	"FINNISH":             uint32(gcc.FINNISH),
+	"FRENCH":              uint32(gcc.FRENCH),
+	"HEBREW":              uint32(gcc.HEBREW),
+	"HUNGARIAN":           uint32(gcc.HUNGARIAN),
+	"ICELANDIC":           uint32(gcc.ICELANDIC),
+	"ITALIAN":             uint32(gcc.ITALIAN),
+	"JAPANESE":            uint32(gcc.JAPANESE),
+	"KOREAN":              uint32(gcc.KOREAN),
+	"DUTCH":               uint32(gcc.DUTCH),
+	"NORWEGIAN":           uint32(gcc.NORWEGIAN),
+}
+
+var keyboardTypeMap = map[string]uint32{
+	"IBM_PC_XT_83_KEY": uint32(gcc.KT_IBM_PC_XT_83_KEY),
+	"OLIVETTI":         uint32(gcc.KT_OLIVETTI),
+	"IBM_PC_AT_84_KEY": uint32(gcc.KT_IBM_PC_AT_84_KEY),
+	"IBM_101_102_KEYS": uint32(gcc.KT_IBM_101_102_KEYS),
+	"NOKIA_1050":       uint32(gcc.KT_NOKIA_1050),
+	"NOKIA_9140":       uint32(gcc.KT_NOKIA_9140),
+	"JAPANESE":         uint32(gcc.KT_JAPANESE),
+}
+
+// SetKeyboardLayout sets the keyboard layout by name (e.g. "US", "FRENCH").
+// Must be called before Login.
+func (g *RdpClient) SetKeyboardLayout(layout string) {
+	if v, ok := keyboardLayoutMap[strings.ToUpper(layout)]; ok {
+		g.kbdLayout = v
+	} else {
+		slog.Warn("Unknown keyboard layout, falling back to US", "layout", layout)
+		g.kbdLayout = uint32(gcc.US)
+	}
+}
+
+// SetKeyboardType sets the keyboard type by name (e.g. "IBM_101_102_KEYS").
+// Must be called before Login.
+func (g *RdpClient) SetKeyboardType(keyboardType string) {
+	if v, ok := keyboardTypeMap[strings.ToUpper(keyboardType)]; ok {
+		g.keyboardType = v
+	} else {
+		slog.Warn("Unknown keyboard type, falling back to IBM_101_102_KEYS", "keyboardType", keyboardType)
+		g.keyboardType = uint32(gcc.KT_IBM_101_102_KEYS)
 	}
 }
 
@@ -124,7 +179,7 @@ func (g *RdpClient) Login(domain string, user string, password string) error {
 
 	g.tpkt = tpkt.New(core.NewSocketLayer(conn), nla.NewNTLMv2(domain, user, password))
 	g.x224 = x224.New(g.tpkt)
-	g.mcs = t125.NewMCSClient(g.x224, KbdLayout, KeyboardType, KeyboardSubType)
+	g.mcs = t125.NewMCSClient(g.x224, g.kbdLayout, g.keyboardType, g.keyboardSubType)
 	g.sec = sec.NewClient(g.mcs)
 	g.pdu = pdu.NewClient(g.sec)
 	g.channels = plugin.NewChannels(g.sec)

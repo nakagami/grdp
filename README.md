@@ -22,6 +22,55 @@ export GRDP_HOST=host
 export GRDP_WINDOW_SIZE=1280x800
 ```
 
+### Environment Variables
+
+| Variable              | Description                              | Default            |
+|-----------------------|------------------------------------------|--------------------|
+| `GRDP_HOST`           | Hostname or IP address of the RDP server | (required)         |
+| `GRDP_PORT`           | Port number                              | (required)         |
+| `GRDP_USER`           | Username                                 | (empty)            |
+| `GRDP_PASSWORD`       | Password                                 | (empty)            |
+| `GRDP_DOMAIN`         | Domain                                   | (empty)            |
+| `GRDP_WINDOW_SIZE`    | Window size in `WxH` format              | `1280x800`         |
+| `GRDP_KEYBOARD_TYPE`  | Keyboard type (see values below)         | `IBM_101_102_KEYS` |
+| `GRDP_KEYBOARD_LAYOUT`| Keyboard layout (see values below)       | `US`               |
+
+#### `GRDP_KEYBOARD_TYPE` values
+
+| Value              | Description                            |
+|--------------------|----------------------------------------|
+| `IBM_PC_XT_83_KEY` | IBM PC/XT 83-key keyboard              |
+| `OLIVETTI`         | Olivetti keyboard                      |
+| `IBM_PC_AT_84_KEY` | IBM PC/AT 84-key keyboard              |
+| `IBM_101_102_KEYS` | IBM 101/102-key keyboard (most common) |
+| `NOKIA_1050`       | Nokia 1050 keyboard                    |
+| `NOKIA_9140`       | Nokia 9140 keyboard                    |
+| `JAPANESE`         | Japanese keyboard                      |
+
+#### `GRDP_KEYBOARD_LAYOUT` values
+
+| Value                 | Language / Region       |
+|-----------------------|-------------------------|
+| `ARABIC`              | Arabic                  |
+| `BULGARIAN`           | Bulgarian               |
+| `CHINESE_US_KEYBOARD` | Chinese (US keyboard)   |
+| `CZECH`               | Czech                   |
+| `DANISH`              | Danish                  |
+| `GERMAN`              | German                  |
+| `GREEK`               | Greek                   |
+| `US`                  | English (United States) |
+| `SPANISH`             | Spanish                 |
+| `FINNISH`             | Finnish                 |
+| `FRENCH`              | French                  |
+| `HEBREW`              | Hebrew                  |
+| `HUNGARIAN`           | Hungarian               |
+| `ICELANDIC`           | Icelandic               |
+| `ITALIAN`             | Italian                 |
+| `JAPANESE`            | Japanese                |
+| `KOREAN`              | Korean                  |
+| `DUTCH`               | Dutch                   |
+| `NORWEGIAN`           | Norwegian               |
+
 Clone and execute example
 ```
 git clone https://github.com/nakagami/grdp

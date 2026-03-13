@@ -26,9 +26,15 @@ var (
 	lastMouseX, lastMouseY int
 )
 
-func uiRdp(hostPort, domain, user, password string, width, height int) (error, *grdp.RdpClient) {
+func uiRdp(hostPort, domain, user, password string, width, height int, keyboardType, keyboardLayout string) (error, *grdp.RdpClient) {
 	bitmapCH = make(chan []grdp.Bitmap, 500)
 	g := grdp.NewRdpClient(hostPort, width, height)
+	if keyboardType != "" {
+		g.SetKeyboardType(keyboardType)
+	}
+	if keyboardLayout != "" {
+		g.SetKeyboardLayout(keyboardLayout)
+	}
 	err := g.Login(domain, user, password)
 	if err != nil {
 		slog.Error("Login", "err", err)
@@ -67,8 +73,10 @@ func appMain(driver gxui.Driver) {
 	if err != nil {
 		width, height = 1280, 800
 	}
+	keyboardType := os.Getenv("GRDP_KEYBOARD_TYPE")
+	keyboardLayout := os.Getenv("GRDP_KEYBOARD_LAYOUT")
 
-	err, rdpClient := uiRdp(hostPort, domain, user, password, width, height)
+	err, rdpClient := uiRdp(hostPort, domain, user, password, width, height, keyboardType, keyboardLayout)
 	if err != nil {
 		fmt.Println(err.Error())
 		return
