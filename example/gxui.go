@@ -165,7 +165,10 @@ func update() {
 func paint_bitmap(bs []grdp.Bitmap) {
 	for _, bm := range bs {
 		m := bm.RGBA()
-		draw.Draw(screenImage, screenImage.Bounds().Add(image.Pt(bm.DestLeft, bm.DestTop)), m, m.Bounds().Min, draw.Src)
+		// Clip to the visible destination rectangle; bitmap Width may be
+		// padded wider than the actual visible area (DestRight-DestLeft+1).
+		destRect := image.Rect(bm.DestLeft, bm.DestTop, bm.DestRight+1, bm.DestBottom+1)
+		draw.Draw(screenImage, destRect, m, image.Pt(0, 0), draw.Src)
 	}
 
 	driverc.Call(func() {

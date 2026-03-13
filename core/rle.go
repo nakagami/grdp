@@ -843,13 +843,24 @@ func decompress4(output *[]uint8, width, height int, input []uint8, size int) bo
 	)
 
 	code = CVAL(&input)
-	if code != 0x10 {
+	rle := code&0x10 != 0
+	noAlpha := code&0x20 != 0
+
+	if !rle {
 		return false
 	}
 
 	total = 1
-	onceBytes = processPlane(&input, width, height, output, 3)
-	total += onceBytes
+
+	if noAlpha {
+		// No alpha plane in the stream; fill alpha channel with 0xFF.
+		for i := 3; i < len(*output); i += 4 {
+			(*output)[i] = 0xFF
+		}
+	} else {
+		onceBytes = processPlane(&input, width, height, output, 3)
+		total += onceBytes
+	}
 
 	onceBytes = processPlane(&input, width, height, output, 2)
 	total += onceBytes
@@ -860,7 +871,7 @@ func decompress4(output *[]uint8, width, height int, input []uint8, size int) bo
 	onceBytes = processPlane(&input, width, height, output, 0)
 	total += onceBytes
 
-	return size == total
+	return true
 }
 
 // DecompressInto decompresses bitmap data into dst, reusing dst if it has
