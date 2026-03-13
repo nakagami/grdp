@@ -198,7 +198,7 @@ func (c *Client) sendConfirmActivePDU() {
 	generalCapa.SuppressOutputSupport = 0
 
 	bitmapCapa := c.clientCapabilities[CAPSTYPE_BITMAP].(*BitmapCapability)
-	bitmapCapa.PreferredBitsPerPixel = c.clientCoreData.HighColorDepth
+	bitmapCapa.PreferredBitsPerPixel = 32
 	bitmapCapa.DesktopWidth = c.clientCoreData.DesktopWidth
 	bitmapCapa.DesktopHeight = c.clientCoreData.DesktopHeight
 	bitmapCapa.DesktopResizeFlag = 0x0001
