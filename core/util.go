@@ -32,15 +32,9 @@ func UTF16ToLittleEndianBytes(u []uint16) []byte {
 }
 
 func LittleEndianBytesToUTF16(u []byte) []uint16 {
-	b := make([]uint16, 0, len(u)/2)
-	n := make([]byte, 2)
-	for i, v := range u {
-		if i%2 == 0 {
-			n[0] = v
-		} else {
-			n[1] = v
-			b = append(b, binary.LittleEndian.Uint16(n))
-		}
+	b := make([]uint16, len(u)/2)
+	for i := range b {
+		b[i] = binary.LittleEndian.Uint16(u[i*2:])
 	}
 	return b
 }

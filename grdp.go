@@ -35,6 +35,7 @@ type RdpClient struct {
 	channels        *plugin.Channels
 	eventReady      bool
 	decompressPool  sync.Pool // pools []uint8 buffers for bitmap decompression
+	flipLinePool    sync.Pool // pools line-sized []uint8 buffers for bitmap vertical flip
 }
 
 type Bitmap struct {
@@ -91,6 +92,9 @@ func NewRdpClient(host string, width, height int) *RdpClient {
 		keyboardType:    uint32(gcc.KT_IBM_101_102_KEYS),
 		keyboardSubType: 0,
 		decompressPool: sync.Pool{
+			New: func() any { return []uint8(nil) },
+		},
+		flipLinePool: sync.Pool{
 			New: func() any { return []uint8(nil) },
 		},
 	}
@@ -271,13 +275,20 @@ func (g *RdpClient) OnBitmap(paint func([]Bitmap)) *RdpClient {
 				// Uncompressed bitmaps are bottom-up; flip to top-down.
 				stride := int(v.Width) * Bpp
 				h := int(v.Height)
+				tmp := g.flipLinePool.Get().([]byte)
+				if cap(tmp) < stride {
+					tmp = make([]byte, stride)
+				} else {
+					tmp = tmp[:stride]
+				}
 				for y := 0; y < h/2; y++ {
 					top := y * stride
 					bot := (h - 1 - y) * stride
-					for x := 0; x < stride; x++ {
-						data[top+x], data[bot+x] = data[bot+x], data[top+x]
-					}
+					copy(tmp, data[top:top+stride])
+					copy(data[top:top+stride], data[bot:bot+stride])
+					copy(data[bot:bot+stride], tmp)
 				}
+				g.flipLinePool.Put(tmp[:cap(tmp)])
 			}
 
 			b := Bitmap{int(v.DestLeft), int(v.DestTop), int(v.DestRight), int(v.DestBottom),

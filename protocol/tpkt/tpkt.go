@@ -5,11 +5,16 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"sync"
 
 	"github.com/nakagami/grdp/core"
 	"github.com/nakagami/grdp/emission"
 	"github.com/nakagami/grdp/protocol/nla"
 )
+
+var writePool = sync.Pool{
+	New: func() interface{} { return make([]byte, 0, 4096) },
+}
 
 // take idea from https://github.com/Madnikulin50/gordp
 
@@ -140,12 +145,13 @@ func (t *TPKT) Read(b []byte) (n int, err error) {
 }
 
 func (t *TPKT) Write(data []byte) (n int, err error) {
-	buff := &bytes.Buffer{}
-	core.WriteUInt8(FASTPATH_ACTION_X224, buff)
-	core.WriteUInt8(0, buff)
-	core.WriteUInt16BE(uint16(len(data)+4), buff)
-	buff.Write(data)
-	return t.Conn.Write(buff.Bytes())
+	buf := writePool.Get().([]byte)
+	size := uint16(len(data) + 4)
+	buf = append(buf[:0], FASTPATH_ACTION_X224, 0, byte(size>>8), byte(size))
+	buf = append(buf, data...)
+	n, err = t.Conn.Write(buf)
+	writePool.Put(buf[:0])
+	return
 }
 
 func (t *TPKT) Close() error {
@@ -157,12 +163,14 @@ func (t *TPKT) SetFastPathListener(f core.FastPathListener) {
 }
 
 func (t *TPKT) SendFastPath(secFlag byte, data []byte) (n int, err error) {
-	buff := &bytes.Buffer{}
-	core.WriteUInt8(FASTPATH_ACTION_FASTPATH|((secFlag&0x3)<<6), buff)
-	core.WriteUInt16BE(uint16(len(data)+3)|0x8000, buff)
-	buff.Write(data)
-	slog.Debug("TPTK SendFastPath", "buff", hex.EncodeToString(buff.Bytes()))
-	return t.Conn.Write(buff.Bytes())
+	buf := writePool.Get().([]byte)
+	hdr := uint16(len(data)+3) | 0x8000
+	buf = append(buf[:0], FASTPATH_ACTION_FASTPATH|((secFlag&0x3)<<6), byte(hdr>>8), byte(hdr))
+	buf = append(buf, data...)
+	slog.Debug("TPTK SendFastPath", "buff", hex.EncodeToString(buf))
+	n, err = t.Conn.Write(buf)
+	writePool.Put(buf[:0])
+	return
 }
 
 func (t *TPKT) recvHeader(s []byte, err error) {
