@@ -7,6 +7,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/nakagami/grdp/plugin"
 
@@ -198,7 +199,7 @@ func (g *RdpClient) Login(domain string, user string, password string) error {
 	g.user = user
 	g.password = password
 
-	conn, err := net.Dial("tcp", g.hostPort)
+	conn, err := net.DialTimeout("tcp", g.hostPort, 30*time.Second)
 	if err != nil {
 		return fmt.Errorf("[dial err] %v", err)
 	}

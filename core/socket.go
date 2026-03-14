@@ -2,12 +2,12 @@ package core
 
 import (
 	"crypto/rsa"
-	"encoding/asn1"
-	"math/big"
-
 	"crypto/tls"
+	"encoding/asn1"
 	"errors"
+	"math/big"
 	"net"
+	"time"
 )
 
 type SocketLayer struct {
@@ -21,6 +21,10 @@ func NewSocketLayer(conn net.Conn) *SocketLayer {
 		tlsConn: nil,
 	}
 	return l
+}
+
+func (s *SocketLayer) SetDeadline(t time.Time) error {
+	return s.conn.SetDeadline(t)
 }
 
 func (s *SocketLayer) Read(b []byte) (n int, err error) {
