@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 
 	"github.com/nakagami/grdp/core"
 	"github.com/nakagami/grdp/emission"
@@ -40,6 +41,7 @@ type TPKT struct {
 	lastShortLength  int
 	fastPathListener core.FastPathListener
 	ntlmSec          *nla.NTLMv2Security
+	readPaused       atomic.Bool
 }
 
 func New(s *core.SocketLayer, ntlm *nla.NTLMv2) *TPKT {
@@ -54,6 +56,20 @@ func New(s *core.SocketLayer, ntlm *nla.NTLMv2) *TPKT {
 
 func (t *TPKT) StartTLS() error {
 	return t.Conn.StartTLS()
+}
+
+// PauseRead signals the TPKT read loop to stop restarting after the current
+// read completes. Call this before performing a synchronous handshake
+// (StartTLS, StartNLA) to prevent the background read loop from competing
+// with the handshake for bytes on the same socket.
+func (t *TPKT) PauseRead() {
+	t.readPaused.Store(true)
+}
+
+// ResumeRead restarts the TPKT background read loop after it was paused by
+// PauseRead. Call this once the synchronous handshake has finished.
+func (t *TPKT) ResumeRead() {
+	core.StartReadBytes(2, t.Conn, t.recvHeader)
 }
 
 func (t *TPKT) StartNLA() error {
@@ -207,8 +223,16 @@ func (t *TPKT) recvData(s []byte, err error) {
 	if err != nil {
 		return
 	}
+	// Reset the paused flag before emitting so that a handler can set it via
+	// PauseRead() to prevent us from restarting the read loop below.
+	t.readPaused.Store(false)
 	t.Emit("data", s)
-	core.StartReadBytes(2, t.Conn, t.recvHeader)
+	// If a handler called PauseRead() (e.g. to perform a synchronous
+	// StartNLA/StartTLS handshake), it is responsible for restarting the read
+	// loop via ResumeRead() once the handshake completes.
+	if !t.readPaused.Load() {
+		core.StartReadBytes(2, t.Conn, t.recvHeader)
+	}
 }
 
 func (t *TPKT) recvExtendedFastPathHeader(s []byte, err error) {
@@ -229,6 +253,11 @@ func (t *TPKT) recvFastPath(s []byte, err error) {
 		return
 	}
 
+	// Reset the paused flag so that a PauseRead() from a previous phase does
+	// not prevent the fast-path read loop from continuing.
+	t.readPaused.Store(false)
 	t.fastPathListener.RecvFastPath(t.secFlag, s)
-	core.StartReadBytes(2, t.Conn, t.recvHeader)
+	if !t.readPaused.Load() {
+		core.StartReadBytes(2, t.Conn, t.recvHeader)
+	}
 }
