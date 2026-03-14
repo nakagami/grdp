@@ -36,6 +36,7 @@ type RdpClient struct {
 	eventReady      bool
 	decompressPool  sync.Pool // pools []uint8 buffers for bitmap decompression
 	flipLinePool    sync.Pool // pools line-sized []uint8 buffers for bitmap vertical flip
+	reconnectMu     sync.Mutex
 
 	// credentials stored for reconnection
 	domain   string
@@ -434,6 +435,9 @@ func (g *RdpClient) MouseDown(button int, x, y int) {
 // automatically re-registered on the new session.
 // This is intended to be called when the GUI window is resized.
 func (g *RdpClient) Reconnect(width, height int) error {
+	g.reconnectMu.Lock()
+	defer g.reconnectMu.Unlock()
+
 	slog.Info("Reconnect", "width", width, "height", height)
 	g.Close()
 	g.width = width
