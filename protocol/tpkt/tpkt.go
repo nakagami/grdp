@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/nakagami/grdp/core"
 	"github.com/nakagami/grdp/emission"
@@ -57,11 +58,18 @@ func (t *TPKT) StartTLS() error {
 }
 
 func (t *TPKT) StartNLA() error {
+	// Set a deadline for the entire NLA handshake (TLS + NTLM auth)
+	// to prevent hanging indefinitely when the server is slow to respond.
+	t.Conn.SetDeadline(time.Now().Add(30 * time.Second))
+	defer t.Conn.SetDeadline(time.Time{}) // clear deadline after NLA completes
+
+	slog.Debug("StartNLA: TLS handshake begin")
 	err := t.StartTLS()
 	if err != nil {
 		slog.Error("StartNLA", "start tls failed", err)
 		return err
 	}
+	slog.Debug("StartNLA: TLS handshake complete")
 	req := nla.EncodeDERTRequest([]nla.Message{t.ntlm.GetNegotiateMessage()}, nil, nil)
 	slog.Debug("StartNLA send", "req", hex.EncodeToString(req), "len", len(req))
 	_, err = t.Conn.Write(req)
