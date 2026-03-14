@@ -145,6 +145,9 @@ func appMain(driver gxui.Driver) {
 	layoutImg.SetVisible(true)
 	window.AddChild(layoutImg)
 	window.OnClose(func() {
+		if resizeTimer != nil {
+			resizeTimer.Stop()
+		}
 		if rdpClient != nil {
 			rdpClient.Close()
 		}
