@@ -450,6 +450,11 @@ func (g *RdpClient) Reconnect(width, height int) error {
 	g.height = height
 	g.eventReady = false
 
+	// Wait for the server to finish tearing down the old session;
+	// without this pause the TLS handshake may hang because the
+	// server is still cleaning up the previous connection.
+	time.Sleep(500 * time.Millisecond)
+
 	err := g.Login(g.domain, g.user, g.password)
 	if err != nil {
 		return fmt.Errorf("[reconnect err] %v", err)

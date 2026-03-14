@@ -55,8 +55,12 @@ func (s *SocketLayer) StartTLS() error {
 		MaxVersion:         tls.VersionTLS12,
 		//		MaxVersion:               tls.VersionTLS13,
 	}
-	s.tlsConn = tls.Client(s.conn, config)
-	return s.tlsConn.Handshake()
+	tlsConn := tls.Client(s.conn, config)
+	if err := tlsConn.Handshake(); err != nil {
+		return err
+	}
+	s.tlsConn = tlsConn
+	return nil
 }
 
 type PublicKey struct {
