@@ -36,6 +36,21 @@ type RdpClient struct {
 	eventReady      bool
 	decompressPool  sync.Pool // pools []uint8 buffers for bitmap decompression
 	flipLinePool    sync.Pool // pools line-sized []uint8 buffers for bitmap vertical flip
+
+	// credentials stored for reconnection
+	domain   string
+	user     string
+	password string
+
+	// stored callbacks for re-registration on reconnect
+	onErrorFn         func(e error)
+	onCloseFn         func()
+	onSuccesFn        func()
+	onReadyFn         func()
+	onBitmapPaintFn   func([]Bitmap)
+	onPointerHideFn   func()
+	onPointerCachedFn func(uint16)
+	onPointerUpdateFn func(uint16, uint16, uint16, uint16, uint16, uint16, []byte, []byte)
 }
 
 type Bitmap struct {
@@ -176,6 +191,11 @@ func bpp(BitsPerPixel uint16) (pixel int) {
 
 func (g *RdpClient) Login(domain string, user string, password string) error {
 	slog.Info("Login", "Host", g.hostPort, "domain", domain, "user", user)
+
+	g.domain = domain
+	g.user = user
+	g.password = password
+
 	conn, err := net.Dial("tcp", g.hostPort)
 	if err != nil {
 		return fmt.Errorf("[dial err] %v", err)
@@ -218,7 +238,7 @@ func (g *RdpClient) Login(domain string, user string, password string) error {
 		return fmt.Errorf("[x224 connect err] %v", err)
 	}
 
-	g.OnReady(func() {
+	g.pdu.On("ready", func() {
 		g.eventReady = true
 	})
 
@@ -234,21 +254,25 @@ func (g *RdpClient) Height() int {
 }
 
 func (g *RdpClient) OnError(f func(e error)) *RdpClient {
+	g.onErrorFn = f
 	g.pdu.On("error", f)
 	return g
 }
 
 func (g *RdpClient) OnClose(f func()) *RdpClient {
+	g.onCloseFn = f
 	g.pdu.On("close", f)
 	return g
 }
 
 func (g *RdpClient) OnSucces(f func()) *RdpClient {
+	g.onSuccesFn = f
 	g.pdu.On("succes", f)
 	return g
 }
 
 func (g *RdpClient) OnReady(f func()) *RdpClient {
+	g.onReadyFn = f
 	g.pdu.On("ready", f)
 	return g
 }
@@ -258,6 +282,7 @@ func (g *RdpClient) OnReady(f func()) *RdpClient {
 // is valid only for the duration of the paint call. If you need to retain
 // the raw pixel data beyond paint, copy it or call bm.RGBA() inside paint.
 func (g *RdpClient) OnBitmap(paint func([]Bitmap)) *RdpClient {
+	g.onBitmapPaintFn = paint
 	g.pdu.On("bitmap", func(rectangles []pdu.BitmapData) {
 		bs := make([]Bitmap, 0, len(rectangles))
 		var pooled [][]uint8 // track buffers borrowed from pool
@@ -305,16 +330,19 @@ func (g *RdpClient) OnBitmap(paint func([]Bitmap)) *RdpClient {
 }
 
 func (g *RdpClient) OnPointerHide(f func()) *RdpClient {
+	g.onPointerHideFn = f
 	g.pdu.On("pointer_hide", f)
 	return g
 }
 
 func (g *RdpClient) OnPointerCached(f func(uint16)) *RdpClient {
+	g.onPointerCachedFn = f
 	g.pdu.On("pointer_cached", f)
 	return g
 }
 
 func (g *RdpClient) OnPointerUpdate(f func(uint16, uint16, uint16, uint16, uint16, uint16, []byte, []byte)) *RdpClient {
+	g.onPointerUpdateFn = f
 	g.pdu.On("pointer_update", func(p *pdu.FastPathUpdatePointerPDU) {
 		f(p.CacheIdx, p.XorBpp, p.X, p.Y, p.Width, p.Height, p.Mask, p.Data)
 	})
@@ -399,6 +427,53 @@ func (g *RdpClient) MouseDown(button int, x, y int) {
 	p.XPos = uint16(x)
 	p.YPos = uint16(y)
 	g.pdu.SendInputEvents(pdu.INPUT_EVENT_MOUSE, []pdu.InputEventsInterface{p})
+}
+
+// Reconnect closes the current RDP session and re-establishes a new connection
+// with the specified screen dimensions. All previously registered callbacks are
+// automatically re-registered on the new session.
+// This is intended to be called when the GUI window is resized.
+func (g *RdpClient) Reconnect(width, height int) error {
+	slog.Info("Reconnect", "width", width, "height", height)
+	g.Close()
+	g.width = width
+	g.height = height
+	g.eventReady = false
+
+	err := g.Login(g.domain, g.user, g.password)
+	if err != nil {
+		return fmt.Errorf("[reconnect err] %v", err)
+	}
+
+	g.reregisterCallbacks()
+	return nil
+}
+
+func (g *RdpClient) reregisterCallbacks() {
+	if g.onErrorFn != nil {
+		g.OnError(g.onErrorFn)
+	}
+	if g.onCloseFn != nil {
+		g.OnClose(g.onCloseFn)
+	}
+	if g.onSuccesFn != nil {
+		g.OnSucces(g.onSuccesFn)
+	}
+	if g.onReadyFn != nil {
+		g.OnReady(g.onReadyFn)
+	}
+	if g.onBitmapPaintFn != nil {
+		g.OnBitmap(g.onBitmapPaintFn)
+	}
+	if g.onPointerHideFn != nil {
+		g.OnPointerHide(g.onPointerHideFn)
+	}
+	if g.onPointerCachedFn != nil {
+		g.OnPointerCached(g.onPointerCachedFn)
+	}
+	if g.onPointerUpdateFn != nil {
+		g.OnPointerUpdate(g.onPointerUpdateFn)
+	}
 }
 
 func (g *RdpClient) Close() {

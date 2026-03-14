@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/google/gxui"
 	"github.com/google/gxui/drivers/gl"
@@ -21,9 +23,11 @@ var (
 	rdpClient              *grdp.RdpClient
 	driverc                gxui.Driver
 	screenImage            *image.RGBA
+	screenMu               sync.Mutex
 	img                    gxui.Image
 	bitmapCH               chan []grdp.Bitmap
 	lastMouseX, lastMouseY int
+	resizeTimer            *time.Timer
 )
 
 func uiRdp(hostPort, domain, user, password string, width, height int, keyboardType, keyboardLayout string) (error, *grdp.RdpClient) {
@@ -147,6 +151,28 @@ func appMain(driver gxui.Driver) {
 
 		driver.Terminate()
 	})
+	window.OnResize(func() {
+		sz := layoutImg.Size()
+		w, h := sz.W, sz.H
+		if w <= 0 || h <= 0 {
+			return
+		}
+		if w == rdpClient.Width() && h == rdpClient.Height() {
+			return
+		}
+		if resizeTimer != nil {
+			resizeTimer.Stop()
+		}
+		resizeTimer = time.AfterFunc(500*time.Millisecond, func() {
+			slog.Info("Window resized, reconnecting", "width", w, "height", h)
+			screenMu.Lock()
+			screenImage = image.NewRGBA(image.Rect(0, 0, w, h))
+			screenMu.Unlock()
+			if err := rdpClient.Reconnect(w, h); err != nil {
+				slog.Error("Reconnect failed", "err", err)
+			}
+		})
+	})
 	update()
 }
 
@@ -163,6 +189,7 @@ func update() {
 }
 
 func paint_bitmap(bs []grdp.Bitmap) {
+	screenMu.Lock()
 	for _, bm := range bs {
 		m := bm.RGBA()
 		// Clip to the visible destination rectangle; bitmap Width may be
@@ -170,6 +197,7 @@ func paint_bitmap(bs []grdp.Bitmap) {
 		destRect := image.Rect(bm.DestLeft, bm.DestTop, bm.DestRight+1, bm.DestBottom+1)
 		draw.Draw(screenImage, destRect, m, image.Pt(0, 0), draw.Src)
 	}
+	screenMu.Unlock()
 
 	driverc.Call(func() {
 		texture := driverc.CreateTexture(screenImage, 1)
