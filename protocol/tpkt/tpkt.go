@@ -69,6 +69,7 @@ func (t *TPKT) PauseRead() {
 // ResumeRead restarts the TPKT background read loop after it was paused by
 // PauseRead. Call this once the synchronous handshake has finished.
 func (t *TPKT) ResumeRead() {
+	t.readPaused.Store(false)
 	core.StartReadBytes(2, t.Conn, t.recvHeader)
 }
 
