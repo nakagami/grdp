@@ -39,10 +39,7 @@ func (s *SocketLayer) Write(b []byte) (n int, err error) {
 
 func (s *SocketLayer) Close() error {
 	if s.tlsConn != nil {
-		err := s.tlsConn.Close()
-		if err != nil {
-			return err
-		}
+		s.tlsConn.Close() // best-effort; always close the underlying TCP socket
 	}
 	return s.conn.Close()
 }

@@ -247,16 +247,19 @@ func (x *X224) recvConnectionConfirm(s []byte) {
 		message := &ServerConnectionConfirm{}
 		if err := struc.Unpack(bytes.NewReader(s), message); err != nil {
 			slog.Error("ReadServerConnectionConfirm", "err", err)
+			x.Emit("error", err)
 			return
 		}
 		slog.Debug("recvConnectionConfirm", "message", *message.ProtocolNeg)
 		if message.ProtocolNeg.Type == TYPE_RDP_NEG_FAILURE {
-			slog.Error(fmt.Sprintf("NODE_RDP_PROTOCOL_X224_NEG_FAILURE with code: %d,see https://msdn.microsoft.com/en-us/library/cc240507.aspx",
-				message.ProtocolNeg.Result))
+			negErr := fmt.Errorf("NODE_RDP_PROTOCOL_X224_NEG_FAILURE with code: %d, see https://msdn.microsoft.com/en-us/library/cc240507.aspx",
+				message.ProtocolNeg.Result)
+			slog.Error(negErr.Error())
 			//only use Standard RDP Security mechanisms
 			if message.ProtocolNeg.Result == 2 {
 				slog.Info("Only use Standard RDP Security mechanisms, Reconnect with Standard RDP")
 			}
+			x.Emit("error", negErr)
 			x.Close()
 			return
 		}
@@ -270,7 +273,9 @@ func (x *X224) recvConnectionConfirm(s []byte) {
 	}
 
 	if x.selectedProtocol == PROTOCOL_HYBRID_EX {
-		slog.Error("NODE_RDP_PROTOCOL_HYBRID_EX_NOT_SUPPORTED")
+		err := errors.New("NODE_RDP_PROTOCOL_HYBRID_EX_NOT_SUPPORTED")
+		slog.Error(err.Error())
+		x.Emit("error", err)
 		return
 	}
 
@@ -287,6 +292,7 @@ func (x *X224) recvConnectionConfirm(s []byte) {
 		err := x.transport.(*tpkt.TPKT).StartTLS()
 		if err != nil {
 			slog.Error("start tls failed:", "err", err)
+			x.Emit("error", err)
 			return
 		}
 		x.Emit("connect", x.selectedProtocol)
@@ -298,6 +304,7 @@ func (x *X224) recvConnectionConfirm(s []byte) {
 		err := x.transport.(*tpkt.TPKT).StartNLA()
 		if err != nil {
 			slog.Error("start NLA failed:", "err", err)
+			x.Emit("error", err)
 			return
 		}
 		x.Emit("connect", x.selectedProtocol)
