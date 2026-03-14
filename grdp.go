@@ -36,7 +36,8 @@ type RdpClient struct {
 	eventReady      bool
 	decompressPool  sync.Pool // pools []uint8 buffers for bitmap decompression
 	flipLinePool    sync.Pool // pools line-sized []uint8 buffers for bitmap vertical flip
-	reconnectMu     sync.Mutex
+	reconnectMu sync.Mutex
+	closed      bool
 
 	// credentials stored for reconnection
 	domain   string
@@ -438,8 +439,12 @@ func (g *RdpClient) Reconnect(width, height int) error {
 	g.reconnectMu.Lock()
 	defer g.reconnectMu.Unlock()
 
+	if g.closed {
+		return fmt.Errorf("client is closed")
+	}
+
 	slog.Info("Reconnect", "width", width, "height", height)
-	g.Close()
+	g.closeLocked()
 	g.width = width
 	g.height = height
 	g.eventReady = false
@@ -480,9 +485,17 @@ func (g *RdpClient) reregisterCallbacks() {
 	}
 }
 
-func (g *RdpClient) Close() {
-	slog.Debug("Close()")
-	if g != nil && g.tpkt != nil {
+// closeLocked closes the underlying transport. Caller must hold reconnectMu.
+func (g *RdpClient) closeLocked() {
+	if g.tpkt != nil {
 		g.tpkt.Close()
 	}
+}
+
+func (g *RdpClient) Close() {
+	g.reconnectMu.Lock()
+	defer g.reconnectMu.Unlock()
+	slog.Debug("Close()")
+	g.closed = true
+	g.closeLocked()
 }
