@@ -226,7 +226,7 @@ func (g *RdpClient) Login(domain string, user string, password string) error {
 	//dvc
 	dvcClient := drdynvc.NewDvcClient()
 	g.channels.Register(dvcClient)
-	//g.mcs.SetClientDynvcProtocol() // DIAGNOSTIC: disabled GFX EarlyCapabilityFlag to test traditional bitmap
+	g.mcs.AddDynvcChannel()
 
 	// RDPGFX (Graphics Pipeline) handler
 	gfxHandler := rdpgfx.NewGfxHandler(func(updates []rdpgfx.BitmapUpdate) {

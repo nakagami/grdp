@@ -46,6 +46,7 @@ const (
 	PDUTYPE2_ARC_STATUS_PDU              = 0x32
 	PDUTYPE2_STATUS_INFO_PDU             = 0x36
 	PDUTYPE2_MONITOR_LAYOUT_PDU          = 0x37
+	PDUTYPE2_FRAME_ACKNOWLEDGE           = 0x38
 )
 
 func (p PduType2) String() string {
@@ -653,6 +654,18 @@ func (d *SuppressOutputPDU) Unpack(r io.Reader) error {
 	return struc.Unpack(r, d)
 }
 
+// FrameAcknowledgeDataPDU acknowledges receipt of a frame (MS-RDPBCGR 2.2.11.3.2).
+type FrameAcknowledgeDataPDU struct {
+	FrameID uint32 `struc:"little"`
+}
+
+func (*FrameAcknowledgeDataPDU) Type2() uint8 {
+	return PDUTYPE2_FRAME_ACKNOWLEDGE
+}
+func (d *FrameAcknowledgeDataPDU) Unpack(r io.Reader) error {
+	return struc.Unpack(r, d)
+}
+
 // RefreshRectPDU requests the server to redraw one or more screen regions.
 // MS-RDPBCGR 2.2.11.2
 type RefreshRectPDU struct {
@@ -907,11 +920,17 @@ func (f *FastPathSurfaceCmds) Unpack(r io.Reader) error {
 	return nil
 }
 
+// SurfaceCommandsResult holds parsed bitmap data and frame IDs to acknowledge.
+type SurfaceCommandsResult struct {
+	Rects    []BitmapData
+	FrameIDs []uint32
+}
+
 // ParseSurfaceCommands parses one or more surface commands from raw data
-// and returns decoded BitmapData rectangles (with BITMAP_NO_PROCESSING flag).
-func ParseSurfaceCommands(data []byte) []BitmapData {
+// and returns decoded BitmapData rectangles and frame IDs that need acknowledgment.
+func ParseSurfaceCommands(data []byte) SurfaceCommandsResult {
 	r := bytes.NewReader(data)
-	var rects []BitmapData
+	var result SurfaceCommandsResult
 	for r.Len() > 0 {
 		cmdType, err := core.ReadUint16LE(r)
 		if err != nil {
@@ -922,21 +941,23 @@ func ParseSurfaceCommands(data []byte) []BitmapData {
 			rect, err := decodeSurfaceBitsCmd(r)
 			if err != nil {
 				slog.Warn("decodeSurfaceBitsCmd", "err", err)
-				return rects
+				return result
 			}
 			if rect != nil {
-				rects = append(rects, *rect)
+				result.Rects = append(result.Rects, *rect)
 			}
 		case CMDTYPE_FRAME_MARKER:
-			// frameAction(2) + frameId(4) — skip
-			core.ReadUint16LE(r)
-			core.ReadUInt32LE(r)
+			frameAction, _ := core.ReadUint16LE(r)
+			frameId, _ := core.ReadUInt32LE(r)
+			if frameAction == SURFCMD_FRAMEACTION_END {
+				result.FrameIDs = append(result.FrameIDs, frameId)
+			}
 		default:
 			slog.Warn("Unknown surface command type", "cmdType", cmdType)
-			return rects
+			return result
 		}
 	}
-	return rects
+	return result
 }
 
 // decodeSurfaceBitsCmd parses a SET_SURFACE_BITS or STREAM_SURFACE_BITS command.

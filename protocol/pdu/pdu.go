@@ -464,9 +464,12 @@ func (c *Client) RecvFastPath(secFlag byte, s []byte) {
 				slog.Warn("RecvFastPath: failed to read SURFCMDS", "err", err)
 				continue
 			}
-			rects := ParseSurfaceCommands(surfData)
-			if len(rects) > 0 {
-				c.Emit("bitmap", rects)
+			result := ParseSurfaceCommands(surfData)
+			if len(result.Rects) > 0 {
+				c.Emit("bitmap", result.Rects)
+			}
+			for _, fid := range result.FrameIDs {
+				c.sendDataPDU(&FrameAcknowledgeDataPDU{FrameID: fid})
 			}
 			continue
 		}
