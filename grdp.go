@@ -37,6 +37,7 @@ type RdpClient struct {
 	pdu             *pdu.Client
 	channels        *plugin.Channels
 	eventReady      bool
+	redirecting     bool // true while auto-detect retry or redirect is in progress
 	decompressPool  sync.Pool // pools []uint8 buffers for bitmap decompression
 	flipLinePool    sync.Pool // pools line-sized []uint8 buffers for bitmap vertical flip
 	reconnectMu sync.Mutex
@@ -301,16 +302,22 @@ func (g *RdpClient) retryWithGfx() {
 	defer g.reconnectMu.Unlock()
 
 	slog.Info("Server requires GFX, retrying with GFX flag")
+	g.redirecting = true
 	g.closeLocked()
 	g.eventReady = false
 
+	// Give the server time to clean up the rejected session.
+	time.Sleep(2 * time.Second)
+
 	if err := g.doLogin(true, nil); err != nil {
 		slog.Error("GFX retry failed", "err", err)
+		g.redirecting = false
 		if g.onErrorFn != nil {
 			g.onErrorFn(err)
 		}
 		return
 	}
+	g.redirecting = false
 	g.reregisterCallbacks()
 }
 
@@ -323,16 +330,19 @@ func (g *RdpClient) handleRedirect(redir *pdu.ServerRedirectionPDU) {
 	defer g.reconnectMu.Unlock()
 
 	slog.Info("Server redirect", "loadBalanceInfo", string(redir.LoadBalanceInfo))
+	g.redirecting = true
 	g.closeLocked()
 	g.eventReady = false
 
 	if err := g.doLogin(true, redir.LoadBalanceInfo); err != nil {
 		slog.Error("Redirect reconnection failed", "err", err)
+		g.redirecting = false
 		if g.onErrorFn != nil {
 			g.onErrorFn(err)
 		}
 		return
 	}
+	g.redirecting = false
 	g.reregisterCallbacks()
 }
 
@@ -346,7 +356,13 @@ func (g *RdpClient) Height() int {
 
 func (g *RdpClient) OnError(f func(e error)) *RdpClient {
 	g.onErrorFn = f
-	g.pdu.On("error", f)
+	g.pdu.On("error", func(e error) {
+		if g.redirecting {
+			slog.Debug("suppressing error during redirect/retry", "err", e)
+			return
+		}
+		f(e)
+	})
 	return g
 }
 

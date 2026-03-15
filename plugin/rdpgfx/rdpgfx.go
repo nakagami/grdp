@@ -52,7 +52,10 @@ const (
 // Capability versions and flags
 const (
 	capVersion8        uint32 = 0x00080004
+	capVersion81       uint32 = 0x00080105
+	capVersion10       uint32 = 0x000A0002
 	capFlagThinClient  uint32 = 0x00000001
+	capFlagSmallCache  uint32 = 0x00000002
 	capFlagAVCDisabled uint32 = 0x00000020
 )
 
@@ -104,6 +107,7 @@ type GfxHandler struct {
 	surfaces      map[uint16]*surface
 	cacheEntries  map[uint16]cacheEntry
 	clearCtx      *clearCodecCtx
+	zgfx          *zgfxContext
 	framesDecoded uint32
 	sendFn        func(data []byte)
 	onBitmap      func([]BitmapUpdate)
@@ -115,6 +119,7 @@ func NewGfxHandler(onBitmap func([]BitmapUpdate)) *GfxHandler {
 		surfaces:     make(map[uint16]*surface),
 		cacheEntries: make(map[uint16]cacheEntry),
 		clearCtx:     newClearCodecCtx(),
+		zgfx:         newZgfxContext(),
 		onBitmap:     onBitmap,
 	}
 }
@@ -124,19 +129,115 @@ func (g *GfxHandler) SetSendFunc(fn func([]byte)) {
 	g.sendFn = fn
 }
 
+// OnChannelCreated is called after the DVC CREATE_RSP has been sent.
+// It sends CAPS_ADVERTISE to the server to initiate the RDPGFX pipeline.
+func (g *GfxHandler) OnChannelCreated() {
+	g.sendCapsAdvertise()
+}
+
+// sendCapsAdvertise sends RDPGFX_CAPS_ADVERTISE_PDU to the server.
+// The client must advertise its capabilities before the server will
+// send any graphics data (MS-RDPEGFX 2.2.3.1).
+func (g *GfxHandler) sendCapsAdvertise() {
+	p := &bytes.Buffer{}
+	// capsSetCount
+	core.WriteUInt16LE(1, p)
+	// RDPGFX_CAPSET: version 8.0
+	core.WriteUInt32LE(capVersion8, p)
+	core.WriteUInt32LE(4, p) // capsDataLength
+	core.WriteUInt32LE(capFlagThinClient|capFlagSmallCache|capFlagAVCDisabled, p)
+	g.sendPdu(cmdidCapsAdvertise, p.Bytes())
+	slog.Info("RDPGFX: sent CAPS_ADVERTISE (v8.0, THINCLIENT|SMALLCACHE|AVC_DISABLED)")
+}
+
+// ZGFX segment descriptors (MS-RDPEGFX 2.2.4)
+const (
+	zgfxSingle    = 0xE0
+	zgfxMultipart = 0xE1
+
+	zgfxCompressedRDP8 = 0x04
+)
+
 // Process handles a complete RDPGFX payload (may contain multiple PDUs).
+// Data arrives wrapped in ZGFX (RDP8 Bulk Compression) segments (MS-RDPEGFX 2.2.4).
 func (g *GfxHandler) Process(data []byte) {
 	defer func() {
 		if r := recover(); r != nil {
 			slog.Error("RDPGFX: panic in Process", "err", r)
 		}
 	}()
-	slog.Info("RDPGFX: Process", "bytes", len(data))
+	if len(data) < 1 {
+		return
+	}
+
+	descriptor := data[0]
+	switch descriptor {
+	case zgfxSingle:
+		if len(data) < 2 {
+			return
+		}
+		raw := g.decompressSegment(data[1:])
+		if raw != nil {
+			g.processPDUs(raw)
+		}
+	case zgfxMultipart:
+		g.processMultipart(data[1:])
+	default:
+		slog.Warn(fmt.Sprintf("RDPGFX: unknown ZGFX descriptor 0x%02X, trying raw", descriptor))
+		g.processPDUs(data)
+	}
+}
+
+// decompressSegment handles a single ZGFX segment (after the descriptor byte).
+// First byte is compression flag: 0x00 = uncompressed, 0x04 = RDP8 compressed.
+func (g *GfxHandler) decompressSegment(seg []byte) []byte {
+	if len(seg) < 1 {
+		return nil
+	}
+	flag := seg[0]
+	payload := seg[1:]
+	if flag == zgfxCompressedRDP8 {
+		return g.zgfx.Decompress(payload)
+	}
+	// Uncompressed
+	return payload
+}
+
+// processMultipart handles ZGFX multipart segments (MS-RDPEGFX 2.2.4.1).
+func (g *GfxHandler) processMultipart(data []byte) {
+	if len(data) < 6 {
+		return
+	}
+	r := bytes.NewReader(data)
+	segCount, _ := core.ReadUint16LE(r)
+	_, _ = core.ReadUInt32LE(r) // uncompressedSize
+
+	buf := &bytes.Buffer{}
+	for i := uint16(0); i < segCount; i++ {
+		segSize, err := core.ReadUInt32LE(r)
+		if err != nil {
+			return
+		}
+		segData, err := core.ReadBytes(int(segSize), r)
+		if err != nil {
+			return
+		}
+		raw := g.decompressSegment(segData)
+		if raw != nil {
+			buf.Write(raw)
+		}
+	}
+	g.processPDUs(buf.Bytes())
+}
+
+// processPDUs parses one or more RDPGFX PDUs from raw (uncompressed) data.
+func (g *GfxHandler) processPDUs(data []byte) {
 	for offset := 0; offset+headerSize <= len(data); {
 		cmdId := binary.LittleEndian.Uint16(data[offset:])
 		pduLength := binary.LittleEndian.Uint32(data[offset+4:])
 		if pduLength < uint32(headerSize) || int(pduLength) > len(data)-offset {
-			slog.Warn("RDPGFX: invalid PDU", "cmdId", cmdId, "pduLen", pduLength)
+			slog.Warn("RDPGFX: invalid PDU", "cmdId", cmdId, "pduLen", pduLength,
+				"offset", offset, "dataLen", len(data))
 			break
 		}
 		pduData := data[offset+headerSize : offset+int(pduLength)]
@@ -148,8 +249,8 @@ func (g *GfxHandler) Process(data []byte) {
 func (g *GfxHandler) dispatch(cmdId uint16, data []byte) {
 	slog.Info(fmt.Sprintf("RDPGFX: cmd=0x%04X len=%d", cmdId, len(data)))
 	switch cmdId {
-	case cmdidCapsAdvertise:
-		g.onCapsAdvertise(data)
+	case cmdidCapsConfirm:
+		g.onCapsConfirm(data)
 	case cmdidResetGraphics:
 		g.onResetGraphics(data)
 	case cmdidCreateSurface:
@@ -193,14 +294,19 @@ func (g *GfxHandler) sendPdu(cmdId uint16, payload []byte) {
 
 // --- Command Handlers ---
 
-func (g *GfxHandler) onCapsAdvertise(data []byte) {
-	slog.Info("RDPGFX: CAPS_ADVERTISE received")
-	p := &bytes.Buffer{}
-	core.WriteUInt32LE(capVersion8, p)
-	core.WriteUInt32LE(4, p) // capsDataLength
-	core.WriteUInt32LE(capFlagThinClient|capFlagAVCDisabled, p)
-	g.sendPdu(cmdidCapsConfirm, p.Bytes())
-	slog.Info("RDPGFX: sent CAPS_CONFIRM (v8.0, THINCLIENT|AVC_DISABLED)")
+func (g *GfxHandler) onCapsConfirm(data []byte) {
+	if len(data) < 12 {
+		slog.Info("RDPGFX: CAPS_CONFIRM received (short)")
+		return
+	}
+	r := bytes.NewReader(data)
+	version, _ := core.ReadUInt32LE(r)
+	dataLen, _ := core.ReadUInt32LE(r)
+	flags := uint32(0)
+	if dataLen >= 4 {
+		flags, _ = core.ReadUInt32LE(r)
+	}
+	slog.Info(fmt.Sprintf("RDPGFX: CAPS_CONFIRM version=0x%08X flags=0x%08X", version, flags))
 }
 
 func (g *GfxHandler) onResetGraphics(data []byte) {

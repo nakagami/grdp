@@ -179,7 +179,9 @@ func (c *DvcClient) processCreateReq(hdr *DvcHeader, s []byte) {
 	slog.Info(fmt.Sprintf("Server requests channelId=%d, name=%s", channelId, channelName))
 
 	// Associate handler if registered
-	if handler, ok := c.handlers[channelName]; ok {
+	var handler DvcChannelHandler
+	if h, ok := c.handlers[channelName]; ok {
+		handler = h
 		info := &dvcChannelInfo{
 			name:    channelName,
 			id:      channelId,
@@ -204,6 +206,13 @@ func (c *DvcClient) processCreateReq(hdr *DvcHeader, s []byte) {
 	b.Write(rspHdr.serialize(channelId))
 	core.WriteUInt32LE(0, b)
 	c.Send(b.Bytes())
+
+	// Notify handler that channel is ready (CREATE_RSP has been sent)
+	if handler != nil {
+		if ch, ok := handler.(interface{ OnChannelCreated() }); ok {
+			ch.OnChannelCreated()
+		}
+	}
 }
 
 func readDvcId(r io.Reader, cbLen uint8) (id uint32) {
