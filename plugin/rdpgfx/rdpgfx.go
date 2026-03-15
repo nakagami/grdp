@@ -17,23 +17,27 @@ const (
 // RDPGFX Command IDs (MS-RDPEGFX 2.2.2)
 const (
 	cmdidWireToSurface1           uint16 = 0x0001
+	cmdidWireToSurface2           uint16 = 0x0002
 	cmdidDeleteEncodingContext    uint16 = 0x0003
 	cmdidSolidFill               uint16 = 0x0004
-	cmdidCacheToSurface          uint16 = 0x0008
-	cmdidEvictCacheEntry         uint16 = 0x0009
-	cmdidCreateSurface           uint16 = 0x000A
-	cmdidDeleteSurface           uint16 = 0x000B
-	cmdidStartFrame              uint16 = 0x000C
-	cmdidEndFrame                uint16 = 0x000D
-	cmdidFrameAcknowledge        uint16 = 0x000E
-	cmdidResetGraphics           uint16 = 0x000F
+	cmdidSurfaceToSurface         uint16 = 0x0005
+	cmdidSurfaceToCache           uint16 = 0x0006
+	cmdidCacheToSurface          uint16 = 0x0007
+	cmdidEvictCacheEntry         uint16 = 0x0008
+	cmdidCreateSurface           uint16 = 0x0009
+	cmdidDeleteSurface           uint16 = 0x000A
+	cmdidStartFrame              uint16 = 0x000B
+	cmdidEndFrame                uint16 = 0x000C
+	cmdidFrameAcknowledge        uint16 = 0x000D
+	cmdidResetGraphics           uint16 = 0x000E
+	cmdidMapSurfaceToOutput      uint16 = 0x000F
+	cmdidCacheImportOffer        uint16 = 0x0010
+	cmdidCacheImportReply        uint16 = 0x0011
 	cmdidCapsAdvertise           uint16 = 0x0012
 	cmdidCapsConfirm             uint16 = 0x0013
-	cmdidMapSurfaceToOutput      uint16 = 0x0015
-	cmdidCacheImportOffer        uint16 = 0x0016
-	cmdidCacheImportReply        uint16 = 0x0017
+	cmdidMapSurfaceToScaledOutput uint16 = 0x0015
+	cmdidMapSurfaceToScaledWindow uint16 = 0x0016
 	cmdidMapSurfaceToWindow      uint16 = 0x0018
-	cmdidMapSurfaceToScaledOutput uint16 = 0x001B
 )
 
 // Pixel Formats
@@ -47,6 +51,7 @@ const (
 	codecUncompressed uint16 = 0x0000
 	codecClearCodec   uint16 = 0x0003
 	codecPlanar       uint16 = 0x0004
+	codecProgressive  uint16 = 0x0009
 )
 
 // Capability versions and flags
@@ -108,6 +113,7 @@ type GfxHandler struct {
 	cacheEntries  map[uint16]cacheEntry
 	clearCtx      *clearCodecCtx
 	zgfx          *zgfxContext
+	progressive   *rfxProgressiveDecoder
 	framesDecoded uint32
 	sendFn        func(data []byte)
 	onBitmap      func([]BitmapUpdate)
@@ -120,6 +126,7 @@ func NewGfxHandler(onBitmap func([]BitmapUpdate)) *GfxHandler {
 		cacheEntries: make(map[uint16]cacheEntry),
 		clearCtx:     newClearCodecCtx(),
 		zgfx:         newZgfxContext(),
+		progressive:  newRfxProgressiveDecoder(),
 		onBitmap:     onBitmap,
 	}
 }
@@ -189,17 +196,20 @@ func (g *GfxHandler) Process(data []byte) {
 }
 
 // decompressSegment handles a single ZGFX segment (after the descriptor byte).
-// First byte is compression flag: 0x00 = uncompressed, 0x04 = RDP8 compressed.
+// First byte is RDP8_BULK_ENCODED_DATA header:
+//   bits 0-3: compression type (0x04 = RDP8)
+//   bit 5: PACKET_COMPRESSED (0x20)
 func (g *GfxHandler) decompressSegment(seg []byte) []byte {
 	if len(seg) < 1 {
 		return nil
 	}
-	flag := seg[0]
+	header := seg[0]
 	payload := seg[1:]
-	if flag == zgfxCompressedRDP8 {
+	if header&0x20 != 0 {
+		// PACKET_COMPRESSED: use ZGFX decompression
 		return g.zgfx.Decompress(payload)
 	}
-	// Uncompressed
+	// Not compressed: raw data
 	return payload
 }
 
@@ -265,6 +275,8 @@ func (g *GfxHandler) dispatch(cmdId uint16, data []byte) {
 		g.onEndFrame(data)
 	case cmdidWireToSurface1:
 		g.onWireToSurface1(data)
+	case cmdidWireToSurface2:
+		g.onWireToSurface2(data)
 	case cmdidSolidFill:
 		g.onSolidFill(data)
 	case cmdidCacheToSurface:
@@ -273,7 +285,7 @@ func (g *GfxHandler) dispatch(cmdId uint16, data []byte) {
 		g.onEvictCacheEntry(data)
 	case cmdidCacheImportOffer:
 		g.onCacheImportOffer()
-	case cmdidMapSurfaceToWindow, cmdidMapSurfaceToScaledOutput:
+	case cmdidMapSurfaceToWindow, cmdidMapSurfaceToScaledOutput, cmdidMapSurfaceToScaledWindow:
 		// ignored
 	default:
 		slog.Debug(fmt.Sprintf("RDPGFX: unhandled cmd 0x%04X", cmdId))
@@ -419,6 +431,50 @@ func (g *GfxHandler) onWireToSurface1(data []byte) {
 
 	blitToSurface(s, int(left), int(top), w, h, decoded)
 	g.emitBitmap(s, int(left), int(top), w, h, decoded)
+}
+
+// onWireToSurface2 handles RDPGFX_WIRE_TO_SURFACE_PDU_2 (MS-RDPEGFX 2.2.2.2).
+// Used in RDPGFX v8.1+ with progressive or AVC codecs.
+func (g *GfxHandler) onWireToSurface2(data []byte) {
+	if len(data) < 13 {
+		return
+	}
+	r := bytes.NewReader(data)
+	surfId, _ := core.ReadUint16LE(r)
+	codecId, _ := core.ReadUint16LE(r)
+	codecCtxId, _ := core.ReadUInt32LE(r)
+	pixFmt, _ := core.ReadUInt8(r)
+	bmpLen, _ := core.ReadUInt32LE(r)
+	bmpData, _ := core.ReadBytes(int(bmpLen), r)
+
+	s, ok := g.surfaces[surfId]
+	if !ok {
+		return
+	}
+
+	w := int(s.width)
+	h := int(s.height)
+
+	var decoded []byte
+	switch codecId {
+	case codecUncompressed:
+		decoded = decodeUncompressed(bmpData, w, h, pixFmt)
+	case codecPlanar:
+		decoded = decodePlanar(bmpData, w, h)
+	case codecClearCodec:
+		decoded = g.clearCtx.decode(bmpData, w, h)
+	case codecProgressive:
+		decoded = g.progressive.Decode(bmpData, w, h)
+	default:
+		slog.Debug(fmt.Sprintf("RDPGFX: WTS2 unsupported codec 0x%04X ctxId=%d", codecId, codecCtxId))
+		return
+	}
+	if decoded == nil {
+		return
+	}
+
+	blitToSurface(s, 0, 0, w, h, decoded)
+	g.emitBitmap(s, 0, 0, w, h, decoded)
 }
 
 func (g *GfxHandler) onSolidFill(data []byte) {
