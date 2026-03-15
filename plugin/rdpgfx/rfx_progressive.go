@@ -90,17 +90,17 @@ _ = binary.LittleEndian.Uint32(data[8:]) // tileDataSize
 
 offset := 12
 
-// Parse rects (8 bytes each: left, top, right, bottom as uint16)
+// Parse rects (8 bytes each: x, y, width, height as uint16)
 rects := make([]rfxRect, numRects)
 for i := uint16(0); i < numRects; i++ {
 if offset+8 > len(data) {
 return nil
 }
-left := int(binary.LittleEndian.Uint16(data[offset:]))
-top := int(binary.LittleEndian.Uint16(data[offset+2:]))
-right := int(binary.LittleEndian.Uint16(data[offset+4:]))
-bottom := int(binary.LittleEndian.Uint16(data[offset+6:]))
-rects[i] = rfxRect{x: left, y: top, w: right - left, h: bottom - top}
+rx := int(binary.LittleEndian.Uint16(data[offset:]))
+ry := int(binary.LittleEndian.Uint16(data[offset+2:]))
+rw := int(binary.LittleEndian.Uint16(data[offset+4:]))
+rh := int(binary.LittleEndian.Uint16(data[offset+6:]))
+rects[i] = rfxRect{x: rx, y: ry, w: rw, h: rh}
 offset += 8
 }
 
