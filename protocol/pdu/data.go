@@ -411,6 +411,83 @@ func readDeactiveAllPDU(r io.Reader) (*DeactiveAllPDU, error) {
 	return p, err
 }
 
+// ServerRedirectionPDU represents the RDP Server Redirection PDU
+// (MS-RDPBCGR 2.2.13.2.1). Only the LoadBalanceInfo field (routing
+// token) is extracted; other optional fields are skipped.
+type ServerRedirectionPDU struct {
+	Flags          uint16
+	Length         uint16
+	SessionID      uint32
+	RedirFlags     uint32
+	LoadBalanceInfo []byte
+}
+
+const (
+	LB_TARGET_NET_ADDRESS = 0x00000001
+	LB_LOAD_BALANCE_INFO  = 0x00000002
+	LB_USERNAME           = 0x00000004
+)
+
+func (*ServerRedirectionPDU) Type() uint16 {
+	return PDUTYPE_SERVER_REDIR_PKT
+}
+
+func (d *ServerRedirectionPDU) Serialize() []byte {
+	return nil
+}
+
+func readServerRedirectionPDU(r io.Reader) (*ServerRedirectionPDU, error) {
+	// Enhanced Security variant has a 2-byte pad before the PDU body
+	if _, err := core.ReadUint16LE(r); err != nil {
+		return nil, fmt.Errorf("redir: read pad: %w", err)
+	}
+
+	redir := &ServerRedirectionPDU{}
+	var err error
+	if redir.Flags, err = core.ReadUint16LE(r); err != nil {
+		return nil, fmt.Errorf("redir: read flags: %w", err)
+	}
+	if redir.Length, err = core.ReadUint16LE(r); err != nil {
+		return nil, fmt.Errorf("redir: read length: %w", err)
+	}
+	if redir.SessionID, err = core.ReadUInt32LE(r); err != nil {
+		return nil, fmt.Errorf("redir: read sessionID: %w", err)
+	}
+	if redir.RedirFlags, err = core.ReadUInt32LE(r); err != nil {
+		return nil, fmt.Errorf("redir: read redirFlags: %w", err)
+	}
+
+	// Parse variable-length fields in flag order.
+	// We only need LoadBalanceInfo (routing token) for reconnection.
+	if redir.RedirFlags&LB_TARGET_NET_ADDRESS != 0 {
+		cbLen, err := core.ReadUInt32LE(r)
+		if err != nil {
+			return nil, fmt.Errorf("redir: read targetNetAddr len: %w", err)
+		}
+		if _, err := core.ReadBytes(int(cbLen), r); err != nil {
+			return nil, fmt.Errorf("redir: read targetNetAddr: %w", err)
+		}
+	}
+
+	if redir.RedirFlags&LB_LOAD_BALANCE_INFO != 0 {
+		cbLen, err := core.ReadUInt32LE(r)
+		if err != nil {
+			return nil, fmt.Errorf("redir: read loadBalanceInfo len: %w", err)
+		}
+		redir.LoadBalanceInfo, err = core.ReadBytes(int(cbLen), r)
+		if err != nil {
+			return nil, fmt.Errorf("redir: read loadBalanceInfo: %w", err)
+		}
+	}
+
+	slog.Info("Server Redirection PDU",
+		"flags", fmt.Sprintf("0x%04x", redir.Flags),
+		"sessionID", redir.SessionID,
+		"redirFlags", fmt.Sprintf("0x%08x", redir.RedirFlags),
+		"loadBalanceInfo", string(redir.LoadBalanceInfo))
+	return redir, nil
+}
+
 type DataPDU struct {
 	Header *ShareDataHeader
 	Data   DataPDUData
@@ -1431,9 +1508,8 @@ func readPDU(r io.Reader) (*PDU, error) {
 		slog.Debug("readPDU:PDUTYPE_DEACTIVATEALLPDU")
 		d, err = readDeactiveAllPDU(r)
 	case PDUTYPE_SERVER_REDIR_PKT:
-		slog.Info("readPDU:PDUTYPE_SERVER_REDIR_PKT (ignored)")
-		// skip remaining data
-		d = nil
+		slog.Info("readPDU:PDUTYPE_SERVER_REDIR_PKT")
+		d, err = readServerRedirectionPDU(r)
 	default:
 		slog.Error(fmt.Sprintf("PDU invalid pdu type: 0x%02x", pdu.ShareCtrlHeader.PDUType))
 	}

@@ -176,7 +176,13 @@ func (c *Client) recvDemandActivePDU(s []byte) {
 	if pdu.ShareCtrlHeader.PDUType != PDUTYPE_DEMANDACTIVEPDU {
 		if pdu.ShareCtrlHeader.PDUType == PDUTYPE_DEACTIVATEALLPDU {
 			slog.Error("server sent DeactivateAllPDU before session was established; the server likely failed to create a session (check xrdp/sesman logs on the server)")
-			c.Emit("error", fmt.Errorf("server rejected session: DeactivateAllPDU received (session creation failed on server side)"))
+			c.Emit("deactivateAll")
+			return
+		}
+		if pdu.ShareCtrlHeader.PDUType == PDUTYPE_SERVER_REDIR_PKT {
+			if redir, ok := pdu.Message.(*ServerRedirectionPDU); ok {
+				c.Emit("redirect", redir)
+			}
 			return
 		}
 		slog.Info("ignore message during connection sequence", "type", pdu.ShareCtrlHeader.PDUType)
@@ -394,6 +400,10 @@ func (c *Client) recvPDU(s []byte) {
 		}
 		if p.ShareCtrlHeader.PDUType == PDUTYPE_DEACTIVATEALLPDU {
 			c.transport.Once("data", c.recvDemandActivePDU)
+		} else if p.ShareCtrlHeader.PDUType == PDUTYPE_SERVER_REDIR_PKT {
+			if redir, ok := p.Message.(*ServerRedirectionPDU); ok {
+				c.Emit("redirect", redir)
+			}
 		} else if p.ShareCtrlHeader.PDUType == PDUTYPE_DATAPDU {
 			d := p.Message.(*DataPDU)
 			if d.Header.PDUType2 == PDUTYPE2_UPDATE {

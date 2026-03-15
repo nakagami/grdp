@@ -201,12 +201,20 @@ func (g *RdpClient) Login(domain string, user string, password string) error {
 	g.user = user
 	g.password = password
 
+	return g.doLogin(false, nil)
+}
+
+// doLogin establishes an RDP connection. When useGfx is true, the GFX
+// protocol flag (RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL) is advertised.
+// When routingToken is non-nil it replaces the username cookie in the
+// x224 Connection Request (required for Server Redirection).
+func (g *RdpClient) doLogin(useGfx bool, routingToken []byte) error {
 	conn, err := net.DialTimeout("tcp", g.hostPort, 30*time.Second)
 	if err != nil {
 		return fmt.Errorf("[dial err] %v", err)
 	}
 
-	g.tpkt = tpkt.New(core.NewSocketLayer(conn), nla.NewNTLMv2(domain, user, password))
+	g.tpkt = tpkt.New(core.NewSocketLayer(conn), nla.NewNTLMv2(g.domain, g.user, g.password))
 	g.x224 = x224.New(g.tpkt)
 	g.mcs = t125.NewMCSClient(g.x224, g.kbdLayout, g.keyboardType, g.keyboardSubType)
 	g.sec = sec.NewClient(g.mcs)
@@ -214,19 +222,14 @@ func (g *RdpClient) Login(domain string, user string, password string) error {
 	g.channels = plugin.NewChannels(g.sec)
 
 	g.mcs.SetClientDesktop(uint16(g.width), uint16(g.height))
-	//clipboard
-	//g.channels.Register(cliprdr.NewCliprdrClient())
-	//g.mcs.SetClientCliprdr()
 
-	//remote app
-	//g.channels.Register(rail.NewClient())
-	//g.mcs.SetClientRemoteProgram()
-	//g.sec.SetAlternateShell("")
-
-	//dvc
 	dvcClient := drdynvc.NewDvcClient()
 	g.channels.Register(dvcClient)
-	g.mcs.AddDynvcChannel()
+	if useGfx {
+		g.mcs.SetClientDynvcProtocol()
+	} else {
+		g.mcs.AddDynvcChannel()
+	}
 
 	// RDPGFX (Graphics Pipeline) handler
 	gfxHandler := rdpgfx.NewGfxHandler(func(updates []rdpgfx.BitmapUpdate) {
@@ -250,18 +253,21 @@ func (g *RdpClient) Login(domain string, user string, password string) error {
 	})
 	dvcClient.RegisterHandler(rdpgfx.ChannelName, gfxHandler)
 
-	g.sec.SetUser(user)
-	g.sec.SetPwd(password)
-	g.sec.SetDomain(domain)
+	g.sec.SetUser(g.user)
+	g.sec.SetPwd(g.password)
+	g.sec.SetDomain(g.domain)
 
 	g.tpkt.SetFastPathListener(g.sec)
 	g.sec.SetFastPathListener(g.pdu)
 	g.sec.SetChannelSender(g.mcs)
 	g.channels.SetChannelSender(g.sec)
-	//g.pdu.SetFastPathSender(g.tpkt)
 
 	g.x224.SetRequestedProtocol(x224.PROTOCOL_SSL | x224.PROTOCOL_HYBRID)
-	g.x224.SetUsername(user)
+	if routingToken != nil {
+		g.x224.SetRoutingToken(routingToken)
+	} else {
+		g.x224.SetUsername(g.user)
+	}
 
 	err = g.x224.Connect()
 	if err != nil {
@@ -272,7 +278,62 @@ func (g *RdpClient) Login(domain string, user string, password string) error {
 		g.eventReady = true
 	})
 
+	// Auto-detect: server needs GFX → retry with GFX flag
+	if !useGfx {
+		g.pdu.Once("deactivateAll", func() {
+			go g.retryWithGfx()
+		})
+	}
+
+	// Handle Server Redirection PDU (gnome-remote-desktop sends this)
+	g.pdu.Once("redirect", func(redir *pdu.ServerRedirectionPDU) {
+		go g.handleRedirect(redir)
+	})
+
 	return nil
+}
+
+// retryWithGfx closes the current connection and reconnects with the
+// GFX flag set. Called when the server sends DeactivateAllPDU, which
+// indicates it requires RDPGFX support (e.g. gnome-remote-desktop).
+func (g *RdpClient) retryWithGfx() {
+	g.reconnectMu.Lock()
+	defer g.reconnectMu.Unlock()
+
+	slog.Info("Server requires GFX, retrying with GFX flag")
+	g.closeLocked()
+	g.eventReady = false
+
+	if err := g.doLogin(true, nil); err != nil {
+		slog.Error("GFX retry failed", "err", err)
+		if g.onErrorFn != nil {
+			g.onErrorFn(err)
+		}
+		return
+	}
+	g.reregisterCallbacks()
+}
+
+// handleRedirect closes the current connection and reconnects using
+// the routing token from the Server Redirection PDU. This is required
+// by gnome-remote-desktop which redirects the client to the actual
+// session after the initial handshake.
+func (g *RdpClient) handleRedirect(redir *pdu.ServerRedirectionPDU) {
+	g.reconnectMu.Lock()
+	defer g.reconnectMu.Unlock()
+
+	slog.Info("Server redirect", "loadBalanceInfo", string(redir.LoadBalanceInfo))
+	g.closeLocked()
+	g.eventReady = false
+
+	if err := g.doLogin(true, redir.LoadBalanceInfo); err != nil {
+		slog.Error("Redirect reconnection failed", "err", err)
+		if g.onErrorFn != nil {
+			g.onErrorFn(err)
+		}
+		return
+	}
+	g.reregisterCallbacks()
 }
 
 func (g *RdpClient) Width() int {
