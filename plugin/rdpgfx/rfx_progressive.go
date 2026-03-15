@@ -38,9 +38,15 @@ func newRfxProgressiveDecoder() *rfxProgressiveDecoder {
 return &rfxProgressiveDecoder{}
 }
 
-// Decode processes RFX Progressive codec data and returns BGRA pixel data.
-func (d *rfxProgressiveDecoder) Decode(data []byte, width, height int) []byte {
-output := make([]byte, width*height*4)
+// rfxRect represents a rectangle of decoded tiles.
+type rfxRect struct {
+x, y, w, h int
+}
+
+// Decode processes RFX Progressive codec data, rendering tiles onto the
+// provided surface buffer. Returns the bounding rectangles of decoded regions.
+func (d *rfxProgressiveDecoder) Decode(data []byte, surfData []byte, width, height int) []rfxRect {
+var rects []rfxRect
 
 offset := 0
 for offset+6 <= len(data) {
@@ -58,7 +64,7 @@ switch blockType {
 case progWBTSync, progWBTFrameBegin, progWBTFrameEnd, progWBTContext:
 // handled implicitly
 case progWBTRegion:
-d.decodeRegion(blockData, output, width, height)
+rects = append(rects, d.decodeRegion(blockData, surfData, width, height)...)
 default:
 slog.Debug(fmt.Sprintf("RFX: unknown block 0x%04X", blockType))
 }
@@ -66,32 +72,43 @@ slog.Debug(fmt.Sprintf("RFX: unknown block 0x%04X", blockType))
 offset += int(blockLen)
 }
 
-return output
+return rects
 }
 
-func (d *rfxProgressiveDecoder) decodeRegion(data []byte, output []byte, width, height int) {
+func (d *rfxProgressiveDecoder) decodeRegion(data []byte, output []byte, width, height int) []rfxRect {
 if len(data) < 12 {
-return
+return nil
 }
 
 _ = data[0] // tileSize (64)
 numRects := binary.LittleEndian.Uint16(data[1:])
 numQuant := data[3]
 numProgQuant := data[4]
-_ = data[5] // flags
+flags := data[5]
 numTiles := binary.LittleEndian.Uint16(data[6:])
 _ = binary.LittleEndian.Uint32(data[8:]) // tileDataSize
 
 offset := 12
 
-// Skip rects (8 bytes each: left, top, right, bottom as uint16)
-offset += int(numRects) * 8
+// Parse rects (8 bytes each: left, top, right, bottom as uint16)
+rects := make([]rfxRect, numRects)
+for i := uint16(0); i < numRects; i++ {
+if offset+8 > len(data) {
+return nil
+}
+left := int(binary.LittleEndian.Uint16(data[offset:]))
+top := int(binary.LittleEndian.Uint16(data[offset+2:]))
+right := int(binary.LittleEndian.Uint16(data[offset+4:]))
+bottom := int(binary.LittleEndian.Uint16(data[offset+6:]))
+rects[i] = rfxRect{x: left, y: top, w: right - left, h: bottom - top}
+offset += 8
+}
 
 // Parse quant values (5 bytes each)
 quants := make([]rfxQuant, numQuant)
 for i := uint8(0); i < numQuant; i++ {
 if offset+5 > len(data) {
-return
+return nil
 }
 quants[i] = parseRfxQuant(data[offset:])
 offset += 5
@@ -100,8 +117,11 @@ offset += 5
 // Skip progressive quant values (16 bytes each)
 offset += int(numProgQuant) * 16
 
-slog.Debug(fmt.Sprintf("RFX: region %d tiles, %d quants, %d progQuants, %d rects",
-numTiles, numQuant, numProgQuant, numRects))
+if flags&0x01 != 0 {
+slog.Warn("RFX: RFX_DWT_REDUCE_EXTRAPOLATE flag set (not fully supported)")
+}
+slog.Debug(fmt.Sprintf("RFX: region %d tiles, %d quants, %d progQuants, %d rects, flags=0x%02X",
+numTiles, numQuant, numProgQuant, numRects, flags))
 
 for i := uint16(0); i < numTiles; i++ {
 if offset+6 > len(data) {
@@ -127,6 +147,7 @@ case progWBTTileUpgrade:
 
 offset += int(tileLen)
 }
+return rects
 }
 
 func parseRfxQuant(data []byte) rfxQuant {
@@ -258,13 +279,19 @@ if debug {
 slog.Debug(fmt.Sprintf("RFX: RLGR first8: %v LL3[0..3]=%v", coeffs[:8], coeffs[4032:4036]))
 }
 
-// 2. Dequantize (left-shift by quant-1 per subband)
-rfxDequantize(coeffs, quant)
-if debug {
-slog.Debug(fmt.Sprintf("RFX: dequant first8: %v LL3[0..3]=%v", coeffs[:8], coeffs[4032:4036]))
+// 2. Differential decode LL3 (positions 4032..4095)
+// RLGR stores LL3 as deltas; accumulate to recover absolute values.
+for i := 4033; i < 4096; i++ {
+coeffs[i] += coeffs[i-1]
 }
 
-// 3. Inverse DWT (3 levels)
+// 3. Dequantize (left-shift by quant-1 per subband)
+rfxDequantize(coeffs, quant)
+if debug {
+slog.Debug(fmt.Sprintf("RFX: dequant LL3[0..3]=%v", coeffs[4032:4036]))
+}
+
+// 4. Inverse DWT (3 levels)
 rfxInverseDWT2D(coeffs)
 if debug {
 slog.Debug(fmt.Sprintf("RFX: IDWT pixel[0..7]: %v", coeffs[:8]))
@@ -396,9 +423,12 @@ buf[(2*n-1)*size+col] = int16((lastH << 1) + lastEven)
 }
 }
 
-// rfxPlaceTile converts YCoCg tile to BGRA and writes into the output buffer.
-// Progressive codec uses YCoCg (Reversible Color Transform), not ICT.
-func rfxPlaceTile(yCoeffs, coCoeffs, cgCoeffs []int16, xIdx, yIdx int, output []byte, outW, outH int) {
+// rfxPlaceTile converts YCbCr tile to BGRA and writes into the output buffer.
+// Uses ICT (Irreversible Color Transform) from MS-RDPRFX.
+// The IDWT output values are in a domain scaled by <<5 from the encode-side RGB→YCbCr.
+// The +4096 = 128<<5 undoes the -128 centering applied before the forward color transform.
+// Fixed-point constants (×2^16): CrR=91916, CrG=46819, CbG=22527, CbB=115992.
+func rfxPlaceTile(yCoeffs, cbCoeffs, crCoeffs []int16, xIdx, yIdx int, output []byte, outW, outH int) {
 tileX := xIdx * rfxTileSize
 tileY := yIdx * rfxTileSize
 tileW := rfxTileSize
@@ -416,15 +446,15 @@ return
 for row := 0; row < tileH; row++ {
 for col := 0; col < tileW; col++ {
 idx := row*rfxTileSize + col
-y := int32(yCoeffs[idx])
-co := int32(coCoeffs[idx])
-cg := int32(cgCoeffs[idx])
+yVal := int64(yCoeffs[idx])
+cb := int64(cbCoeffs[idx])
+cr := int64(crCoeffs[idx])
 
-// YCoCg → RGB (Reversible Color Transform)
-t := y - (cg >> 1)
-g := cg + t + 128
-b := t - (co >> 1) + 128
-r := b - 128 + co + 128
+// ICT (YCbCr → RGB) with fixed-point arithmetic matching FreeRDP
+yScaled := (yVal + 4096) << 16
+r := int32((cr*91916 + yScaled) >> 21)
+g := int32((yScaled - cb*22527 - cr*46819) >> 21)
+b := int32((cb*115992 + yScaled) >> 21)
 
 if r < 0 {
 r = 0

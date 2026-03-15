@@ -459,22 +459,38 @@ func (g *GfxHandler) onWireToSurface2(data []byte) {
 	switch codecId {
 	case codecUncompressed:
 		decoded = decodeUncompressed(bmpData, w, h, pixFmt)
+		blitToSurface(s, 0, 0, w, h, decoded)
+		g.emitBitmap(s, 0, 0, w, h, decoded)
 	case codecPlanar:
 		decoded = decodePlanar(bmpData, w, h)
+		blitToSurface(s, 0, 0, w, h, decoded)
+		g.emitBitmap(s, 0, 0, w, h, decoded)
 	case codecClearCodec:
 		decoded = g.clearCtx.decode(bmpData, w, h)
+		blitToSurface(s, 0, 0, w, h, decoded)
+		g.emitBitmap(s, 0, 0, w, h, decoded)
 	case codecProgressive:
-		decoded = g.progressive.Decode(bmpData, w, h)
+		// Decode tiles directly onto the persistent surface buffer.
+		// Each WTS2 PDU may contain only a subset of tiles; decoding
+		// onto s.data preserves previously rendered tiles.
+		rects := g.progressive.Decode(bmpData, s.data, w, h)
+		for _, rc := range rects {
+			// Extract the rect region from the surface for emission
+			region := make([]byte, rc.w*rc.h*4)
+			stride := w * 4
+			for row := 0; row < rc.h; row++ {
+				srcOff := (rc.y+row)*stride + rc.x*4
+				dstOff := row * rc.w * 4
+				if srcOff+rc.w*4 <= len(s.data) {
+					copy(region[dstOff:dstOff+rc.w*4], s.data[srcOff:srcOff+rc.w*4])
+				}
+			}
+			g.emitBitmap(s, rc.x, rc.y, rc.w, rc.h, region)
+		}
 	default:
 		slog.Debug(fmt.Sprintf("RDPGFX: WTS2 unsupported codec 0x%04X ctxId=%d", codecId, codecCtxId))
 		return
 	}
-	if decoded == nil {
-		return
-	}
-
-	blitToSurface(s, 0, 0, w, h, decoded)
-	g.emitBitmap(s, 0, 0, w, h, decoded)
 }
 
 func (g *GfxHandler) onSolidFill(data []byte) {
