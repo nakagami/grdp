@@ -510,7 +510,7 @@ func (n *NTLMv2Security) GssDecrypt(s []byte) []byte {
 	b := &bytes.Buffer{}
 	core.WriteUInt32LE(seqNum, b)
 	core.WriteBytes(p, b)
-	verify := HMAC_MD5(n.VerifyKey, b.Bytes())
+	verify := HMAC_MD5(n.VerifyKey, b.Bytes())[:8]
 	if string(verify) != string(check) {
 		return nil
 	}

@@ -235,6 +235,7 @@ func (g *RdpClient) Login(domain string, user string, password string) error {
 	//g.pdu.SetFastPathSender(g.tpkt)
 
 	g.x224.SetRequestedProtocol(x224.PROTOCOL_SSL | x224.PROTOCOL_HYBRID)
+	g.x224.SetUsername(user)
 
 	err = g.x224.Connect()
 	if err != nil {
