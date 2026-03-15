@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/nakagami/grdp/plugin"
+	"github.com/nakagami/grdp/plugin/drdynvc"
 
 	"github.com/nakagami/grdp/core"
 	"github.com/nakagami/grdp/protocol/nla"
@@ -222,7 +223,8 @@ func (g *RdpClient) Login(domain string, user string, password string) error {
 	//g.sec.SetAlternateShell("")
 
 	//dvc
-	//g.channels.Register(drdynvc.NewDvcClient())
+	g.channels.Register(drdynvc.NewDvcClient())
+	g.mcs.SetClientDynvcProtocol()
 
 	g.sec.SetUser(user)
 	g.sec.SetPwd(password)
