@@ -451,18 +451,67 @@ func (g *RdpClient) Reconnect(width, height int) error {
 	g.height = height
 	g.eventReady = false
 
-	// Wait for the server to finish tearing down the old session;
-	// without this pause the TLS handshake may hang because the
-	// server is still cleaning up the previous connection.
-	time.Sleep(500 * time.Millisecond)
+	const maxRetries = 3
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		// Exponential backoff: 1s, 2s, 4s — gives the server time to
+		// tear down the previous session before we reconnect.
+		delay := time.Duration(1<<uint(attempt-1)) * time.Second
+		slog.Info("Reconnect: waiting before attempt", "attempt", attempt, "delay", delay)
+		time.Sleep(delay)
 
-	err := g.Login(g.domain, g.user, g.password)
-	if err != nil {
-		return fmt.Errorf("[reconnect err] %v", err)
+		err := g.Login(g.domain, g.user, g.password)
+		if err != nil {
+			slog.Warn("Reconnect: login failed", "attempt", attempt, "err", err)
+			if attempt < maxRetries {
+				g.closeLocked()
+				continue
+			}
+			return fmt.Errorf("[reconnect err] %v", err)
+		}
+
+		// Re-register user callbacks on the new protocol objects so that
+		// the "ready" / "error" events reach the caller's handlers.
+		g.reregisterCallbacks()
+
+		// Wait for the full RDP handshake (MCS, SEC, PDU capability
+		// exchange) to complete before declaring success.
+		result := make(chan error, 1)
+		g.pdu.Once("ready", func() {
+			select {
+			case result <- nil:
+			default:
+			}
+		})
+		g.pdu.Once("error", func(err error) {
+			select {
+			case result <- err:
+			default:
+			}
+		})
+
+		select {
+		case err := <-result:
+			if err == nil {
+				slog.Info("Reconnect: succeeded", "attempt", attempt)
+				return nil
+			}
+			slog.Warn("Reconnect: handshake failed", "attempt", attempt, "err", err)
+			g.closeLocked()
+			if attempt < maxRetries {
+				continue
+			}
+			return fmt.Errorf("[reconnect handshake err] %v", err)
+		case <-time.After(30 * time.Second):
+			slog.Warn("Reconnect: timed out", "attempt", attempt)
+			g.closeLocked()
+			if attempt < maxRetries {
+				continue
+			}
+			return fmt.Errorf("[reconnect timeout]")
+		}
 	}
 
-	g.reregisterCallbacks()
-	return nil
+	return fmt.Errorf("[reconnect failed after %d attempts]", maxRetries)
 }
 
 func (g *RdpClient) reregisterCallbacks() {

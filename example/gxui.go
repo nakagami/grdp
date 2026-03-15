@@ -168,12 +168,15 @@ func appMain(driver gxui.Driver) {
 		}
 		resizeTimer = time.AfterFunc(500*time.Millisecond, func() {
 			slog.Info("Window resized, reconnecting", "width", w, "height", h)
+			if err := rdpClient.Reconnect(w, h); err != nil {
+				slog.Error("Reconnect failed", "err", err)
+				return
+			}
+			// Only replace the screen buffer after a successful reconnect
+			// so the display keeps the last good frame on failure.
 			screenMu.Lock()
 			screenImage = image.NewRGBA(image.Rect(0, 0, w, h))
 			screenMu.Unlock()
-			if err := rdpClient.Reconnect(w, h); err != nil {
-				slog.Error("Reconnect failed", "err", err)
-			}
 		})
 	})
 	update()
