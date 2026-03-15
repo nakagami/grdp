@@ -181,15 +181,16 @@ type X224 struct {
 	requestedProtocol uint32
 	selectedProtocol  uint32
 	dataHeader        *DataHeader
+	username          string
 }
 
 func New(t core.Transport) *X224 {
 	x := &X224{
-		*emission.NewEmitter(),
-		t,
-		PROTOCOL_RDP | PROTOCOL_SSL | PROTOCOL_HYBRID,
-		PROTOCOL_SSL,
-		NewDataHeader(),
+		Emitter:           *emission.NewEmitter(),
+		transport:         t,
+		requestedProtocol: PROTOCOL_RDP | PROTOCOL_SSL | PROTOCOL_HYBRID,
+		selectedProtocol:  PROTOCOL_SSL,
+		dataHeader:        NewDataHeader(),
 	}
 
 	t.On("close", func() {
@@ -224,11 +225,19 @@ func (x *X224) SetRequestedProtocol(p uint32) {
 	x.requestedProtocol = p
 }
 
+func (x *X224) SetUsername(username string) {
+	x.username = username
+}
+
 func (x *X224) Connect() error {
 	if x.transport == nil {
 		return errors.New("no transport")
 	}
-	cookie := "Cookie: mstshash=test"
+	name := x.username
+	if name == "" {
+		name = "test"
+	}
+	cookie := "Cookie: mstshash=" + name
 	message := NewClientConnectionRequestPDU([]byte(cookie), x.requestedProtocol)
 	message.ProtocolNeg.Type = TYPE_RDP_NEG_REQ
 	message.ProtocolNeg.Result = uint32(x.requestedProtocol)

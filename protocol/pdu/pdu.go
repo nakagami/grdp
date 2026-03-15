@@ -174,6 +174,11 @@ func (c *Client) recvDemandActivePDU(s []byte) {
 		return
 	}
 	if pdu.ShareCtrlHeader.PDUType != PDUTYPE_DEMANDACTIVEPDU {
+		if pdu.ShareCtrlHeader.PDUType == PDUTYPE_DEACTIVATEALLPDU {
+			slog.Error("server sent DeactivateAllPDU before session was established; the server likely failed to create a session (check xrdp/sesman logs on the server)")
+			c.Emit("error", fmt.Errorf("server rejected session: DeactivateAllPDU received (session creation failed on server side)"))
+			return
+		}
 		slog.Info("ignore message during connection sequence", "type", pdu.ShareCtrlHeader.PDUType)
 		c.transport.Once("data", c.recvDemandActivePDU)
 		return
