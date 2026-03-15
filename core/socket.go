@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"encoding/asn1"
 	"errors"
+	"log/slog"
 	"math/big"
 	"net"
 	"time"
@@ -16,6 +17,10 @@ type SocketLayer struct {
 }
 
 func NewSocketLayer(conn net.Conn) *SocketLayer {
+	// Disable Nagle's algorithm so small DVC responses are sent immediately.
+	if tc, ok := conn.(*net.TCPConn); ok {
+		tc.SetNoDelay(true)
+	}
 	l := &SocketLayer{
 		conn:    conn,
 		tlsConn: nil,
@@ -36,9 +41,12 @@ func (s *SocketLayer) Read(b []byte) (n int, err error) {
 
 func (s *SocketLayer) Write(b []byte) (n int, err error) {
 	if s.tlsConn != nil {
-		return s.tlsConn.Write(b)
+		n, err = s.tlsConn.Write(b)
+	} else {
+		n, err = s.conn.Write(b)
 	}
-	return s.conn.Write(b)
+	slog.Debug("socket Write", "n", n, "len", len(b), "err", err)
+	return
 }
 
 func (s *SocketLayer) Close() error {

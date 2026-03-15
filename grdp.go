@@ -11,6 +11,7 @@ import (
 
 	"github.com/nakagami/grdp/plugin"
 	"github.com/nakagami/grdp/plugin/drdynvc"
+	"github.com/nakagami/grdp/plugin/rdpgfx"
 
 	"github.com/nakagami/grdp/core"
 	"github.com/nakagami/grdp/protocol/nla"
@@ -223,8 +224,31 @@ func (g *RdpClient) Login(domain string, user string, password string) error {
 	//g.sec.SetAlternateShell("")
 
 	//dvc
-	g.channels.Register(drdynvc.NewDvcClient())
-	g.mcs.SetClientDynvcProtocol()
+	dvcClient := drdynvc.NewDvcClient()
+	g.channels.Register(dvcClient)
+	//g.mcs.SetClientDynvcProtocol() // DIAGNOSTIC: disabled GFX EarlyCapabilityFlag to test traditional bitmap
+
+	// RDPGFX (Graphics Pipeline) handler
+	gfxHandler := rdpgfx.NewGfxHandler(func(updates []rdpgfx.BitmapUpdate) {
+		if g.onBitmapPaintFn == nil {
+			return
+		}
+		bs := make([]Bitmap, len(updates))
+		for i, u := range updates {
+			bs[i] = Bitmap{
+				DestLeft:     u.DestLeft,
+				DestTop:      u.DestTop,
+				DestRight:    u.DestRight,
+				DestBottom:   u.DestBottom,
+				Width:        u.Width,
+				Height:       u.Height,
+				BitsPerPixel: u.Bpp,
+				Data:         u.Data,
+			}
+		}
+		g.onBitmapPaintFn(bs)
+	})
+	dvcClient.RegisterHandler(rdpgfx.ChannelName, gfxHandler)
 
 	g.sec.SetUser(user)
 	g.sec.SetPwd(password)
@@ -294,10 +318,12 @@ func (g *RdpClient) OnBitmap(paint func([]Bitmap)) *RdpClient {
 		var pooled [][]uint8 // track buffers borrowed from pool
 
 		for _, v := range rectangles {
-			IsCompress := v.IsCompress()
 			data := v.BitmapDataStream
 			Bpp := bpp(v.BitsPerPixel)
-			if IsCompress {
+
+			if v.Flags&pdu.BITMAP_NO_PROCESSING != 0 {
+				// Surface command: data is already decoded top-down BGRA
+			} else if v.IsCompress() {
 				buf := g.decompressPool.Get().([]uint8)
 				buf = core.DecompressInto(v.BitmapDataStream, buf, int(v.Width), int(v.Height), Bpp)
 				data = buf

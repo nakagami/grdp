@@ -86,7 +86,7 @@ func NewPDULayer(t core.Transport) *PDULayer {
 			CAPSTYPE_FONT:            &FontCapability{0x0001, 0},
 			CAPSTYPE_BRUSH:           &BrushCapability{BRUSH_COLOR_8x8},
 			CAPSTYPE_GLYPHCACHE:      &GlyphCapability{},
-			CAPSETTYPE_BITMAP_CODECS: &BitmapCodecsCapability{},
+			CAPSETTYPE_BITMAP_CODECS: newClientBitmapCodecsCapability(),
 			CAPSTYPE_BITMAPCACHE_REV2: &BitmapCache2Capability{
 				BitmapCachePersist: 2,
 				CachesNum:          5,
@@ -97,7 +97,7 @@ func NewPDULayer(t core.Transport) *PDULayer {
 				BmpC4Cells:         0x800,
 			},
 			CAPSTYPE_VIRTUALCHANNEL:        &VirtualChannelCapability{0, 1600},
-			CAPSETTYPE_MULTIFRAGMENTUPDATE: &MultiFragmentUpdate{65535},
+			CAPSETTYPE_MULTIFRAGMENTUPDATE: &MultiFragmentUpdate{0x3F0000},
 			CAPSTYPE_RAIL: &RemoteProgramsCapability{
 				RailSupportLevel: RAIL_LEVEL_SUPPORTED |
 					RAIL_LEVEL_SHELL_INTEGRATION_SUPPORTED |
@@ -202,8 +202,8 @@ func (c *Client) sendConfirmActivePDU() {
 	generalCapa.OSMinorType = OSMINORTYPE_WINDOWS_NT
 	generalCapa.ExtraFlags = LONG_CREDENTIALS_SUPPORTED | NO_BITMAP_COMPRESSION_HDR |
 		FASTPATH_OUTPUT_SUPPORTED | AUTORECONNECT_SUPPORTED
-	generalCapa.RefreshRectSupport = 0
-	generalCapa.SuppressOutputSupport = 0
+	generalCapa.RefreshRectSupport = 1
+	generalCapa.SuppressOutputSupport = 1
 
 	bitmapCapa := c.clientCapabilities[CAPSTYPE_BITMAP].(*BitmapCapability)
 	bitmapCapa.PreferredBitsPerPixel = 32
@@ -370,6 +370,15 @@ func (c *Client) recvServerFontMapPDU(s []byte) {
 		return
 	}
 	c.transport.On("data", c.recvPDU)
+
+	// Tell the server we're ready to receive display updates (MS-RDPBCGR 2.2.11.3.1)
+	slog.Info("Sending SuppressOutput (ALLOW_DISPLAY_UPDATES)")
+	c.sendDataPDU(&SuppressOutputPDU{
+		AllowDisplayUpdates: 1,
+		Right:               c.clientCoreData.DesktopWidth - 1,
+		Bottom:              c.clientCoreData.DesktopHeight - 1,
+	})
+
 	c.Emit("ready")
 }
 
@@ -440,6 +449,26 @@ func (c *Client) RecvFastPath(secFlag byte, s []byte) {
 				return
 			}
 			r.Reset(c.buff.Bytes())
+		}
+
+		// Surface Commands: parse directly (needs to know data size)
+		if updateCode == FASTPATH_UPDATETYPE_SURFCMDS {
+			var readLen int
+			if fragmentation != FASTPATH_FRAGMENT_SINGLE {
+				readLen = r.Len() // assembled: all data is this update
+			} else {
+				readLen = int(size) // single: read exactly our portion
+			}
+			surfData, err := core.ReadBytes(readLen, r)
+			if err != nil {
+				slog.Warn("RecvFastPath: failed to read SURFCMDS", "err", err)
+				continue
+			}
+			rects := ParseSurfaceCommands(surfData)
+			if len(rects) > 0 {
+				c.Emit("bitmap", rects)
+			}
+			continue
 		}
 
 		p, err := readFastPathUpdatePDU(r, updateCode)
