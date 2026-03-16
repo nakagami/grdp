@@ -37,7 +37,6 @@ type RdpClient struct {
 	pdu             *pdu.Client
 	channels        *plugin.Channels
 	eventReady      bool
-	redirecting     bool // true while auto-detect retry or redirect is in progress
 	decompressPool  sync.Pool // pools []uint8 buffers for bitmap decompression
 	flipLinePool    sync.Pool // pools line-sized []uint8 buffers for bitmap vertical flip
 	reconnectMu sync.Mutex
@@ -276,75 +275,72 @@ func (g *RdpClient) doLogin(useGfx bool, routingToken []byte) error {
 		return fmt.Errorf("[x224 connect err] %v", err)
 	}
 
+	// Wait for the RDP handshake to complete or fail.
+	// Events arrive asynchronously from the TPKT read goroutine.
+	type connResult struct {
+		err      error
+		redirect *pdu.ServerRedirectionPDU
+		retry    bool // deactivateAll → need GFX retry
+	}
+
+	ch := make(chan connResult, 1)
+	done := false
+	send := func(r connResult) {
+		if !done {
+			select {
+			case ch <- r:
+			default:
+			}
+		}
+	}
+
 	g.pdu.On("ready", func() {
 		g.eventReady = true
+		send(connResult{})
 	})
 
-	// Auto-detect: server needs GFX → retry with GFX flag
+	g.pdu.On("error", func(err error) {
+		send(connResult{err: err})
+	})
+
+	// Auto-detect: server needs GFX → signal retry
 	if !useGfx {
 		g.pdu.Once("deactivateAll", func() {
-			go g.retryWithGfx()
+			send(connResult{retry: true})
 		})
 	}
 
 	// Handle Server Redirection PDU (gnome-remote-desktop sends this)
 	g.pdu.Once("redirect", func(redir *pdu.ServerRedirectionPDU) {
-		go g.handleRedirect(redir)
+		send(connResult{redirect: redir})
 	})
 
-	return nil
-}
-
-// retryWithGfx closes the current connection and reconnects with the
-// GFX flag set. Called when the server sends DeactivateAllPDU, which
-// indicates it requires RDPGFX support (e.g. gnome-remote-desktop).
-func (g *RdpClient) retryWithGfx() {
-	g.reconnectMu.Lock()
-	defer g.reconnectMu.Unlock()
-
-	slog.Info("Server requires GFX, retrying with GFX flag")
-	g.redirecting = true
-	g.closeLocked()
-	g.eventReady = false
-
-	// Give the server time to clean up the rejected session.
-	time.Sleep(2 * time.Second)
-
-	if err := g.doLogin(true, nil); err != nil {
-		slog.Error("GFX retry failed", "err", err)
-		g.redirecting = false
-		if g.onErrorFn != nil {
-			g.onErrorFn(err)
+	select {
+	case r := <-ch:
+		done = true
+		if r.err != nil {
+			g.tpkt.Close()
+			return fmt.Errorf("[connection err] %v", r.err)
 		}
-		return
-	}
-	g.redirecting = false
-	g.reregisterCallbacks()
-}
-
-// handleRedirect closes the current connection and reconnects using
-// the routing token from the Server Redirection PDU. This is required
-// by gnome-remote-desktop which redirects the client to the actual
-// session after the initial handshake.
-func (g *RdpClient) handleRedirect(redir *pdu.ServerRedirectionPDU) {
-	g.reconnectMu.Lock()
-	defer g.reconnectMu.Unlock()
-
-	slog.Info("Server redirect", "loadBalanceInfo", string(redir.LoadBalanceInfo))
-	g.redirecting = true
-	g.closeLocked()
-	g.eventReady = false
-
-	if err := g.doLogin(true, redir.LoadBalanceInfo); err != nil {
-		slog.Error("Redirect reconnection failed", "err", err)
-		g.redirecting = false
-		if g.onErrorFn != nil {
-			g.onErrorFn(err)
+		if r.retry {
+			slog.Info("Server requires GFX, retrying with GFX flag")
+			g.tpkt.Close()
+			g.eventReady = false
+			time.Sleep(2 * time.Second)
+			return g.doLogin(true, nil)
 		}
-		return
+		if r.redirect != nil {
+			slog.Info("Server redirect", "loadBalanceInfo", string(r.redirect.LoadBalanceInfo))
+			g.tpkt.Close()
+			g.eventReady = false
+			return g.doLogin(true, r.redirect.LoadBalanceInfo)
+		}
+		return nil
+	case <-time.After(30 * time.Second):
+		done = true
+		g.tpkt.Close()
+		return fmt.Errorf("[connection timeout]")
 	}
-	g.redirecting = false
-	g.reregisterCallbacks()
 }
 
 func (g *RdpClient) Width() int {
@@ -358,10 +354,6 @@ func (g *RdpClient) Height() int {
 func (g *RdpClient) OnError(f func(e error)) *RdpClient {
 	g.onErrorFn = f
 	g.pdu.On("error", func(e error) {
-		if g.redirecting {
-			slog.Debug("suppressing error during redirect/retry", "err", e)
-			return
-		}
 		f(e)
 	})
 	return g
@@ -460,7 +452,7 @@ func (g *RdpClient) OnPointerUpdate(f func(uint16, uint16, uint16, uint16, uint1
 }
 
 func (g *RdpClient) KeyUp(sc int) {
-	if !g.eventReady || g.redirecting {
+	if !g.eventReady {
 		return
 	}
 	slog.Debug("KeyUp", "sc", sc)
@@ -472,7 +464,7 @@ func (g *RdpClient) KeyUp(sc int) {
 }
 
 func (g *RdpClient) KeyDown(sc int) {
-	if !g.eventReady || g.redirecting {
+	if !g.eventReady {
 		return
 	}
 	slog.Debug("KeyDown", "sc", sc)
@@ -483,7 +475,7 @@ func (g *RdpClient) KeyDown(sc int) {
 }
 
 func (g *RdpClient) MouseMove(x, y int) {
-	if !g.eventReady || g.redirecting {
+	if !g.eventReady {
 		return
 	}
 	//slog.Debug("MouseMove", "x", x, "y", y)
@@ -495,7 +487,7 @@ func (g *RdpClient) MouseMove(x, y int) {
 }
 
 func (g *RdpClient) MouseWheel(scroll int) {
-	if !g.eventReady || g.redirecting {
+	if !g.eventReady {
 		return
 	}
 	slog.Debug("MouseWheel")
@@ -510,7 +502,7 @@ func (g *RdpClient) MouseWheel(scroll int) {
 }
 
 func (g *RdpClient) MouseUp(button int, x, y int) {
-	if !g.eventReady || g.redirecting {
+	if !g.eventReady {
 		return
 	}
 	slog.Debug("MouseUp", "x", x, "y", y, "button", button)
@@ -533,7 +525,7 @@ func (g *RdpClient) MouseUp(button int, x, y int) {
 }
 
 func (g *RdpClient) MouseDown(button int, x, y int) {
-	if !g.eventReady || g.redirecting {
+	if !g.eventReady {
 		return
 	}
 	slog.Debug("MouseDown", "x", x, "y", y, "button", button)
@@ -557,10 +549,6 @@ func (g *RdpClient) MouseDown(button int, x, y int) {
 	g.pdu.SendInputEvents(pdu.INPUT_EVENT_MOUSE, []pdu.InputEventsInterface{p})
 }
 
-// Reconnect closes the current RDP session and re-establishes a new connection
-// with the specified screen dimensions. All previously registered callbacks are
-// automatically re-registered on the new session.
-// This is intended to be called when the GUI window is resized.
 func (g *RdpClient) Reconnect(width, height int) error {
 	g.reconnectMu.Lock()
 	defer g.reconnectMu.Unlock()
@@ -593,46 +581,9 @@ func (g *RdpClient) Reconnect(width, height int) error {
 			return fmt.Errorf("[reconnect err] %v", err)
 		}
 
-		// Re-register user callbacks on the new protocol objects so that
-		// the "ready" / "error" events reach the caller's handlers.
 		g.reregisterCallbacks()
-
-		// Wait for the full RDP handshake (MCS, SEC, PDU capability
-		// exchange) to complete before declaring success.
-		result := make(chan error, 1)
-		g.pdu.Once("ready", func() {
-			select {
-			case result <- nil:
-			default:
-			}
-		})
-		g.pdu.Once("error", func(err error) {
-			select {
-			case result <- err:
-			default:
-			}
-		})
-
-		select {
-		case err := <-result:
-			if err == nil {
-				slog.Info("Reconnect: succeeded", "attempt", attempt)
-				return nil
-			}
-			slog.Warn("Reconnect: handshake failed", "attempt", attempt, "err", err)
-			g.closeLocked()
-			if attempt < maxRetries {
-				continue
-			}
-			return fmt.Errorf("[reconnect handshake err] %v", err)
-		case <-time.After(30 * time.Second):
-			slog.Warn("Reconnect: timed out", "attempt", attempt)
-			g.closeLocked()
-			if attempt < maxRetries {
-				continue
-			}
-			return fmt.Errorf("[reconnect timeout]")
-		}
+		slog.Info("Reconnect: succeeded", "attempt", attempt)
+		return nil
 	}
 
 	return fmt.Errorf("[reconnect failed after %d attempts]", maxRetries)
