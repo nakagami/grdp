@@ -286,20 +286,8 @@ func (c *MCSClient) SetClientDynvcProtocol() {
 	c.clientNetworkData.AddVirtualChannel(drdynvc.ChannelName, drdynvc.ChannelOption)
 }
 
-// AddDynvcChannel registers the drdynvc static virtual channel without
-// setting the GFX EarlyCapabilityFlag.  This allows the server to fall
-// back to Surface Commands while still having DVC infrastructure available.
-func (c *MCSClient) AddDynvcChannel() {
-	c.clientNetworkData.AddVirtualChannel(drdynvc.ChannelName, drdynvc.ChannelOption)
-}
-
 func (c *MCSClient) SetClientRemoteProgram() {
 	c.clientNetworkData.AddVirtualChannel(rail.ChannelName, rail.ChannelOption)
-}
-
-func (c *MCSClient) SetClientCliprdr() {
-	slog.Debug("mcs SetClientCliprdr")
-	//c.clientNetworkData.AddVirtualChannel(cliprdr.ChannelName, cliprdr.ChannelOption)
 }
 
 func (c *MCSClient) connect(selectedProtocol uint32) {

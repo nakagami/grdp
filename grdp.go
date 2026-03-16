@@ -37,11 +37,11 @@ type RdpClient struct {
 	pdu             *pdu.Client
 	channels        *plugin.Channels
 	eventReady      bool
-	redirecting     bool // true during async redirect reconnection
+	redirecting     bool      // true during async redirect reconnection
 	decompressPool  sync.Pool // pools []uint8 buffers for bitmap decompression
 	flipLinePool    sync.Pool // pools line-sized []uint8 buffers for bitmap vertical flip
-	reconnectMu sync.Mutex
-	closed      bool
+	reconnectMu     sync.Mutex
+	closed          bool
 
 	// credentials stored for reconnection
 	domain   string
@@ -202,14 +202,13 @@ func (g *RdpClient) Login(domain string, user string, password string) error {
 	g.user = user
 	g.password = password
 
-	return g.doLogin(false, nil)
+	return g.doLogin(nil)
 }
 
-// doLogin establishes an RDP connection. When useGfx is true, the GFX
-// protocol flag (RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL) is advertised.
+// doLogin establishes an RDP connection.
 // When routingToken is non-nil it replaces the username cookie in the
 // x224 Connection Request (required for Server Redirection).
-func (g *RdpClient) doLogin(useGfx bool, routingToken []byte) error {
+func (g *RdpClient) doLogin(routingToken []byte) error {
 	conn, err := net.DialTimeout("tcp", g.hostPort, 30*time.Second)
 	if err != nil {
 		return fmt.Errorf("[dial err] %v", err)
@@ -227,11 +226,7 @@ func (g *RdpClient) doLogin(useGfx bool, routingToken []byte) error {
 
 	dvcClient := drdynvc.NewDvcClient()
 	g.channels.Register(dvcClient)
-	if useGfx {
-		g.mcs.SetClientDynvcProtocol()
-	} else {
-		g.mcs.AddDynvcChannel()
-	}
+	g.mcs.SetClientDynvcProtocol()
 
 	// RDPGFX (Graphics Pipeline) handler
 	gfxHandler := rdpgfx.NewGfxHandler(func(updates []rdpgfx.BitmapUpdate) {
@@ -308,13 +303,6 @@ func (g *RdpClient) doLogin(useGfx bool, routingToken []byte) error {
 		}
 	})
 
-	// deactivateAll only fires before "ready" (pre-session handler).
-	if !useGfx {
-		g.pdu.Once("deactivateAll", func() {
-			send(connResult{retry: true})
-		})
-	}
-
 	// Redirect may arrive before or after "ready".
 	// Before ready: send to channel for synchronous handling.
 	// After ready: launch async goroutine (GNOME Remote Desktop
@@ -338,13 +326,13 @@ func (g *RdpClient) doLogin(useGfx bool, routingToken []byte) error {
 			g.tpkt.Close()
 			g.eventReady = false
 			time.Sleep(2 * time.Second)
-			return g.doLogin(true, nil)
+			return g.doLogin(nil)
 		}
 		if r.redirect != nil {
 			slog.Info("Server redirect", "loadBalanceInfo", string(r.redirect.LoadBalanceInfo))
 			g.tpkt.Close()
 			g.eventReady = false
-			return g.doLogin(true, r.redirect.LoadBalanceInfo)
+			return g.doLogin(r.redirect.LoadBalanceInfo)
 		}
 		// "ready" received — session established.
 		return nil
@@ -362,7 +350,7 @@ func (g *RdpClient) handleRedirect(redir *pdu.ServerRedirectionPDU) {
 	g.tpkt.Close()
 	g.eventReady = false
 
-	err := g.doLogin(true, redir.LoadBalanceInfo)
+	err := g.doLogin(redir.LoadBalanceInfo)
 	g.redirecting = false
 	if err != nil {
 		slog.Error("handleRedirect: login failed", "err", err)
