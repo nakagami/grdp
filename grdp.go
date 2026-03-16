@@ -215,7 +215,8 @@ func (g *RdpClient) doLogin(useGfx bool, routingToken []byte) error {
 		return fmt.Errorf("[dial err] %v", err)
 	}
 
-	g.tpkt = tpkt.New(core.NewSocketLayer(conn), nla.NewNTLMv2(g.domain, g.user, g.password))
+	host, _, _ := net.SplitHostPort(g.hostPort)
+	g.tpkt = tpkt.New(core.NewSocketLayer(conn, host), nla.NewNTLMv2(g.domain, g.user, g.password))
 	g.x224 = x224.New(g.tpkt)
 	g.mcs = t125.NewMCSClient(g.x224, g.kbdLayout, g.keyboardType, g.keyboardSubType)
 	g.sec = sec.NewClient(g.mcs)

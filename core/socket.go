@@ -12,18 +12,20 @@ import (
 )
 
 type SocketLayer struct {
-	conn    net.Conn
-	tlsConn *tls.Conn
+	conn       net.Conn
+	tlsConn    *tls.Conn
+	serverName string
 }
 
-func NewSocketLayer(conn net.Conn) *SocketLayer {
+func NewSocketLayer(conn net.Conn, serverName string) *SocketLayer {
 	// Disable Nagle's algorithm so small DVC responses are sent immediately.
 	if tc, ok := conn.(*net.TCPConn); ok {
 		tc.SetNoDelay(true)
 	}
 	l := &SocketLayer{
-		conn:    conn,
-		tlsConn: nil,
+		conn:       conn,
+		tlsConn:    nil,
+		serverName: serverName,
 	}
 	return l
 }
@@ -59,6 +61,7 @@ func (s *SocketLayer) Close() error {
 func (s *SocketLayer) StartTLS() error {
 	config := &tls.Config{
 		InsecureSkipVerify: true,
+		ServerName:         s.serverName,
 		MinVersion:         tls.VersionTLS12,
 		MaxVersion:         tls.VersionTLS12,
 		//		MaxVersion:               tls.VersionTLS13,
