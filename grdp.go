@@ -37,6 +37,7 @@ type RdpClient struct {
 	pdu             *pdu.Client
 	channels        *plugin.Channels
 	eventReady      bool
+	redirecting     bool // true during async redirect reconnection
 	decompressPool  sync.Pool // pools []uint8 buffers for bitmap decompression
 	flipLinePool    sync.Pool // pools line-sized []uint8 buffers for bitmap vertical flip
 	reconnectMu sync.Mutex
@@ -283,41 +284,51 @@ func (g *RdpClient) doLogin(useGfx bool, routingToken []byte) error {
 		retry    bool // deactivateAll → need GFX retry
 	}
 
-	ch := make(chan connResult, 1)
-	done := false
+	ch := make(chan connResult, 4)
 	send := func(r connResult) {
-		if !done {
-			select {
-			case ch <- r:
-			default:
-			}
+		select {
+		case ch <- r:
+		default:
 		}
 	}
 
+	// readyFired is set by the "ready" callback. All emitter callbacks
+	// run synchronously on the TPKT read goroutine, so no mutex needed.
+	readyFired := false
+
 	g.pdu.On("ready", func() {
 		g.eventReady = true
+		readyFired = true
 		send(connResult{})
 	})
 
 	g.pdu.On("error", func(err error) {
-		send(connResult{err: err})
+		if !readyFired {
+			send(connResult{err: err})
+		}
 	})
 
-	// Auto-detect: server needs GFX → signal retry
+	// deactivateAll only fires before "ready" (pre-session handler).
 	if !useGfx {
 		g.pdu.Once("deactivateAll", func() {
 			send(connResult{retry: true})
 		})
 	}
 
-	// Handle Server Redirection PDU (gnome-remote-desktop sends this)
+	// Redirect may arrive before or after "ready".
+	// Before ready: send to channel for synchronous handling.
+	// After ready: launch async goroutine (GNOME Remote Desktop
+	// sends redirect ~5s after the GFX retry's "ready").
 	g.pdu.Once("redirect", func(redir *pdu.ServerRedirectionPDU) {
-		send(connResult{redirect: redir})
+		if !readyFired {
+			send(connResult{redirect: redir})
+		} else {
+			go g.handleRedirect(redir)
+		}
 	})
 
 	select {
 	case r := <-ch:
-		done = true
 		if r.err != nil {
 			g.tpkt.Close()
 			return fmt.Errorf("[connection err] %v", r.err)
@@ -335,12 +346,32 @@ func (g *RdpClient) doLogin(useGfx bool, routingToken []byte) error {
 			g.eventReady = false
 			return g.doLogin(true, r.redirect.LoadBalanceInfo)
 		}
+		// "ready" received — session established.
 		return nil
 	case <-time.After(30 * time.Second):
-		done = true
 		g.tpkt.Close()
 		return fmt.Errorf("[connection timeout]")
 	}
+}
+
+// handleRedirect handles a Server Redirection PDU that arrives after
+// "ready" (e.g. GNOME Remote Desktop). Runs asynchronously.
+func (g *RdpClient) handleRedirect(redir *pdu.ServerRedirectionPDU) {
+	slog.Info("Async server redirect", "loadBalanceInfo", string(redir.LoadBalanceInfo))
+	g.redirecting = true
+	g.tpkt.Close()
+	g.eventReady = false
+
+	err := g.doLogin(true, redir.LoadBalanceInfo)
+	g.redirecting = false
+	if err != nil {
+		slog.Error("handleRedirect: login failed", "err", err)
+		if g.onErrorFn != nil {
+			g.onErrorFn(err)
+		}
+		return
+	}
+	g.reregisterCallbacks()
 }
 
 func (g *RdpClient) Width() int {
@@ -354,7 +385,9 @@ func (g *RdpClient) Height() int {
 func (g *RdpClient) OnError(f func(e error)) *RdpClient {
 	g.onErrorFn = f
 	g.pdu.On("error", func(e error) {
-		f(e)
+		if !g.redirecting {
+			f(e)
+		}
 	})
 	return g
 }
