@@ -46,6 +46,7 @@ const (
 	PDUTYPE2_ARC_STATUS_PDU              = 0x32
 	PDUTYPE2_STATUS_INFO_PDU             = 0x36
 	PDUTYPE2_MONITOR_LAYOUT_PDU          = 0x37
+	PDUTYPE2_FRAME_ACKNOWLEDGE           = 0x38
 )
 
 func (p PduType2) String() string {
@@ -168,6 +169,19 @@ func (t FastPathUpdateType) String() string {
 const (
 	BITMAP_COMPRESSION = 0x0001
 	//NO_BITMAP_COMPRESSION_HDR = 0x0400
+	BITMAP_NO_PROCESSING = 0x8000 // Surface command: data is already decoded top-down BGRA
+)
+
+// Surface Command types (MS-RDPBCGR 2.2.9.1.2.1)
+const (
+	CMDTYPE_SET_SURFACE_BITS    = 0x0001
+	CMDTYPE_FRAME_MARKER        = 0x0004
+	CMDTYPE_STREAM_SURFACE_BITS = 0x0006
+)
+
+const (
+	SURFCMD_FRAMEACTION_BEGIN = 0x0000
+	SURFCMD_FRAMEACTION_END   = 0x0001
 )
 
 /* compression types */
@@ -397,6 +411,83 @@ func readDeactiveAllPDU(r io.Reader) (*DeactiveAllPDU, error) {
 	return p, err
 }
 
+// ServerRedirectionPDU represents the RDP Server Redirection PDU
+// (MS-RDPBCGR 2.2.13.2.1). Only the LoadBalanceInfo field (routing
+// token) is extracted; other optional fields are skipped.
+type ServerRedirectionPDU struct {
+	Flags          uint16
+	Length         uint16
+	SessionID      uint32
+	RedirFlags     uint32
+	LoadBalanceInfo []byte
+}
+
+const (
+	LB_TARGET_NET_ADDRESS = 0x00000001
+	LB_LOAD_BALANCE_INFO  = 0x00000002
+	LB_USERNAME           = 0x00000004
+)
+
+func (*ServerRedirectionPDU) Type() uint16 {
+	return PDUTYPE_SERVER_REDIR_PKT
+}
+
+func (d *ServerRedirectionPDU) Serialize() []byte {
+	return nil
+}
+
+func readServerRedirectionPDU(r io.Reader) (*ServerRedirectionPDU, error) {
+	// Enhanced Security variant has a 2-byte pad before the PDU body
+	if _, err := core.ReadUint16LE(r); err != nil {
+		return nil, fmt.Errorf("redir: read pad: %w", err)
+	}
+
+	redir := &ServerRedirectionPDU{}
+	var err error
+	if redir.Flags, err = core.ReadUint16LE(r); err != nil {
+		return nil, fmt.Errorf("redir: read flags: %w", err)
+	}
+	if redir.Length, err = core.ReadUint16LE(r); err != nil {
+		return nil, fmt.Errorf("redir: read length: %w", err)
+	}
+	if redir.SessionID, err = core.ReadUInt32LE(r); err != nil {
+		return nil, fmt.Errorf("redir: read sessionID: %w", err)
+	}
+	if redir.RedirFlags, err = core.ReadUInt32LE(r); err != nil {
+		return nil, fmt.Errorf("redir: read redirFlags: %w", err)
+	}
+
+	// Parse variable-length fields in flag order.
+	// We only need LoadBalanceInfo (routing token) for reconnection.
+	if redir.RedirFlags&LB_TARGET_NET_ADDRESS != 0 {
+		cbLen, err := core.ReadUInt32LE(r)
+		if err != nil {
+			return nil, fmt.Errorf("redir: read targetNetAddr len: %w", err)
+		}
+		if _, err := core.ReadBytes(int(cbLen), r); err != nil {
+			return nil, fmt.Errorf("redir: read targetNetAddr: %w", err)
+		}
+	}
+
+	if redir.RedirFlags&LB_LOAD_BALANCE_INFO != 0 {
+		cbLen, err := core.ReadUInt32LE(r)
+		if err != nil {
+			return nil, fmt.Errorf("redir: read loadBalanceInfo len: %w", err)
+		}
+		redir.LoadBalanceInfo, err = core.ReadBytes(int(cbLen), r)
+		if err != nil {
+			return nil, fmt.Errorf("redir: read loadBalanceInfo: %w", err)
+		}
+	}
+
+	slog.Info("Server Redirection PDU",
+		"flags", fmt.Sprintf("0x%04x", redir.Flags),
+		"sessionID", redir.SessionID,
+		"redirFlags", fmt.Sprintf("0x%08x", redir.RedirFlags),
+		"loadBalanceInfo", string(redir.LoadBalanceInfo))
+	return redir, nil
+}
+
 type DataPDU struct {
 	Header *ShareDataHeader
 	Data   DataPDUData
@@ -619,6 +710,54 @@ func (*FontMapDataPDU) Type2() uint8 {
 	return PDUTYPE2_FONTMAP
 }
 func (d *FontMapDataPDU) Unpack(r io.Reader) error {
+	return struc.Unpack(r, d)
+}
+
+// SuppressOutputPDU tells the server to start/stop sending display updates.
+// MS-RDPBCGR 2.2.11.3.1
+type SuppressOutputPDU struct {
+	AllowDisplayUpdates uint8    `struc:"little"`
+	Pad3Octets          [3]byte  `struc:"little"`
+	Left                uint16   `struc:"little"`
+	Top                 uint16   `struc:"little"`
+	Right               uint16   `struc:"little"`
+	Bottom              uint16   `struc:"little"`
+}
+
+func (*SuppressOutputPDU) Type2() uint8 {
+	return PDUTYPE2_SUPPRESS_OUTPUT
+}
+func (d *SuppressOutputPDU) Unpack(r io.Reader) error {
+	return struc.Unpack(r, d)
+}
+
+// FrameAcknowledgeDataPDU acknowledges receipt of a frame (MS-RDPBCGR 2.2.11.3.2).
+type FrameAcknowledgeDataPDU struct {
+	FrameID uint32 `struc:"little"`
+}
+
+func (*FrameAcknowledgeDataPDU) Type2() uint8 {
+	return PDUTYPE2_FRAME_ACKNOWLEDGE
+}
+func (d *FrameAcknowledgeDataPDU) Unpack(r io.Reader) error {
+	return struc.Unpack(r, d)
+}
+
+// RefreshRectPDU requests the server to redraw one or more screen regions.
+// MS-RDPBCGR 2.2.11.2
+type RefreshRectPDU struct {
+	NumberOfAreas uint8    `struc:"little"`
+	Pad3Octets    [3]byte  `struc:"little"`
+	Left          uint16   `struc:"little"`
+	Top           uint16   `struc:"little"`
+	Right         uint16   `struc:"little"`
+	Bottom        uint16   `struc:"little"`
+}
+
+func (*RefreshRectPDU) Type2() uint8 {
+	return PDUTYPE2_REFRESH_RECT
+}
+func (d *RefreshRectPDU) Unpack(r io.Reader) error {
 	return struc.Unpack(r, d)
 }
 
@@ -847,18 +986,375 @@ func (f *FastPathColorPdu) Unpack(r io.Reader) error {
 }
 
 type FastPathSurfaceCmds struct {
+	Rects []BitmapData
 }
 
 func (*FastPathSurfaceCmds) FastPathUpdateType() uint8 {
 	return FASTPATH_UPDATETYPE_SURFCMDS
 }
 func (f *FastPathSurfaceCmds) Unpack(r io.Reader) error {
-	cmdType, _ := core.ReadUint16LE(r)
-	switch cmdType {
+	// This won't be called; Surface Commands are handled directly in RecvFastPath.
+	return nil
+}
 
+// SurfaceCommandsResult holds parsed bitmap data and frame IDs to acknowledge.
+type SurfaceCommandsResult struct {
+	Rects    []BitmapData
+	FrameIDs []uint32
+}
+
+// ParseSurfaceCommands parses one or more surface commands from raw data
+// and returns decoded BitmapData rectangles and frame IDs that need acknowledgment.
+func ParseSurfaceCommands(data []byte) SurfaceCommandsResult {
+	r := bytes.NewReader(data)
+	var result SurfaceCommandsResult
+	for r.Len() > 0 {
+		cmdType, err := core.ReadUint16LE(r)
+		if err != nil {
+			break
+		}
+		switch cmdType {
+		case CMDTYPE_SET_SURFACE_BITS, CMDTYPE_STREAM_SURFACE_BITS:
+			rect, err := decodeSurfaceBitsCmd(r)
+			if err != nil {
+				slog.Warn("decodeSurfaceBitsCmd", "err", err)
+				return result
+			}
+			if rect != nil {
+				result.Rects = append(result.Rects, *rect)
+			}
+		case CMDTYPE_FRAME_MARKER:
+			frameAction, _ := core.ReadUint16LE(r)
+			frameId, _ := core.ReadUInt32LE(r)
+			if frameAction == SURFCMD_FRAMEACTION_END {
+				result.FrameIDs = append(result.FrameIDs, frameId)
+			}
+		default:
+			slog.Warn("Unknown surface command type", "cmdType", cmdType)
+			return result
+		}
+	}
+	return result
+}
+
+// decodeSurfaceBitsCmd parses a SET_SURFACE_BITS or STREAM_SURFACE_BITS command.
+func decodeSurfaceBitsCmd(r io.Reader) (*BitmapData, error) {
+	destLeft, err := core.ReadUint16LE(r)
+	if err != nil {
+		return nil, err
+	}
+	destTop, _ := core.ReadUint16LE(r)
+	destRight, _ := core.ReadUint16LE(r)
+	destBottom, _ := core.ReadUint16LE(r)
+
+	// TS_BITMAP_DATA_EX
+	bpp, _ := core.ReadUInt8(r)
+	flags, _ := core.ReadUInt8(r)
+	_, _ = core.ReadUInt8(r) // reserved
+	codecID, _ := core.ReadUInt8(r)
+	width, _ := core.ReadUint16LE(r)
+	height, _ := core.ReadUint16LE(r)
+	bitmapDataLength, _ := core.ReadUInt32LE(r)
+
+	// Skip extended compressed bitmap header if present (24 bytes).
+	// bitmapDataLength includes this header size when the flag is set.
+	if flags&0x01 != 0 {
+		core.ReadBytes(24, r)
+		bitmapDataLength -= 24
 	}
 
-	return nil
+	bitmapData, err := core.ReadBytes(int(bitmapDataLength), r)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read bitmap data: %v", err)
+	}
+
+	slog.Info("decodeSurfaceBitsCmd",
+		"dest", fmt.Sprintf("(%d,%d)-(%d,%d)", destLeft, destTop, destRight, destBottom),
+		"size", fmt.Sprintf("%dx%d", width, height),
+		"bpp", bpp, "codecID", codecID, "flags", flags, "dataLen", bitmapDataLength)
+
+	var pixels []byte
+	outBpp := uint16(bpp)
+	switch codecID {
+	case 0: // Uncompressed
+		pixels = bitmapData
+	case 1: // NSCodec
+		pixels = decodeNSCodec(bitmapData, int(width), int(height))
+		outBpp = 32 // NSCodec always decodes to BGRA (4 bytes/pixel)
+	default:
+		slog.Warn("Unsupported surface codec", "codecID", codecID)
+		return nil, nil // skip unsupported codecs
+	}
+
+	if pixels == nil {
+		return nil, nil
+	}
+
+	// Flip vertically: NSCodec decodes top-down, but the bitmap coordinate
+	// system expects bottom-up pixel data for correct rendering.
+	stride := int(width) * int(outBpp) / 8
+	h := int(height)
+	for y := 0; y < h/2; y++ {
+		top := y * stride
+		bot := (h - 1 - y) * stride
+		for i := 0; i < stride; i++ {
+			pixels[top+i], pixels[bot+i] = pixels[bot+i], pixels[top+i]
+		}
+	}
+
+	return &BitmapData{
+		DestLeft:         destLeft,
+		DestTop:          destTop,
+		DestRight:        destRight,
+		DestBottom:       destBottom,
+		Width:            width,
+		Height:           height,
+		BitsPerPixel:     outBpp,
+		Flags:            BITMAP_NO_PROCESSING,
+		BitmapLength:     0,
+		BitmapDataStream: pixels,
+	}, nil
+}
+
+// decodeNSCodec decodes NSCodec (MS-RDPNSC) encoded bitmap data into BGRA pixels.
+// Implements the decoder exactly as FreeRDP does (libfreerdp/codec/nsc.c).
+func decodeNSCodec(data []byte, width, height int) []byte {
+	if len(data) < 20 {
+		slog.Warn("NSCodec data too short", "len", len(data))
+		return nil
+	}
+
+	r := bytes.NewReader(data)
+	lumaLen, _ := core.ReadUInt32LE(r)
+	orangeLen, _ := core.ReadUInt32LE(r)
+	greenLen, _ := core.ReadUInt32LE(r)
+	alphaLen, _ := core.ReadUInt32LE(r)
+	colorLossLevel, _ := core.ReadUInt8(r)
+	chromaSubsamplingLevel, _ := core.ReadUInt8(r)
+	_, _ = core.ReadUint16LE(r) // reserved
+
+	if colorLossLevel < 1 {
+		colorLossLevel = 1
+	}
+	shift := colorLossLevel - 1
+
+	slog.Debug("NSCodec",
+		"lumaLen", lumaLen, "orangeLen", orangeLen,
+		"greenLen", greenLen, "alphaLen", alphaLen,
+		"colorLossLevel", colorLossLevel,
+		"chromaSub", chromaSubsamplingLevel)
+
+	remaining := data[20:]
+
+	// Bounds check
+	totalPlaneLen := int(lumaLen + orangeLen + greenLen + alphaLen)
+	if totalPlaneLen > len(remaining) {
+		slog.Warn("NSCodec plane lengths exceed data",
+			"planeLens", totalPlaneLen, "available", len(remaining))
+		return nil
+	}
+
+	// Compute plane original (decompressed) sizes, matching FreeRDP:
+	// Y and A: tempWidth * height (Y uses rounded width for row stride)
+	// Co and Cg: (tempWidth>>1) * (tempHeight>>1) when chroma subsampled
+	tempWidth := (width + 7) &^ 7  // ROUND_UP_TO(width, 8)
+	tempHeight := (height + 1) &^ 1 // ROUND_UP_TO(height, 2)
+
+	var yOrigSize, coOrigSize, cgOrigSize, aOrigSize int
+	if chromaSubsamplingLevel > 0 {
+		yOrigSize = tempWidth * height
+		coOrigSize = (tempWidth >> 1) * (tempHeight >> 1)
+		cgOrigSize = coOrigSize
+	} else {
+		yOrigSize = width * height
+		coOrigSize = yOrigSize
+		cgOrigSize = yOrigSize
+	}
+	aOrigSize = width * height
+
+	// Decompress each plane: if planeSize < originalSize → NRLE decode,
+	// if planeSize == 0 → fill with 0xFF, otherwise raw copy.
+	yPlane := nscDecompressPlane(remaining[:lumaLen], int(lumaLen), yOrigSize)
+	remaining = remaining[lumaLen:]
+	coPlane := nscDecompressPlane(remaining[:orangeLen], int(orangeLen), coOrigSize)
+	remaining = remaining[orangeLen:]
+	cgPlane := nscDecompressPlane(remaining[:greenLen], int(greenLen), cgOrigSize)
+	remaining = remaining[greenLen:]
+
+	var aPlane []byte
+	if alphaLen > 0 {
+		aPlane = nscDecompressPlane(remaining[:alphaLen], int(alphaLen), aOrigSize)
+	}
+
+	// YCoCg to BGRA conversion (matches FreeRDP nsc_decode exactly).
+	// FreeRDP formula:
+	//   co_val = (INT16)(INT8)(((INT16)*coplane) << shift)
+	//   cg_val = (INT16)(INT8)(((INT16)*cgplane) << shift)
+	//   R = Y + co - cg
+	//   G = Y + cg
+	//   B = Y - co - cg
+	totalPixels := width * height
+	pixels := make([]byte, totalPixels*4)
+
+	// Row widths for plane indexing (FreeRDP uses rw for Y, rw>>1 for chroma)
+	yRowWidth := width
+	coRowWidth := width
+	if chromaSubsamplingLevel > 0 {
+		yRowWidth = tempWidth
+		coRowWidth = tempWidth >> 1
+	}
+
+	for py := 0; py < height; py++ {
+		yRowOff := py * yRowWidth
+		var coRowOff, cgRowOff int
+		if chromaSubsamplingLevel > 0 {
+			coRowOff = (py >> 1) * coRowWidth
+			cgRowOff = coRowOff
+		} else {
+			coRowOff = py * coRowWidth
+			cgRowOff = coRowOff
+		}
+
+		coIdx := coRowOff
+		cgIdx := cgRowOff
+
+		for px := 0; px < width; px++ {
+			outIdx := py*width + px
+			yIdx := yRowOff + px
+
+			yVal := int16(0)
+			if yIdx < len(yPlane) {
+				yVal = int16(yPlane[yIdx])
+			}
+
+			coVal := int16(0)
+			cgVal := int16(0)
+			if coIdx < len(coPlane) {
+				coVal = int16(int8(byte(int16(coPlane[coIdx]) << shift)))
+			}
+			if cgIdx < len(cgPlane) {
+				cgVal = int16(int8(byte(int16(cgPlane[cgIdx]) << shift)))
+			}
+
+			rv := yVal + coVal - cgVal
+			gv := yVal + cgVal
+			bv := yVal - coVal - cgVal
+
+			off := outIdx * 4
+			pixels[off+0] = clampByte(bv)
+			pixels[off+1] = clampByte(gv)
+			pixels[off+2] = clampByte(rv)
+			if aPlane != nil && outIdx < len(aPlane) {
+				pixels[off+3] = aPlane[outIdx]
+			} else {
+				pixels[off+3] = 0xFF
+			}
+
+			// Advance chroma pointer (FreeRDP: coplane += chromaSub ? x%2 : 1)
+			if chromaSubsamplingLevel > 0 {
+				coIdx += px % 2
+				cgIdx += px % 2
+			} else {
+				coIdx++
+				cgIdx++
+			}
+		}
+	}
+
+	return pixels
+}
+
+func clampByte(v int16) uint8 {
+	if v < 0 {
+		return 0
+	}
+	if v > 255 {
+		return 255
+	}
+	return uint8(v)
+}
+
+// nscDecompressPlane decompresses a single NSCodec plane.
+// If planeSize == 0, fills with 0xFF. If planeSize >= originalSize, raw copy.
+// Otherwise, uses the NRLE format (matching FreeRDP's nsc_rle_decode).
+func nscDecompressPlane(input []byte, planeSize, originalSize int) []byte {
+	if planeSize == 0 {
+		out := make([]byte, originalSize)
+		for i := range out {
+			out[i] = 0xFF
+		}
+		return out
+	}
+	if planeSize >= originalSize {
+		out := make([]byte, originalSize)
+		copy(out, input[:originalSize])
+		return out
+	}
+	return nrleDecode(input[:planeSize], originalSize)
+}
+
+// nrleDecode decompresses NRLE (NSCodec Run-Length Encoding) data.
+// Matches FreeRDP's nsc_rle_decode exactly:
+//   - 2 consecutive equal bytes trigger a run
+//   - If 3rd byte < 0xFF: run length = byte + 2
+//   - If 3rd byte == 0xFF: run length = next 4 bytes as uint32 LE
+//   - Last 4 bytes of output are copied raw from input
+func nrleDecode(input []byte, originalSize int) []byte {
+	output := make([]byte, originalSize)
+	left := originalSize
+	inPos := 0
+	outPos := 0
+
+	for left > 4 && inPos < len(input) {
+		value := input[inPos]
+		inPos++
+
+		if left == 5 {
+			output[outPos] = value
+			outPos++
+			left--
+		} else if inPos < len(input) && value == input[inPos] {
+			// Run detected
+			inPos++ // skip the second occurrence
+			runLen := 0
+			if inPos < len(input) {
+				if input[inPos] < 0xFF {
+					runLen = int(input[inPos]) + 2
+					inPos++
+				} else {
+					// Long run: skip 0xFF marker, read uint32 LE
+					inPos++
+					if inPos+4 <= len(input) {
+						runLen = int(input[inPos]) |
+							int(input[inPos+1])<<8 |
+							int(input[inPos+2])<<16 |
+							int(input[inPos+3])<<24
+						inPos += 4
+					}
+				}
+			}
+			if runLen > left {
+				runLen = left
+			}
+			for i := 0; i < runLen && outPos < originalSize; i++ {
+				output[outPos] = value
+				outPos++
+			}
+			left -= runLen
+		} else {
+			// Single byte
+			output[outPos] = value
+			outPos++
+			left--
+		}
+	}
+
+	// Copy last 4 bytes raw
+	if left >= 4 && inPos+4 <= len(input) {
+		copy(output[outPos:outPos+4], input[inPos:inPos+4])
+	}
+
+	return output
 }
 
 type FastPathUpdatePointerPDU struct {
@@ -1011,6 +1507,9 @@ func readPDU(r io.Reader) (*PDU, error) {
 	case PDUTYPE_DEACTIVATEALLPDU:
 		slog.Debug("readPDU:PDUTYPE_DEACTIVATEALLPDU")
 		d, err = readDeactiveAllPDU(r)
+	case PDUTYPE_SERVER_REDIR_PKT:
+		slog.Info("readPDU:PDUTYPE_SERVER_REDIR_PKT")
+		d, err = readServerRedirectionPDU(r)
 	default:
 		slog.Error(fmt.Sprintf("PDU invalid pdu type: 0x%02x", pdu.ShareCtrlHeader.PDUType))
 	}

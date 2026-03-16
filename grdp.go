@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/nakagami/grdp/plugin"
+	"github.com/nakagami/grdp/plugin/drdynvc"
+	"github.com/nakagami/grdp/plugin/rdpgfx"
 
 	"github.com/nakagami/grdp/core"
 	"github.com/nakagami/grdp/protocol/nla"
@@ -35,10 +37,11 @@ type RdpClient struct {
 	pdu             *pdu.Client
 	channels        *plugin.Channels
 	eventReady      bool
+	redirecting     bool      // true during async redirect reconnection
 	decompressPool  sync.Pool // pools []uint8 buffers for bitmap decompression
 	flipLinePool    sync.Pool // pools line-sized []uint8 buffers for bitmap vertical flip
-	reconnectMu sync.Mutex
-	closed      bool
+	reconnectMu     sync.Mutex
+	closed          bool
 
 	// credentials stored for reconnection
 	domain   string
@@ -199,12 +202,20 @@ func (g *RdpClient) Login(domain string, user string, password string) error {
 	g.user = user
 	g.password = password
 
+	return g.doLogin(nil)
+}
+
+// doLogin establishes an RDP connection.
+// When routingToken is non-nil it replaces the username cookie in the
+// x224 Connection Request (required for Server Redirection).
+func (g *RdpClient) doLogin(routingToken []byte) error {
 	conn, err := net.DialTimeout("tcp", g.hostPort, 30*time.Second)
 	if err != nil {
 		return fmt.Errorf("[dial err] %v", err)
 	}
 
-	g.tpkt = tpkt.New(core.NewSocketLayer(conn), nla.NewNTLMv2(domain, user, password))
+	host, _, _ := net.SplitHostPort(g.hostPort)
+	g.tpkt = tpkt.New(core.NewSocketLayer(conn, host), nla.NewNTLMv2(g.domain, g.user, g.password))
 	g.x224 = x224.New(g.tpkt)
 	g.mcs = t125.NewMCSClient(g.x224, g.kbdLayout, g.keyboardType, g.keyboardSubType)
 	g.sec = sec.NewClient(g.mcs)
@@ -212,41 +223,143 @@ func (g *RdpClient) Login(domain string, user string, password string) error {
 	g.channels = plugin.NewChannels(g.sec)
 
 	g.mcs.SetClientDesktop(uint16(g.width), uint16(g.height))
-	//clipboard
-	//g.channels.Register(cliprdr.NewCliprdrClient())
-	//g.mcs.SetClientCliprdr()
 
-	//remote app
-	//g.channels.Register(rail.NewClient())
-	//g.mcs.SetClientRemoteProgram()
-	//g.sec.SetAlternateShell("")
+	dvcClient := drdynvc.NewDvcClient()
+	g.channels.Register(dvcClient)
+	g.mcs.SetClientDynvcProtocol()
 
-	//dvc
-	//g.channels.Register(drdynvc.NewDvcClient())
+	// RDPGFX (Graphics Pipeline) handler
+	gfxHandler := rdpgfx.NewGfxHandler(func(updates []rdpgfx.BitmapUpdate) {
+		if g.onBitmapPaintFn == nil {
+			return
+		}
+		bs := make([]Bitmap, len(updates))
+		for i, u := range updates {
+			bs[i] = Bitmap{
+				DestLeft:     u.DestLeft,
+				DestTop:      u.DestTop,
+				DestRight:    u.DestRight,
+				DestBottom:   u.DestBottom,
+				Width:        u.Width,
+				Height:       u.Height,
+				BitsPerPixel: u.Bpp,
+				Data:         u.Data,
+			}
+		}
+		g.onBitmapPaintFn(bs)
+	})
+	dvcClient.RegisterHandler(rdpgfx.ChannelName, gfxHandler)
 
-	g.sec.SetUser(user)
-	g.sec.SetPwd(password)
-	g.sec.SetDomain(domain)
+	g.sec.SetUser(g.user)
+	g.sec.SetPwd(g.password)
+	g.sec.SetDomain(g.domain)
 
 	g.tpkt.SetFastPathListener(g.sec)
 	g.sec.SetFastPathListener(g.pdu)
 	g.sec.SetChannelSender(g.mcs)
 	g.channels.SetChannelSender(g.sec)
-	//g.pdu.SetFastPathSender(g.tpkt)
 
 	g.x224.SetRequestedProtocol(x224.PROTOCOL_SSL | x224.PROTOCOL_HYBRID)
-	g.x224.SetUsername(user)
+	if routingToken != nil {
+		g.x224.SetRoutingToken(routingToken)
+	} else {
+		g.x224.SetUsername(g.user)
+	}
 
 	err = g.x224.Connect()
 	if err != nil {
 		return fmt.Errorf("[x224 connect err] %v", err)
 	}
 
+	// Wait for the RDP handshake to complete or fail.
+	// Events arrive asynchronously from the TPKT read goroutine.
+	type connResult struct {
+		err      error
+		redirect *pdu.ServerRedirectionPDU
+		retry    bool // deactivateAll → need GFX retry
+	}
+
+	ch := make(chan connResult, 4)
+	send := func(r connResult) {
+		select {
+		case ch <- r:
+		default:
+		}
+	}
+
+	// readyFired is set by the "ready" callback. All emitter callbacks
+	// run synchronously on the TPKT read goroutine, so no mutex needed.
+	readyFired := false
+
 	g.pdu.On("ready", func() {
 		g.eventReady = true
+		readyFired = true
+		send(connResult{})
 	})
 
-	return nil
+	g.pdu.On("error", func(err error) {
+		if !readyFired {
+			send(connResult{err: err})
+		}
+	})
+
+	// Redirect may arrive before or after "ready".
+	// Before ready: send to channel for synchronous handling.
+	// After ready: launch async goroutine (GNOME Remote Desktop
+	// sends redirect ~5s after the GFX retry's "ready").
+	g.pdu.Once("redirect", func(redir *pdu.ServerRedirectionPDU) {
+		if !readyFired {
+			send(connResult{redirect: redir})
+		} else {
+			go g.handleRedirect(redir)
+		}
+	})
+
+	select {
+	case r := <-ch:
+		if r.err != nil {
+			g.tpkt.Close()
+			return fmt.Errorf("[connection err] %v", r.err)
+		}
+		if r.retry {
+			slog.Info("Server requires GFX, retrying with GFX flag")
+			g.tpkt.Close()
+			g.eventReady = false
+			time.Sleep(2 * time.Second)
+			return g.doLogin(nil)
+		}
+		if r.redirect != nil {
+			slog.Info("Server redirect", "loadBalanceInfo", string(r.redirect.LoadBalanceInfo))
+			g.tpkt.Close()
+			g.eventReady = false
+			return g.doLogin(r.redirect.LoadBalanceInfo)
+		}
+		// "ready" received — session established.
+		return nil
+	case <-time.After(30 * time.Second):
+		g.tpkt.Close()
+		return fmt.Errorf("[connection timeout]")
+	}
+}
+
+// handleRedirect handles a Server Redirection PDU that arrives after
+// "ready" (e.g. GNOME Remote Desktop). Runs asynchronously.
+func (g *RdpClient) handleRedirect(redir *pdu.ServerRedirectionPDU) {
+	slog.Info("Async server redirect", "loadBalanceInfo", string(redir.LoadBalanceInfo))
+	g.redirecting = true
+	g.tpkt.Close()
+	g.eventReady = false
+
+	err := g.doLogin(redir.LoadBalanceInfo)
+	g.redirecting = false
+	if err != nil {
+		slog.Error("handleRedirect: login failed", "err", err)
+		if g.onErrorFn != nil {
+			g.onErrorFn(err)
+		}
+		return
+	}
+	g.reregisterCallbacks()
 }
 
 func (g *RdpClient) Width() int {
@@ -259,7 +372,11 @@ func (g *RdpClient) Height() int {
 
 func (g *RdpClient) OnError(f func(e error)) *RdpClient {
 	g.onErrorFn = f
-	g.pdu.On("error", f)
+	g.pdu.On("error", func(e error) {
+		if !g.redirecting {
+			f(e)
+		}
+	})
 	return g
 }
 
@@ -292,10 +409,12 @@ func (g *RdpClient) OnBitmap(paint func([]Bitmap)) *RdpClient {
 		var pooled [][]uint8 // track buffers borrowed from pool
 
 		for _, v := range rectangles {
-			IsCompress := v.IsCompress()
 			data := v.BitmapDataStream
 			Bpp := bpp(v.BitsPerPixel)
-			if IsCompress {
+
+			if v.Flags&pdu.BITMAP_NO_PROCESSING != 0 {
+				// Surface command: data is already decoded top-down BGRA
+			} else if v.IsCompress() {
 				buf := g.decompressPool.Get().([]uint8)
 				buf = core.DecompressInto(v.BitmapDataStream, buf, int(v.Width), int(v.Height), Bpp)
 				data = buf
@@ -354,6 +473,9 @@ func (g *RdpClient) OnPointerUpdate(f func(uint16, uint16, uint16, uint16, uint1
 }
 
 func (g *RdpClient) KeyUp(sc int) {
+	if !g.eventReady {
+		return
+	}
 	slog.Debug("KeyUp", "sc", sc)
 
 	p := &pdu.ScancodeKeyEvent{}
@@ -363,6 +485,9 @@ func (g *RdpClient) KeyUp(sc int) {
 }
 
 func (g *RdpClient) KeyDown(sc int) {
+	if !g.eventReady {
+		return
+	}
 	slog.Debug("KeyDown", "sc", sc)
 
 	p := &pdu.ScancodeKeyEvent{}
@@ -371,6 +496,9 @@ func (g *RdpClient) KeyDown(sc int) {
 }
 
 func (g *RdpClient) MouseMove(x, y int) {
+	if !g.eventReady {
+		return
+	}
 	//slog.Debug("MouseMove", "x", x, "y", y)
 	p := &pdu.PointerEvent{}
 	p.PointerFlags |= pdu.PTRFLAGS_MOVE
@@ -380,6 +508,9 @@ func (g *RdpClient) MouseMove(x, y int) {
 }
 
 func (g *RdpClient) MouseWheel(scroll int) {
+	if !g.eventReady {
+		return
+	}
 	slog.Debug("MouseWheel")
 	p := &pdu.PointerEvent{}
 	p.PointerFlags |= pdu.PTRFLAGS_WHEEL
@@ -392,6 +523,9 @@ func (g *RdpClient) MouseWheel(scroll int) {
 }
 
 func (g *RdpClient) MouseUp(button int, x, y int) {
+	if !g.eventReady {
+		return
+	}
 	slog.Debug("MouseUp", "x", x, "y", y, "button", button)
 	p := &pdu.PointerEvent{}
 
@@ -412,6 +546,9 @@ func (g *RdpClient) MouseUp(button int, x, y int) {
 }
 
 func (g *RdpClient) MouseDown(button int, x, y int) {
+	if !g.eventReady {
+		return
+	}
 	slog.Debug("MouseDown", "x", x, "y", y, "button", button)
 	p := &pdu.PointerEvent{}
 
@@ -433,10 +570,6 @@ func (g *RdpClient) MouseDown(button int, x, y int) {
 	g.pdu.SendInputEvents(pdu.INPUT_EVENT_MOUSE, []pdu.InputEventsInterface{p})
 }
 
-// Reconnect closes the current RDP session and re-establishes a new connection
-// with the specified screen dimensions. All previously registered callbacks are
-// automatically re-registered on the new session.
-// This is intended to be called when the GUI window is resized.
 func (g *RdpClient) Reconnect(width, height int) error {
 	g.reconnectMu.Lock()
 	defer g.reconnectMu.Unlock()
@@ -469,46 +602,9 @@ func (g *RdpClient) Reconnect(width, height int) error {
 			return fmt.Errorf("[reconnect err] %v", err)
 		}
 
-		// Re-register user callbacks on the new protocol objects so that
-		// the "ready" / "error" events reach the caller's handlers.
 		g.reregisterCallbacks()
-
-		// Wait for the full RDP handshake (MCS, SEC, PDU capability
-		// exchange) to complete before declaring success.
-		result := make(chan error, 1)
-		g.pdu.Once("ready", func() {
-			select {
-			case result <- nil:
-			default:
-			}
-		})
-		g.pdu.Once("error", func(err error) {
-			select {
-			case result <- err:
-			default:
-			}
-		})
-
-		select {
-		case err := <-result:
-			if err == nil {
-				slog.Info("Reconnect: succeeded", "attempt", attempt)
-				return nil
-			}
-			slog.Warn("Reconnect: handshake failed", "attempt", attempt, "err", err)
-			g.closeLocked()
-			if attempt < maxRetries {
-				continue
-			}
-			return fmt.Errorf("[reconnect handshake err] %v", err)
-		case <-time.After(30 * time.Second):
-			slog.Warn("Reconnect: timed out", "attempt", attempt)
-			g.closeLocked()
-			if attempt < maxRetries {
-				continue
-			}
-			return fmt.Errorf("[reconnect timeout]")
-		}
+		slog.Info("Reconnect: succeeded", "attempt", attempt)
+		return nil
 	}
 
 	return fmt.Errorf("[reconnect failed after %d attempts]", maxRetries)

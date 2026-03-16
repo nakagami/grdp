@@ -5,20 +5,27 @@ import (
 	"crypto/tls"
 	"encoding/asn1"
 	"errors"
+	"log/slog"
 	"math/big"
 	"net"
 	"time"
 )
 
 type SocketLayer struct {
-	conn    net.Conn
-	tlsConn *tls.Conn
+	conn       net.Conn
+	tlsConn    *tls.Conn
+	serverName string
 }
 
-func NewSocketLayer(conn net.Conn) *SocketLayer {
+func NewSocketLayer(conn net.Conn, serverName string) *SocketLayer {
+	// Disable Nagle's algorithm so small DVC responses are sent immediately.
+	if tc, ok := conn.(*net.TCPConn); ok {
+		tc.SetNoDelay(true)
+	}
 	l := &SocketLayer{
-		conn:    conn,
-		tlsConn: nil,
+		conn:       conn,
+		tlsConn:    nil,
+		serverName: serverName,
 	}
 	return l
 }
@@ -36,9 +43,12 @@ func (s *SocketLayer) Read(b []byte) (n int, err error) {
 
 func (s *SocketLayer) Write(b []byte) (n int, err error) {
 	if s.tlsConn != nil {
-		return s.tlsConn.Write(b)
+		n, err = s.tlsConn.Write(b)
+	} else {
+		n, err = s.conn.Write(b)
 	}
-	return s.conn.Write(b)
+	slog.Debug("socket Write", "n", n, "len", len(b), "err", err)
+	return
 }
 
 func (s *SocketLayer) Close() error {
@@ -51,6 +61,7 @@ func (s *SocketLayer) Close() error {
 func (s *SocketLayer) StartTLS() error {
 	config := &tls.Config{
 		InsecureSkipVerify: true,
+		ServerName:         s.serverName,
 		MinVersion:         tls.VersionTLS12,
 		MaxVersion:         tls.VersionTLS12,
 		//		MaxVersion:               tls.VersionTLS13,

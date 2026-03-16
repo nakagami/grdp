@@ -182,6 +182,7 @@ type X224 struct {
 	selectedProtocol  uint32
 	dataHeader        *DataHeader
 	username          string
+	routingToken      []byte
 }
 
 func New(t core.Transport) *X224 {
@@ -229,15 +230,31 @@ func (x *X224) SetUsername(username string) {
 	x.username = username
 }
 
+func (x *X224) SetRoutingToken(token []byte) {
+	x.routingToken = token
+}
+
 func (x *X224) Connect() error {
 	if x.transport == nil {
 		return errors.New("no transport")
 	}
-	name := x.username
-	if name == "" {
-		name = "test"
+
+	var cookie string
+	if len(x.routingToken) > 0 {
+		// Use server-provided routing token (strip trailing \r\n if present)
+		tok := x.routingToken
+		if len(tok) >= 2 && tok[len(tok)-2] == 0x0D && tok[len(tok)-1] == 0x0A {
+			tok = tok[:len(tok)-2]
+		}
+		cookie = string(tok)
+	} else {
+		name := x.username
+		if name == "" {
+			name = "test"
+		}
+		cookie = "Cookie: mstshash=" + name
 	}
-	cookie := "Cookie: mstshash=" + name
+
 	message := NewClientConnectionRequestPDU([]byte(cookie), x.requestedProtocol)
 	message.ProtocolNeg.Type = TYPE_RDP_NEG_REQ
 	message.ProtocolNeg.Result = uint32(x.requestedProtocol)

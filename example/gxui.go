@@ -80,9 +80,10 @@ func appMain(driver gxui.Driver) {
 	keyboardType := os.Getenv("GRDP_KEYBOARD_TYPE")
 	keyboardLayout := os.Getenv("GRDP_KEYBOARD_LAYOUT")
 
-	err, rdpClient := uiRdp(hostPort, domain, user, password, width, height, keyboardType, keyboardLayout)
+	err, rdpClient = uiRdp(hostPort, domain, user, password, width, height, keyboardType, keyboardLayout)
 	if err != nil {
 		fmt.Println(err.Error())
+		driver.Terminate()
 		return
 	}
 
