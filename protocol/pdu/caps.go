@@ -595,6 +595,65 @@ func (*BitmapCodecsCapability) Type() CapsType {
 	return CAPSETTYPE_BITMAP_CODECS
 }
 
+// GUIDs for well-known bitmap codecs (wire byte order: LE for first three groups)
+var (
+	guidNSCodec  = [16]byte{0xB9, 0x1B, 0x8D, 0xCA, 0x0F, 0x00, 0x4F, 0x15, 0x58, 0x9F, 0xAE, 0x2D, 0x1A, 0x87, 0xE2, 0xD6}
+	guidRemoteFX = [16]byte{0x12, 0x2F, 0x77, 0x76, 0x72, 0xBD, 0x63, 0x44, 0xAF, 0xB3, 0xB7, 0x3C, 0x9C, 0x6F, 0x78, 0x86}
+)
+
+// buildRemoteFxProperties constructs the TS_RFX_CLNT_CAPS_CONTAINER (MS-RDPRFX 2.2.1.1).
+func buildRemoteFxProperties() []byte {
+	b := &bytes.Buffer{}
+	// TS_RFX_CLNT_CAPS_CONTAINER
+	core.WriteUInt32LE(0x29, b) // length = 41 (includes this field)
+	core.WriteUInt32LE(0, b)    // captureFlags
+	core.WriteUInt32LE(0x1D, b) // capsLength = 29
+
+	// TS_RFX_CAPS
+	core.WriteUInt16LE(0xCBC0, b) // blockType = CBY_CAPS
+	core.WriteUInt32LE(0x08, b)   // blockLen
+	core.WriteUInt16LE(0x01, b)   // numCapsets
+
+	// TS_RFX_CAPSET
+	core.WriteUInt16LE(0xCBC1, b) // blockType = CBY_CAPSET
+	core.WriteUInt32LE(0x15, b)   // blockLen = 21
+	core.WriteUInt8(0x01, b)      // codecId
+	core.WriteUInt16LE(0xCFC0, b) // capsetType = CLY_CAPSET
+	core.WriteUInt16LE(0x01, b)   // numIcaps
+	core.WriteUInt16LE(0x08, b)   // icapLen
+
+	// TS_RFX_ICAP
+	core.WriteUInt16LE(0x0100, b) // version
+	core.WriteUInt16LE(0x0040, b) // tileSize = 64
+	core.WriteUInt8(0x01, b)      // flags = VIDEOMODE
+	core.WriteUInt8(0x01, b)      // colConvBits
+	core.WriteUInt8(0x01, b)      // transformBits
+	core.WriteUInt8(0x04, b)      // entropyBits = RLGR3
+
+	return b.Bytes()
+}
+
+// newClientBitmapCodecsCapability returns a BitmapCodecsCapability with
+// NSCodec (ID=1) and RemoteFX (ID=3) entries, matching what FreeRDP advertises.
+func newClientBitmapCodecsCapability() *BitmapCodecsCapability {
+	return &BitmapCodecsCapability{
+		SupportedBitmapCodecs: BitmapCodecS{
+			Array: []BitmapCodec{
+				{
+					GUID:       guidNSCodec,
+					ID:         1,
+					Properties: []byte{1, 1, 3}, // fAllowDynamicFidelity, fAllowSubsampling, colorLossLevel
+				},
+				{
+					GUID:       guidRemoteFX,
+					ID:         3,
+					Properties: buildRemoteFxProperties(),
+				},
+			},
+		},
+	}
+}
+
 // see https://docs.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/fc05c385-46c3-42cb-9ed2-c475a3990e0b
 type BitmapCacheHostSupportCapability struct {
 	CacheVersion uint8
