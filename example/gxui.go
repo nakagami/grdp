@@ -63,6 +63,14 @@ func uiRdp(hostPort, domain, user, password string, width, height int, keyboardT
 	}).OnPointerUpdate(func(idx uint16, bpp uint16, x uint16, y uint16, width uint16, height uint16, mask []byte, data []byte) {
 		slog.Info("on pointer_update", "idx", idx)
 	}).OnBitmap(func(bs []grdp.Bitmap) {
+		// Bitmap.Data for compressed bitmaps is borrowed from an internal
+		// pool and only valid for the duration of this callback.  Copy the
+		// pixel data before sending it to the asynchronous paint goroutine.
+		for i := range bs {
+			d := make([]byte, len(bs[i].Data))
+			copy(d, bs[i].Data)
+			bs[i].Data = d
+		}
 		bitmapCH <- bs
 	})
 
