@@ -42,7 +42,6 @@ type RdpClient struct {
 	flipLinePool    sync.Pool // pools line-sized []uint8 buffers for bitmap vertical flip
 	reconnectMu     sync.Mutex
 	closed          bool
-	disableGfx      bool // when true, skip DVC/RDPGFX and revert capabilities
 
 	// credentials stored for reconnection
 	domain   string
@@ -176,14 +175,6 @@ func (g *RdpClient) SetKeyboardType(keyboardType string) {
 	}
 }
 
-// DisableGfx disables the Dynamic Virtual Channel (DVC) and RDPGFX
-// Graphics Pipeline, and reverts capabilities to the v0.3.9 baseline.
-// Call this before Login when connecting to servers that do not properly
-// support DVC (e.g. VirtualBox).
-func (g *RdpClient) DisableGfx() {
-	g.disableGfx = true
-}
-
 func bpp(BitsPerPixel uint16) (pixel int) {
 	switch BitsPerPixel {
 	case 15:
@@ -233,35 +224,31 @@ func (g *RdpClient) doLogin(routingToken []byte) error {
 
 	g.mcs.SetClientDesktop(uint16(g.width), uint16(g.height))
 
-	if g.disableGfx {
-		g.pdu.DisableGfx()
-	} else {
-		dvcClient := drdynvc.NewDvcClient()
-		g.channels.Register(dvcClient)
-		g.mcs.SetClientDynvcProtocol()
+	dvcClient := drdynvc.NewDvcClient()
+	g.channels.Register(dvcClient)
+	g.mcs.SetClientDynvcProtocol()
 
-		// RDPGFX (Graphics Pipeline) handler
-		gfxHandler := rdpgfx.NewGfxHandler(func(updates []rdpgfx.BitmapUpdate) {
-			if g.onBitmapPaintFn == nil {
-				return
+	// RDPGFX (Graphics Pipeline) handler
+	gfxHandler := rdpgfx.NewGfxHandler(func(updates []rdpgfx.BitmapUpdate) {
+		if g.onBitmapPaintFn == nil {
+			return
+		}
+		bs := make([]Bitmap, len(updates))
+		for i, u := range updates {
+			bs[i] = Bitmap{
+				DestLeft:     u.DestLeft,
+				DestTop:      u.DestTop,
+				DestRight:    u.DestRight,
+				DestBottom:   u.DestBottom,
+				Width:        u.Width,
+				Height:       u.Height,
+				BitsPerPixel: u.Bpp,
+				Data:         u.Data,
 			}
-			bs := make([]Bitmap, len(updates))
-			for i, u := range updates {
-				bs[i] = Bitmap{
-					DestLeft:     u.DestLeft,
-					DestTop:      u.DestTop,
-					DestRight:    u.DestRight,
-					DestBottom:   u.DestBottom,
-					Width:        u.Width,
-					Height:       u.Height,
-					BitsPerPixel: u.Bpp,
-					Data:         u.Data,
-				}
-			}
-			g.onBitmapPaintFn(bs)
-		})
-		dvcClient.RegisterHandler(rdpgfx.ChannelName, gfxHandler)
-	}
+		}
+		g.onBitmapPaintFn(bs)
+	})
+	dvcClient.RegisterHandler(rdpgfx.ChannelName, gfxHandler)
 
 	g.sec.SetUser(g.user)
 	g.sec.SetPwd(g.password)

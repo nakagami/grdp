@@ -415,10 +415,10 @@ func readDeactiveAllPDU(r io.Reader) (*DeactiveAllPDU, error) {
 // (MS-RDPBCGR 2.2.13.2.1). Only the LoadBalanceInfo field (routing
 // token) is extracted; other optional fields are skipped.
 type ServerRedirectionPDU struct {
-	Flags          uint16
-	Length         uint16
-	SessionID      uint32
-	RedirFlags     uint32
+	Flags           uint16
+	Length          uint16
+	SessionID       uint32
+	RedirFlags      uint32
 	LoadBalanceInfo []byte
 }
 
@@ -722,12 +722,12 @@ func (d *FontMapDataPDU) Unpack(r io.Reader) error {
 // SuppressOutputPDU tells the server to start/stop sending display updates.
 // MS-RDPBCGR 2.2.11.3.1
 type SuppressOutputPDU struct {
-	AllowDisplayUpdates uint8    `struc:"little"`
-	Pad3Octets          [3]byte  `struc:"little"`
-	Left                uint16   `struc:"little"`
-	Top                 uint16   `struc:"little"`
-	Right               uint16   `struc:"little"`
-	Bottom              uint16   `struc:"little"`
+	AllowDisplayUpdates uint8   `struc:"little"`
+	Pad3Octets          [3]byte `struc:"little"`
+	Left                uint16  `struc:"little"`
+	Top                 uint16  `struc:"little"`
+	Right               uint16  `struc:"little"`
+	Bottom              uint16  `struc:"little"`
 }
 
 func (*SuppressOutputPDU) Type2() uint8 {
@@ -752,12 +752,12 @@ func (d *FrameAcknowledgeDataPDU) Unpack(r io.Reader) error {
 // RefreshRectPDU requests the server to redraw one or more screen regions.
 // MS-RDPBCGR 2.2.11.2
 type RefreshRectPDU struct {
-	NumberOfAreas uint8    `struc:"little"`
-	Pad3Octets    [3]byte  `struc:"little"`
-	Left          uint16   `struc:"little"`
-	Top           uint16   `struc:"little"`
-	Right         uint16   `struc:"little"`
-	Bottom        uint16   `struc:"little"`
+	NumberOfAreas uint8   `struc:"little"`
+	Pad3Octets    [3]byte `struc:"little"`
+	Left          uint16  `struc:"little"`
+	Top           uint16  `struc:"little"`
+	Right         uint16  `struc:"little"`
+	Bottom        uint16  `struc:"little"`
 }
 
 func (*RefreshRectPDU) Type2() uint8 {
@@ -1163,7 +1163,7 @@ func decodeNSCodec(data []byte, width, height int) []byte {
 	// Compute plane original (decompressed) sizes, matching FreeRDP:
 	// Y and A: tempWidth * height (Y uses rounded width for row stride)
 	// Co and Cg: (tempWidth>>1) * (tempHeight>>1) when chroma subsampled
-	tempWidth := (width + 7) &^ 7  // ROUND_UP_TO(width, 8)
+	tempWidth := (width + 7) &^ 7   // ROUND_UP_TO(width, 8)
 	tempHeight := (height + 1) &^ 1 // ROUND_UP_TO(height, 2)
 
 	var yOrigSize, coOrigSize, cgOrigSize, aOrigSize int

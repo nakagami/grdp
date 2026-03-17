@@ -145,7 +145,6 @@ type Client struct {
 	*PDULayer
 	clientCoreData *gcc.ClientCoreData
 	buff           *bytes.Buffer
-	gfxDisabled    bool
 }
 
 func NewClient(t core.Transport) *Client {
@@ -155,15 +154,6 @@ func NewClient(t core.Transport) *Client {
 	}
 	c.transport.Once("connect", c.connect)
 	return c
-}
-
-// DisableGfx reverts capabilities to the v0.3.9 baseline so that servers
-// without full GFX/DVC support (e.g. VirtualBox) work correctly.
-func (c *Client) DisableGfx() {
-	c.gfxDisabled = true
-	c.clientCapabilities[CAPSETTYPE_BITMAP_CODECS] = &BitmapCodecsCapability{}
-	c.clientCapabilities[CAPSETTYPE_MULTIFRAGMENTUPDATE] = &MultiFragmentUpdate{65535}
-	delete(c.clientCapabilities, CAPSETTYPE_COMPDESK)
 }
 
 func (c *Client) connect(data *gcc.ClientCoreData, userId uint16, channelId uint16) {
@@ -218,20 +208,11 @@ func (c *Client) sendConfirmActivePDU() {
 	generalCapa.OSMinorType = OSMINORTYPE_WINDOWS_NT
 	generalCapa.ExtraFlags = LONG_CREDENTIALS_SUPPORTED | NO_BITMAP_COMPRESSION_HDR |
 		FASTPATH_OUTPUT_SUPPORTED | AUTORECONNECT_SUPPORTED
-	if c.gfxDisabled {
-		generalCapa.RefreshRectSupport = 0
-		generalCapa.SuppressOutputSupport = 0
-	} else {
-		generalCapa.RefreshRectSupport = 1
-		generalCapa.SuppressOutputSupport = 1
-	}
+	generalCapa.RefreshRectSupport = 1
+	generalCapa.SuppressOutputSupport = 1
 
 	bitmapCapa := c.clientCapabilities[CAPSTYPE_BITMAP].(*BitmapCapability)
-	if c.gfxDisabled {
-		bitmapCapa.PreferredBitsPerPixel = c.clientCoreData.HighColorDepth
-	} else {
-		bitmapCapa.PreferredBitsPerPixel = 32
-	}
+	bitmapCapa.PreferredBitsPerPixel = 32
 	bitmapCapa.DesktopWidth = c.clientCoreData.DesktopWidth
 	bitmapCapa.DesktopHeight = c.clientCoreData.DesktopHeight
 	bitmapCapa.DesktopResizeFlag = 0x0001
@@ -396,15 +377,13 @@ func (c *Client) recvServerFontMapPDU(s []byte) {
 	}
 	c.transport.On("data", c.recvPDU)
 
-	if !c.gfxDisabled {
-		// Tell the server we're ready to receive display updates (MS-RDPBCGR 2.2.11.3.1)
-		slog.Info("Sending SuppressOutput (ALLOW_DISPLAY_UPDATES)")
-		c.sendDataPDU(&SuppressOutputPDU{
-			AllowDisplayUpdates: 1,
-			Right:               c.clientCoreData.DesktopWidth - 1,
-			Bottom:              c.clientCoreData.DesktopHeight - 1,
-		})
-	}
+	// Tell the server we're ready to receive display updates (MS-RDPBCGR 2.2.11.3.1)
+	slog.Info("Sending SuppressOutput (ALLOW_DISPLAY_UPDATES)")
+	c.sendDataPDU(&SuppressOutputPDU{
+		AllowDisplayUpdates: 1,
+		Right:               c.clientCoreData.DesktopWidth - 1,
+		Bottom:              c.clientCoreData.DesktopHeight - 1,
+	})
 
 	c.Emit("ready")
 }
