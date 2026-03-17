@@ -30,7 +30,7 @@ var (
 	resizeTimer            *time.Timer
 )
 
-func uiRdp(hostPort, domain, user, password string, width, height int, keyboardType, keyboardLayout string, disableGfx bool) (error, *grdp.RdpClient) {
+func uiRdp(hostPort, domain, user, password string, width, height int, keyboardType, keyboardLayout string) (error, *grdp.RdpClient) {
 	bitmapCH = make(chan []grdp.Bitmap, 500)
 	g := grdp.NewRdpClient(hostPort, width, height)
 	if keyboardType != "" {
@@ -38,9 +38,6 @@ func uiRdp(hostPort, domain, user, password string, width, height int, keyboardT
 	}
 	if keyboardLayout != "" {
 		g.SetKeyboardLayout(keyboardLayout)
-	}
-	if disableGfx {
-		g.DisableGfx()
 	}
 	err := g.Login(domain, user, password)
 	if err != nil {
@@ -90,9 +87,8 @@ func appMain(driver gxui.Driver) {
 	}
 	keyboardType := os.Getenv("GRDP_KEYBOARD_TYPE")
 	keyboardLayout := os.Getenv("GRDP_KEYBOARD_LAYOUT")
-	disableGfx := os.Getenv("GRDP_DISABLE_GFX") != ""
 
-	err, rdpClient = uiRdp(hostPort, domain, user, password, width, height, keyboardType, keyboardLayout, disableGfx)
+	err, rdpClient = uiRdp(hostPort, domain, user, password, width, height, keyboardType, keyboardLayout)
 	if err != nil {
 		fmt.Println(err.Error())
 		driver.Terminate()
