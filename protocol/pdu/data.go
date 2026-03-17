@@ -710,7 +710,13 @@ func (*FontMapDataPDU) Type2() uint8 {
 	return PDUTYPE2_FONTMAP
 }
 func (d *FontMapDataPDU) Unpack(r io.Reader) error {
-	return struc.Unpack(r, d)
+	err := struc.Unpack(r, d)
+	// MS-RDPBCGR 2.2.1.22.1: Font Map payload fields are optional.
+	// VirtualBox sends a short FontMap PDU with no payload data.
+	if err == io.EOF || err == io.ErrUnexpectedEOF {
+		return nil
+	}
+	return err
 }
 
 // SuppressOutputPDU tells the server to start/stop sending display updates.
