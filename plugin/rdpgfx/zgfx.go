@@ -102,18 +102,52 @@ func (z *zgfxContext) outputMatch(distance, length int, out *[]byte) {
 	if srcIdx < 0 {
 		srcIdx += zgfxHistorySize
 	}
-	for i := 0; i < length; i++ {
-		b := z.history[srcIdx%zgfxHistorySize]
-		z.outputByte(b, out)
-		srcIdx++
+
+	// Grow output slice once instead of per-byte append
+	o := *out
+	need := len(o) + length
+	if need > cap(o) {
+		newBuf := make([]byte, len(o), need+(need>>1))
+		copy(newBuf, o)
+		o = newBuf
 	}
+	o = o[:need]
+	dst := need - length
+
+	// Batch copy from history, handling wrap-around with larger chunks
+	for length > 0 {
+		end := srcIdx + length
+		if end > zgfxHistorySize {
+			end = zgfxHistorySize
+		}
+		n := end - srcIdx
+		// Copy chunk to output
+		copy(o[dst:dst+n], z.history[srcIdx:end])
+		// Update history ring buffer
+		histEnd := z.historyIdx + n
+		if histEnd <= zgfxHistorySize {
+			copy(z.history[z.historyIdx:histEnd], z.history[srcIdx:end])
+			z.historyIdx = histEnd % zgfxHistorySize
+		} else {
+			// History write wraps around
+			first := zgfxHistorySize - z.historyIdx
+			copy(z.history[z.historyIdx:zgfxHistorySize], z.history[srcIdx:srcIdx+first])
+			copy(z.history[0:n-first], z.history[srcIdx+first:end])
+			z.historyIdx = n - first
+		}
+		dst += n
+		srcIdx = end % zgfxHistorySize
+		length -= n
+	}
+	*out = o
 }
 
 // Decompress decompresses a ZGFX segment (after the 1-byte flag).
 // The flag byte has already been checked (0x04 = RDP8 compressed).
 func (z *zgfxContext) Decompress(data []byte) []byte {
 	br := newBitReader(data)
-	var out []byte
+	// Pre-allocate: compressed data typically expands 2-4x
+	out := make([]byte, 0, len(data)*3)
 
 	for br.hasMore() {
 		// Decode Huffman token
