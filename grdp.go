@@ -12,6 +12,7 @@ import (
 	"github.com/nakagami/grdp/plugin"
 	"github.com/nakagami/grdp/plugin/drdynvc"
 	"github.com/nakagami/grdp/plugin/rdpgfx"
+	"github.com/nakagami/grdp/plugin/rdpsnd"
 
 	"github.com/nakagami/grdp/core"
 	"github.com/nakagami/grdp/protocol/nla"
@@ -22,6 +23,18 @@ import (
 	"github.com/nakagami/grdp/protocol/tpkt"
 	"github.com/nakagami/grdp/protocol/x224"
 )
+
+// stubChannel is a no-op virtual channel handler for channels the server
+// expects to be present (e.g. rdpdr, cliprdr) but that we don't process.
+type stubChannel struct {
+	name   string
+	option uint32
+	sender core.ChannelSender
+}
+
+func (s *stubChannel) GetType() (string, uint32) { return s.name, s.option }
+func (s *stubChannel) Sender(f core.ChannelSender) { s.sender = f }
+func (s *stubChannel) Process(data []byte)          {}
 
 type RdpClient struct {
 	hostPort        string // ip:port
@@ -57,6 +70,7 @@ type RdpClient struct {
 	onPointerHideFn   func()
 	onPointerCachedFn func(uint16)
 	onPointerUpdateFn func(uint16, uint16, uint16, uint16, uint16, uint16, []byte, []byte)
+	onAudioFn         func(rdpsnd.AudioFormat, []byte)
 }
 
 type Bitmap struct {
@@ -224,6 +238,29 @@ func (g *RdpClient) doLogin(routingToken []byte) error {
 
 	g.mcs.SetClientDesktop(uint16(g.width), uint16(g.height))
 
+	// Register channels in order: rdpdr, rdpsnd, cliprdr, drdynvc
+	// (matching the channel order that Windows servers expect)
+
+	// rdpdr (Device Redirection) — stub, required for server to enable audio
+	g.channels.Register(&stubChannel{name: "rdpdr",
+		option: plugin.CHANNEL_OPTION_INITIALIZED | plugin.CHANNEL_OPTION_ENCRYPT_RDP | plugin.CHANNEL_OPTION_COMPRESS_RDP})
+	g.mcs.SetClientDeviceRedirection()
+
+	// RDPSND (Audio Output) handler — static virtual channel + DVC paths
+	rdpsndHandler := rdpsnd.NewHandler(func(format rdpsnd.AudioFormat, data []byte) {
+		if g.onAudioFn != nil {
+			g.onAudioFn(format, data)
+		}
+	})
+	g.channels.Register(rdpsndHandler)
+	g.mcs.SetClientSoundProtocol()
+
+	// cliprdr (Clipboard) — stub, required for server to enable audio
+	g.channels.Register(&stubChannel{name: "cliprdr",
+		option: plugin.CHANNEL_OPTION_INITIALIZED | plugin.CHANNEL_OPTION_ENCRYPT_RDP | plugin.CHANNEL_OPTION_COMPRESS_RDP})
+	g.mcs.SetClientClipboard()
+
+	// drdynvc (Dynamic Virtual Channels)
 	dvcClient := drdynvc.NewDvcClient()
 	g.channels.Register(dvcClient)
 	g.mcs.SetClientDynvcProtocol()
@@ -249,6 +286,11 @@ func (g *RdpClient) doLogin(routingToken []byte) error {
 		g.onBitmapPaintFn(bs)
 	})
 	dvcClient.RegisterHandler(rdpgfx.ChannelName, gfxHandler)
+
+	// Also register DVC audio channels so servers that use DVC for audio work too
+	// Each channel gets its own adapter so responses go to the correct DVC channel
+	dvcClient.RegisterHandler("AUDIO_PLAYBACK_DVC", rdpsnd.NewDvcAdapter(rdpsndHandler))
+	dvcClient.RegisterHandler("AUDIO_PLAYBACK_LOSSY_DVC", rdpsnd.NewDvcAdapter(rdpsndHandler))
 
 	g.sec.SetUser(g.user)
 	g.sec.SetPwd(g.password)
@@ -469,6 +511,14 @@ func (g *RdpClient) OnPointerUpdate(f func(uint16, uint16, uint16, uint16, uint1
 	g.pdu.On("pointer_update", func(p *pdu.FastPathUpdatePointerPDU) {
 		f(p.CacheIdx, p.XorBpp, p.X, p.Y, p.Width, p.Height, p.Mask, p.Data)
 	})
+	return g
+}
+
+// OnAudio registers a callback for server audio data.
+// The callback receives the AudioFormat describing the PCM data and the raw audio bytes.
+// Must be called before Login.
+func (g *RdpClient) OnAudio(f func(rdpsnd.AudioFormat, []byte)) *RdpClient {
+	g.onAudioFn = f
 	return g
 }
 

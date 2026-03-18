@@ -2,22 +2,73 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"image"
 	"image/draw"
+	"io"
 	"log/slog"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/ebitengine/oto/v3"
 	"github.com/google/gxui"
 	"github.com/google/gxui/drivers/gl"
 	"github.com/google/gxui/samples/flags"
 	"github.com/google/gxui/themes/light"
 
 	"github.com/nakagami/grdp"
+	"github.com/nakagami/grdp/plugin/rdpsnd"
 )
+
+// audioStream is a thread-safe buffer that bridges the RDPSND OnAudio
+// callback (producer) and the oto audio player (consumer).
+type audioStream struct {
+	mu     sync.Mutex
+	cond   *sync.Cond
+	buf    bytes.Buffer
+	closed bool
+}
+
+const maxAudioBuf = 1 << 20 // 1MB ≈ 6s of PCM 44100Hz/2ch/16bit
+
+func newAudioStream() *audioStream {
+	s := &audioStream{}
+	s.cond = sync.NewCond(&s.mu)
+	return s
+}
+
+func (s *audioStream) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	if s.buf.Len() > maxAudioBuf {
+		s.buf.Reset()
+	}
+	n, err := s.buf.Write(p)
+	s.mu.Unlock()
+	s.cond.Signal()
+	return n, err
+}
+
+func (s *audioStream) Read(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for s.buf.Len() == 0 && !s.closed {
+		s.cond.Wait()
+	}
+	if s.buf.Len() == 0 && s.closed {
+		return 0, io.EOF
+	}
+	return s.buf.Read(p)
+}
+
+func (s *audioStream) Close() {
+	s.mu.Lock()
+	s.closed = true
+	s.mu.Unlock()
+	s.cond.Broadcast()
+}
 
 var (
 	rdpClient              *grdp.RdpClient
@@ -28,6 +79,7 @@ var (
 	bitmapCH               chan []grdp.Bitmap
 	lastMouseX, lastMouseY int
 	resizeTimer            *time.Timer
+	audioStr               *audioStream
 )
 
 func uiRdp(hostPort, domain, user, password string, width, height int, keyboardType, keyboardLayout string) (error, *grdp.RdpClient) {
@@ -39,6 +91,11 @@ func uiRdp(hostPort, domain, user, password string, width, height int, keyboardT
 	if keyboardLayout != "" {
 		g.SetKeyboardLayout(keyboardLayout)
 	}
+
+	g.OnAudio(func(af rdpsnd.AudioFormat, data []byte) {
+		audioStr.Write(data)
+	})
+
 	err := g.Login(domain, user, password)
 	if err != nil {
 		slog.Error("Login", "err", err)
@@ -88,11 +145,29 @@ func appMain(driver gxui.Driver) {
 	keyboardType := os.Getenv("GRDP_KEYBOARD_TYPE")
 	keyboardLayout := os.Getenv("GRDP_KEYBOARD_LAYOUT")
 
+	audioStr = newAudioStream()
+
 	err, rdpClient = uiRdp(hostPort, domain, user, password, width, height, keyboardType, keyboardLayout)
 	if err != nil {
 		fmt.Println(err.Error())
 		driver.Terminate()
 		return
+	}
+
+	// Initialize audio output (PCM 44100Hz stereo 16-bit)
+	otoOp := &oto.NewContextOptions{
+		SampleRate:   44100,
+		ChannelCount: 2,
+		Format:       oto.FormatSignedInt16LE,
+	}
+	otoCtx, readyCh, otoErr := oto.NewContext(otoOp)
+	if otoErr != nil {
+		slog.Error("Audio output init failed", "err", otoErr)
+	} else {
+		<-readyCh
+		player := otoCtx.NewPlayer(audioStr)
+		player.Play()
+		slog.Info("Audio output initialized")
 	}
 
 	theme := light.CreateTheme(driver)
@@ -156,6 +231,9 @@ func appMain(driver gxui.Driver) {
 	window.OnClose(func() {
 		if resizeTimer != nil {
 			resizeTimer.Stop()
+		}
+		if audioStr != nil {
+			audioStr.Close()
 		}
 		if rdpClient != nil {
 			rdpClient.Close()

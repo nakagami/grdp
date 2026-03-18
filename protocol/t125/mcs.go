@@ -12,6 +12,7 @@ import (
 	//	"github.com/nakagami/grdp/plugin/cliprdr"
 	"github.com/nakagami/grdp/plugin/drdynvc"
 	"github.com/nakagami/grdp/plugin/rail"
+	"github.com/nakagami/grdp/plugin/rdpsnd"
 
 	"github.com/nakagami/grdp/core"
 	"github.com/nakagami/grdp/emission"
@@ -288,6 +289,20 @@ func (c *MCSClient) SetClientDynvcProtocol() {
 
 func (c *MCSClient) SetClientRemoteProgram() {
 	c.clientNetworkData.AddVirtualChannel(rail.ChannelName, rail.ChannelOption)
+}
+
+func (c *MCSClient) SetClientSoundProtocol() {
+	c.clientNetworkData.AddVirtualChannel(rdpsnd.ChannelName, rdpsnd.ChannelOption)
+}
+
+func (c *MCSClient) SetClientDeviceRedirection() {
+	c.clientNetworkData.AddVirtualChannel("rdpdr",
+		uint32(gcc.CHANNEL_OPTION_INITIALIZED|gcc.CHANNEL_OPTION_ENCRYPT_RDP|gcc.CHANNEL_OPTION_COMPRESS_RDP))
+}
+
+func (c *MCSClient) SetClientClipboard() {
+	c.clientNetworkData.AddVirtualChannel("cliprdr",
+		uint32(gcc.CHANNEL_OPTION_INITIALIZED|gcc.CHANNEL_OPTION_ENCRYPT_RDP|gcc.CHANNEL_OPTION_COMPRESS_RDP))
 }
 
 func (c *MCSClient) connect(selectedProtocol uint32) {

@@ -1,3 +1,14 @@
+# github.com/ebitengine/oto/v3 v3.4.0
+## explicit; go 1.24.0
+github.com/ebitengine/oto/v3
+github.com/ebitengine/oto/v3/internal/mux
+github.com/ebitengine/oto/v3/internal/oboe
+# github.com/ebitengine/purego v0.9.0
+## explicit; go 1.18
+github.com/ebitengine/purego
+github.com/ebitengine/purego/internal/cgo
+github.com/ebitengine/purego/internal/fakecgo
+github.com/ebitengine/purego/internal/strings
 # github.com/go-gl/gl v0.0.0-20211210172815-726fda9656d6
 ## explicit; go 1.12
 github.com/go-gl/gl/v2.1/gl
@@ -31,28 +42,21 @@ github.com/google/gxui/samples/flags
 github.com/google/gxui/themes/basic
 github.com/google/gxui/themes/dark
 github.com/google/gxui/themes/light
-# github.com/googollee/go-socket.io v1.4.4
-## explicit; go 1.13
 # github.com/gopherjs/gopherjs v1.17.2
 ## explicit; go 1.17
 github.com/gopherjs/gopherjs/js
-# github.com/gorilla/websocket v1.4.2
-## explicit; go 1.12
 # github.com/goxjs/gl v0.0.0-20210104184919-e3fafc6f8f2a
 ## explicit
 github.com/goxjs/gl
 # github.com/goxjs/glfw v0.0.0-20220119044647-4bcee99381f2
 ## explicit
 github.com/goxjs/glfw
-## explicit
 # github.com/lunixbochs/struc v0.0.0-20200707160740-784aaebc1d40
 ## explicit; go 1.12
 github.com/lunixbochs/struc
 # github.com/shirou/w32 v0.0.0-20160930032740-bb4de0191aa4
 ## explicit
 github.com/shirou/w32
-# github.com/stretchr/testify v1.5.1
-## explicit; go 1.13
 # github.com/tomatome/win v0.3.1
 ## explicit
 github.com/tomatome/win
@@ -63,3 +67,9 @@ golang.org/x/crypto/md4
 ## explicit; go 1.12
 golang.org/x/image/font
 golang.org/x/image/math/fixed
+# golang.org/x/sys v0.36.0
+## explicit; go 1.24.0
+golang.org/x/sys/windows
+# honnef.co/go/js/dom v0.0.0-20250304181735-b5e52f05e89d
+## explicit
+honnef.co/go/js/dom
