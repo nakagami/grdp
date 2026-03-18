@@ -5,10 +5,17 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log/slog"
+	"sync"
 
 	"github.com/nakagami/grdp/core"
 	"github.com/nakagami/grdp/plugin"
 )
+
+// regionPool reuses byte slices for progressive codec rectangle extraction,
+// avoiding per-rectangle allocations that cause GC pressure.
+var regionPool = sync.Pool{
+	New: func() any { return []byte(nil) },
+}
 
 const (
 	ChannelName = plugin.RDPGFX_DVC_CHANNEL_NAME
@@ -475,17 +482,25 @@ func (g *GfxHandler) onWireToSurface2(data []byte) {
 		// onto s.data preserves previously rendered tiles.
 		rects := g.progressive.Decode(bmpData, s.data, w, h)
 		for _, rc := range rects {
-			// Extract the rect region from the surface for emission
-			region := make([]byte, rc.w*rc.h*4)
+			// Reuse pooled buffer for rectangle extraction
+			needed := rc.w * rc.h * 4
+			region := regionPool.Get().([]byte)
+			if cap(region) < needed {
+				region = make([]byte, needed)
+			} else {
+				region = region[:needed]
+			}
 			stride := w * 4
+			rowBytes := rc.w * 4
 			for row := 0; row < rc.h; row++ {
 				srcOff := (rc.y+row)*stride + rc.x*4
-				dstOff := row * rc.w * 4
-				if srcOff+rc.w*4 <= len(s.data) {
-					copy(region[dstOff:dstOff+rc.w*4], s.data[srcOff:srcOff+rc.w*4])
+				dstOff := row * rowBytes
+				if srcOff+rowBytes <= len(s.data) {
+					copy(region[dstOff:dstOff+rowBytes], s.data[srcOff:srcOff+rowBytes])
 				}
 			}
 			g.emitBitmap(s, rc.x, rc.y, rc.w, rc.h, region)
+			regionPool.Put(region)
 		}
 	default:
 		slog.Debug(fmt.Sprintf("RDPGFX: WTS2 unsupported codec 0x%04X ctxId=%d", codecId, codecCtxId))
@@ -510,6 +525,10 @@ func (g *GfxHandler) onSolidFill(data []byte) {
 		return
 	}
 
+	stride := int(s.width) * 4
+	// Pre-compose a single BGRA pixel for row-level fill
+	pixel := [4]byte{cb, cg, cr, 0xFF}
+
 	for i := uint16(0); i < fillCount; i++ {
 		left, _ := core.ReadUint16LE(r)
 		top, _ := core.ReadUint16LE(r)
@@ -521,26 +540,40 @@ func (g *GfxHandler) onSolidFill(data []byte) {
 			continue
 		}
 
-		stride := int(s.width) * 4
-		for y := int(top); y < int(bottom) && y < int(s.height); y++ {
-			for x := int(left); x < int(right) && x < int(s.width); x++ {
-				idx := y*stride + x*4
-				if idx+3 < len(s.data) {
-					s.data[idx] = cb
-					s.data[idx+1] = cg
-					s.data[idx+2] = cr
-					s.data[idx+3] = 0xFF
+		// Clamp to surface bounds
+		yEnd := int(bottom)
+		if yEnd > int(s.height) {
+			yEnd = int(s.height)
+		}
+		xEnd := int(right)
+		if xEnd > int(s.width) {
+			xEnd = int(s.width)
+		}
+
+		// Fill the first row, then copy() it to subsequent rows
+		rowStart := int(top)*stride + int(left)*4
+		rowBytes := (xEnd - int(left)) * 4
+		if rowStart+rowBytes <= len(s.data) {
+			for x := 0; x < rowBytes; x += 4 {
+				copy(s.data[rowStart+x:rowStart+x+4], pixel[:])
+			}
+			for y := int(top) + 1; y < yEnd; y++ {
+				dst := y*stride + int(left)*4
+				if dst+rowBytes <= len(s.data) {
+					copy(s.data[dst:dst+rowBytes], s.data[rowStart:rowStart+rowBytes])
 				}
 			}
 		}
 
 		if s.mapped && g.onBitmap != nil {
+			// Build fill data: fill first row, then replicate
 			fillData := make([]byte, w*h*4)
-			for j := 0; j < w*h; j++ {
-				fillData[j*4] = cb
-				fillData[j*4+1] = cg
-				fillData[j*4+2] = cr
-				fillData[j*4+3] = 0xFF
+			rowW := w * 4
+			for x := 0; x < rowW; x += 4 {
+				copy(fillData[x:x+4], pixel[:])
+			}
+			for row := 1; row < h; row++ {
+				copy(fillData[row*rowW:(row+1)*rowW], fillData[:rowW])
 			}
 			destL := int(s.outputX) + int(left)
 			destT := int(s.outputY) + int(top)
