@@ -118,6 +118,9 @@ type VERSION uint32
 const (
 	RDP_VERSION_4      VERSION = 0x00080001
 	RDP_VERSION_5_PLUS         = 0x00080004
+	RDP_VERSION_10             = 0x00080005
+	RDP_VERSION_10_1           = 0x00080006
+	RDP_VERSION_10_2           = 0x00080007
 )
 
 type Sequence uint16
@@ -257,11 +260,12 @@ func NewClientCoreData(kbdLayout uint32, keyboardType uint32, keyboardSubType ui
 	var ClientName [32]byte
 	copy(ClientName[:], core.UnicodeEncode(name)[:])
 	return &ClientCoreData{
-		RDP_VERSION_5_PLUS, 1280, 800, RNS_UD_COLOR_8BPP,
-		RNS_UD_SAS_DEL, KeyboardLayout(kbdLayout), 3790, ClientName, keyboardType,
+		RDP_VERSION_10_2, 1280, 800, RNS_UD_COLOR_8BPP,
+		RNS_UD_SAS_DEL, KeyboardLayout(kbdLayout), 22621, ClientName, keyboardType,
 		keyboardSubType, 12, [64]byte{}, RNS_UD_COLOR_8BPP, 1, 0, HIGH_COLOR_24BPP,
 		RNS_UD_15BPP_SUPPORT | RNS_UD_16BPP_SUPPORT | RNS_UD_24BPP_SUPPORT | RNS_UD_32BPP_SUPPORT,
-		RNS_UD_CS_SUPPORT_ERRINFO_PDU | RNS_UD_CS_WANT_32BPP_SESSION, [64]byte{}, 0, 0, 0}
+		RNS_UD_CS_SUPPORT_ERRINFO_PDU | RNS_UD_CS_WANT_32BPP_SESSION | RNS_UD_CS_VALID_CONNECTION_TYPE,
+		[64]byte{}, uint8(CONNECTION_TYPE_LAN), 0, 0}
 }
 
 func (data *ClientCoreData) Pack() []byte {

@@ -157,13 +157,11 @@ func (c *DvcClient) Process(s []byte) {
 		slog.Info("DYNVC_CREATE_REQ")
 		c.processCreateReq(hdr, b)
 	case DYNVC_DATA_FIRST:
-		slog.Info("DYNVC_DATA_FIRST")
 		c.processDataFirst(hdr, b)
 	case DYNVC_DATA:
-		slog.Info("DYNVC_DATA")
 		c.processData(hdr, b)
 	case DYNVC_CLOSE:
-		slog.Info("DYNVC_CLOSE")
+		c.processClose(hdr, b)
 	case DYNVC_SOFT_SYNC_REQUEST:
 		slog.Info("DYNVC_SOFT_SYNC_REQUEST")
 		c.processSoftSyncRequest(hdr, b)
@@ -171,6 +169,19 @@ func (c *DvcClient) Process(s []byte) {
 		slog.Warn(fmt.Sprintf("dvc: unhandled cmd 0x%x", hdr.cmd))
 	}
 }
+func (c *DvcClient) processClose(hdr *DvcHeader, s []byte) {
+	r := bytes.NewReader(s)
+	channelId := readDvcId(r, hdr.cbChId)
+	ch, ok := c.channelById[channelId]
+	name := "(unknown)"
+	if ok {
+		name = ch.name
+		delete(c.channelById, channelId)
+		delete(c.reassembly, channelId)
+	}
+	slog.Debug("dvc: CLOSE", "channelId", channelId, "name", name)
+}
+
 func (c *DvcClient) processCreateReq(hdr *DvcHeader, s []byte) {
 	r := bytes.NewReader(s)
 	channelId := readDvcId(r, hdr.cbChId)
@@ -306,15 +317,13 @@ func (c *DvcClient) processCapsPdu(hdr *DvcHeader, s []byte) {
 		ver = 3
 	}
 
+	// Client CAPS response: header(1) + pad(1) + version(2) = 4 bytes
+	// Priority charges are only in the server's CAPS request, not the client response.
 	b := &bytes.Buffer{}
-	core.WriteUInt16LE(0x0050, b) // header(0x50) + pad(0x00)
+	core.WriteUInt8(0x50, b) // header: Cmd=5(CAPS), Sp=0, CbChId=0
+	core.WriteUInt8(0x00, b) // pad
 	core.WriteUInt16LE(ver, b)
-	if ver >= 2 {
-		// Priority charges: 4 × uint16, all zero
-		for i := 0; i < 4; i++ {
-			core.WriteUInt16LE(0, b)
-		}
-	}
+	slog.Debug("dvc: CAPS response", "version", ver, "len", b.Len())
 	c.Send(b.Bytes())
 	c.negotiatedVersion = ver
 }
