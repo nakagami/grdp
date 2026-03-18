@@ -80,6 +80,8 @@ var (
 	lastMouseX, lastMouseY int
 	resizeTimer            *time.Timer
 	audioStr               *audioStream
+	otoCtx                 *oto.Context
+	otoPlayer              *oto.Player
 )
 
 func uiRdp(hostPort, domain, user, password string, width, height int, keyboardType, keyboardLayout string) (error, *grdp.RdpClient) {
@@ -160,13 +162,14 @@ func appMain(driver gxui.Driver) {
 		ChannelCount: 2,
 		Format:       oto.FormatSignedInt16LE,
 	}
-	otoCtx, readyCh, otoErr := oto.NewContext(otoOp)
+	ctx, readyCh, otoErr := oto.NewContext(otoOp)
 	if otoErr != nil {
 		slog.Error("Audio output init failed", "err", otoErr)
 	} else {
 		<-readyCh
-		player := otoCtx.NewPlayer(audioStr)
-		player.Play()
+		otoCtx = ctx
+		otoPlayer = otoCtx.NewPlayer(audioStr)
+		otoPlayer.Play()
 		slog.Info("Audio output initialized")
 	}
 
@@ -231,6 +234,9 @@ func appMain(driver gxui.Driver) {
 	window.OnClose(func() {
 		if resizeTimer != nil {
 			resizeTimer.Stop()
+		}
+		if otoPlayer != nil {
+			otoPlayer.Pause()
 		}
 		if audioStr != nil {
 			audioStr.Close()
