@@ -18,6 +18,7 @@ import (
 	"github.com/google/gxui/drivers/gl"
 	"github.com/google/gxui/samples/flags"
 	"github.com/google/gxui/themes/light"
+	"golang.design/x/clipboard"
 
 	"github.com/nakagami/grdp"
 	"github.com/nakagami/grdp/plugin/rdpsnd"
@@ -70,6 +71,40 @@ func (s *audioStream) Close() {
 	s.cond.Broadcast()
 }
 
+// --- System clipboard helpers (golang.design/x/clipboard) ------------------
+
+func readSystemClipboard() string {
+	b := clipboard.Read(clipboard.FmtText)
+	if b == nil {
+		return ""
+	}
+	return string(b)
+}
+
+func writeSystemClipboard(text string) {
+	clipboard.Write(clipboard.FmtText, []byte(text))
+}
+
+// clipboardWatcher polls the system clipboard and notifies the RDP server
+// when the local clipboard changes.
+func clipboardWatcher(client *grdp.RdpClient, stopCh <-chan struct{}) {
+	lastText := readSystemClipboard()
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stopCh:
+			return
+		case <-ticker.C:
+			text := readSystemClipboard()
+			if text != lastText {
+				lastText = text
+				client.NotifyClipboardChanged()
+			}
+		}
+	}
+}
+
 var (
 	rdpClient              *grdp.RdpClient
 	driverc                gxui.Driver
@@ -82,6 +117,7 @@ var (
 	audioStr               *audioStream
 	otoCtx                 *oto.Context
 	otoPlayer              *oto.Player
+	clipStopCh             chan struct{}
 )
 
 func uiRdp(hostPort, domain, user, password string, width, height int, keyboardType, keyboardLayout string) (error, *grdp.RdpClient) {
@@ -97,6 +133,18 @@ func uiRdp(hostPort, domain, user, password string, width, height int, keyboardT
 	g.OnAudio(func(af rdpsnd.AudioFormat, data []byte) {
 		audioStr.Write(data)
 	})
+
+	g.OnClipboard(
+		func(text string) {
+			slog.Debug("clipboard: remote → local", "len", len(text))
+			writeSystemClipboard(text)
+		},
+		func() string {
+			text := readSystemClipboard()
+			slog.Debug("clipboard: local → remote", "len", len(text))
+			return text
+		},
+	)
 
 	err := g.Login(domain, user, password)
 	if err != nil {
@@ -149,12 +197,20 @@ func appMain(driver gxui.Driver) {
 
 	audioStr = newAudioStream()
 
+	if err := clipboard.Init(); err != nil {
+		slog.Error("Clipboard init failed", "err", err)
+	}
+
 	err, rdpClient = uiRdp(hostPort, domain, user, password, width, height, keyboardType, keyboardLayout)
 	if err != nil {
 		fmt.Println(err.Error())
 		driver.Terminate()
 		return
 	}
+
+	// Start clipboard watcher goroutine
+	clipStopCh = make(chan struct{})
+	go clipboardWatcher(rdpClient, clipStopCh)
 
 	// Initialize audio output (PCM 44100Hz stereo 16-bit)
 	otoOp := &oto.NewContextOptions{
@@ -232,6 +288,9 @@ func appMain(driver gxui.Driver) {
 	layoutImg.SetVisible(true)
 	window.AddChild(layoutImg)
 	window.OnClose(func() {
+		if clipStopCh != nil {
+			close(clipStopCh)
+		}
 		if resizeTimer != nil {
 			resizeTimer.Stop()
 		}

@@ -1,3 +1,5 @@
+//go:build windows
+
 // cliprdr_test.go
 package cliprdr_test
 

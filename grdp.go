@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/nakagami/grdp/plugin"
+	"github.com/nakagami/grdp/plugin/cliprdr"
 	"github.com/nakagami/grdp/plugin/drdynvc"
 	"github.com/nakagami/grdp/plugin/rdpgfx"
 	"github.com/nakagami/grdp/plugin/rdpsnd"
@@ -71,6 +72,11 @@ type RdpClient struct {
 	onPointerCachedFn func(uint16)
 	onPointerUpdateFn func(uint16, uint16, uint16, uint16, uint16, uint16, []byte, []byte)
 	onAudioFn         func(rdpsnd.AudioFormat, []byte)
+
+	// clipboard callbacks and handler
+	onClipboardFn  func(text string) // remote → local
+	getClipboardFn func() string     // local → remote
+	cliprdrHandler *cliprdr.CliprdrHandler
 }
 
 type Bitmap struct {
@@ -255,9 +261,22 @@ func (g *RdpClient) doLogin(routingToken []byte) error {
 	g.channels.Register(rdpsndHandler)
 	g.mcs.SetClientSoundProtocol()
 
-	// cliprdr (Clipboard) — stub, required for server to enable audio
-	g.channels.Register(&stubChannel{name: "cliprdr",
-		option: plugin.CHANNEL_OPTION_INITIALIZED | plugin.CHANNEL_OPTION_ENCRYPT_RDP | plugin.CHANNEL_OPTION_COMPRESS_RDP})
+	// cliprdr (Clipboard) — cross-platform text clipboard handler
+	cliprdrHandler := cliprdr.NewHandler(
+		func(text string) {
+			if g.onClipboardFn != nil {
+				g.onClipboardFn(text)
+			}
+		},
+		func() string {
+			if g.getClipboardFn != nil {
+				return g.getClipboardFn()
+			}
+			return ""
+		},
+	)
+	g.cliprdrHandler = cliprdrHandler
+	g.channels.Register(cliprdrHandler)
 	g.mcs.SetClientClipboard()
 
 	// drdynvc (Dynamic Virtual Channels)
@@ -520,6 +539,29 @@ func (g *RdpClient) OnPointerUpdate(f func(uint16, uint16, uint16, uint16, uint1
 func (g *RdpClient) OnAudio(f func(rdpsnd.AudioFormat, []byte)) *RdpClient {
 	g.onAudioFn = f
 	return g
+}
+
+// OnClipboard registers callbacks for bidirectional clipboard sharing.
+//
+//   - onRemote is called with the text when the RDP server's clipboard
+//     content is received (server → client).
+//   - getLocal is called to retrieve the current local clipboard text
+//     when the server requests it (client → server).
+//
+// Must be called before Login.
+func (g *RdpClient) OnClipboard(onRemote func(text string), getLocal func() string) *RdpClient {
+	g.onClipboardFn = onRemote
+	g.getClipboardFn = getLocal
+	return g
+}
+
+// NotifyClipboardChanged tells the server that the local clipboard has
+// changed.  The UI should call this when it detects a system clipboard
+// change (e.g. via polling or a platform clipboard-change signal).
+func (g *RdpClient) NotifyClipboardChanged() {
+	if g.cliprdrHandler != nil {
+		g.cliprdrHandler.OnLocalClipboardChanged()
+	}
 }
 
 func (g *RdpClient) KeyUp(sc int) {
