@@ -16,7 +16,6 @@ import "C"
 
 import (
 	"image"
-	"image/draw"
 	"sync"
 	"unsafe"
 )
@@ -412,24 +411,7 @@ func (w *Window) SetIcon(images []image.Image) {
 	freePixels := make([]func(), count)
 
 	for i, img := range images {
-		var pixels []uint8
-		b := img.Bounds()
-
-		switch img := img.(type) {
-		case *image.NRGBA:
-			pixels = img.Pix
-		default:
-			m := image.NewNRGBA(image.Rect(0, 0, b.Dx(), b.Dy()))
-			draw.Draw(m, m.Bounds(), img, b.Min, draw.Src)
-			pixels = m.Pix
-		}
-
-		pix, free := bytes(pixels)
-		freePixels[i] = free
-
-		cimages[i].width = C.int(b.Dx())
-		cimages[i].height = C.int(b.Dy())
-		cimages[i].pixels = (*C.uchar)(pix)
+		cimages[i], freePixels[i] = imageToGLFW(img)
 	}
 
 	var p *C.GLFWimage
@@ -936,21 +918,6 @@ func (w *Window) GetClipboardString() string {
 	return C.GoString(cs)
 }
 
-// panicErrorExceptForInvalidValue is the same as panicError but ignores
-// invalidValue.
-func panicErrorExceptForInvalidValue() {
-	// invalidValue can happen when specific joysticks are used. This issue
-	// will be fixed in GLFW 3.3.5. As a temporary fix, ignore this error.
-	// See go-gl/glfw#292, go-gl/glfw#324, and glfw/glfw#1763.
-	err := acceptError(invalidValue)
-	if e, ok := err.(*Error); ok && e.Code == invalidValue {
-		return
-	}
-	if err != nil {
-		panic(err)
-	}
-}
-
 // PollEvents processes only those events that have already been received and
 // then returns immediately. Processing events will cause the window and input
 // callbacks associated with those events to be called.
@@ -962,7 +929,7 @@ func panicErrorExceptForInvalidValue() {
 // This function may only be called from the main thread.
 func PollEvents() {
 	C.glfwPollEvents()
-	panicErrorExceptForInvalidValue()
+	panicError()
 }
 
 // WaitEvents puts the calling thread to sleep until at least one event has been
@@ -980,7 +947,7 @@ func PollEvents() {
 // This function may only be called from the main thread.
 func WaitEvents() {
 	C.glfwWaitEvents()
-	panicErrorExceptForInvalidValue()
+	panicError()
 }
 
 // WaitEventsTimeout puts the calling thread to sleep until at least one event is available in the
@@ -1007,7 +974,7 @@ func WaitEvents() {
 // Event processing is not required for joystick input to work.
 func WaitEventsTimeout(timeout float64) {
 	C.glfwWaitEventsTimeout(C.double(timeout))
-	panicErrorExceptForInvalidValue()
+	panicError()
 }
 
 // PostEmptyEvent posts an empty event from the current thread to the main
