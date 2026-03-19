@@ -4,12 +4,6 @@ grdp is a pure Golang implementation of the Microsoft RDP (Remote Desktop Protoc
 
 Forked from [tomatome/grdp](https://github.com/tomatome/grdp)
 
-## TODO
-
-- Ubuntu RDP server support.
-- OS independent clipboard implementation.
-- More feature rich RDP client. (Currently, there is only an example that demonstrates the library's functionality).
-
 ## How to execute example
 
 Prepare environment variables
