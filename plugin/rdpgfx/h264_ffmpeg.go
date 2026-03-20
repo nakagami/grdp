@@ -26,6 +26,10 @@ static void grdp_set_get_format(AVCodecContext *ctx) {
     ctx->get_format = grdp_get_hw_format;
 }
 
+static void grdp_set_hw_pix_fmt(AVCodecContext *ctx, enum AVPixelFormat fmt) {
+    ctx->opaque = (void*)(intptr_t)fmt;
+}
+
 // Helper: convert AVFrame to BGRA via swscale.
 static int grdp_frame_to_bgra(struct SwsContext *sws,
     AVFrame *src, uint8_t *dst, int dst_stride) {
@@ -98,7 +102,7 @@ func newH264Decoder() h264Decoder {
 
 			if hwPixFmt != C.AV_PIX_FMT_NONE {
 				codecCtx.hw_device_ctx = C.av_buffer_ref(devCtx)
-				codecCtx.opaque = unsafe.Pointer(uintptr(hwPixFmt))
+				C.grdp_set_hw_pix_fmt(codecCtx, hwPixFmt)
 				C.grdp_set_get_format(codecCtx)
 				d.useHW = true
 				d.hwPixFmt = hwPixFmt

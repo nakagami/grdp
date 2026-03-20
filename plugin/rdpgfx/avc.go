@@ -128,8 +128,10 @@ func (g *GfxHandler) decodeAVC420(data []byte, destW, destH int) []byte {
 		return nil
 	}
 	if frame == nil {
+		slog.Debug("RDPGFX: H.264 decode returned nil frame (buffering?)")
 		return nil
 	}
+	slog.Info("RDPGFX: AVC420 decoded", "frameW", frame.Width, "frameH", frame.Height, "destW", destW, "destH", destH, "regions", len(stream.regions), "h264Len", len(stream.h264Data))
 	return cropBGRA(frame.Data, frame.Width, frame.Height, destW, destH)
 }
 
