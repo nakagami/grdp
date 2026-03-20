@@ -479,6 +479,7 @@ func (g *GfxHandler) onResetGraphics(data []byte) {
 	slog.Info(fmt.Sprintf("RDPGFX: RESET_GRAPHICS %dx%d", w, h))
 	g.surfaces = make(map[uint16]*surface)
 	g.clearCtx = newClearCodecCtx()
+	g.framesDecoded.Store(0)
 	if g.h264dec != nil {
 		g.h264dec.Close()
 		g.h264dec = newH264Decoder()
@@ -532,9 +533,6 @@ func (g *GfxHandler) onMapSurfaceToOutput(data []byte) {
 func (g *GfxHandler) sendFrameAck(frameId uint32) {
 	decoded := g.framesDecoded.Add(1)
 	p := &bytes.Buffer{}
-	// queueDepth 0 tells the server we have no presentation backlog,
-	// keeping it sending at full rate.  Local backpressure is handled
-	// by skipHeavy / frame dropping in decodePDUs.
 	core.WriteUInt32LE(0, p)
 	core.WriteUInt32LE(frameId, p)
 	core.WriteUInt32LE(decoded, p)
