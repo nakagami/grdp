@@ -345,8 +345,6 @@ func update() {
 		for bs := range bitmapCH {
 			screenMu.Lock()
 			paintBitmapsLocked(bs)
-			// Coalesce: drain any queued batches so we upload one
-			// texture for many frames instead of one per frame.
 		drain:
 			for {
 				select {
@@ -358,7 +356,6 @@ func update() {
 			}
 			screenMu.Unlock()
 
-			// Upload the composited image to the GPU once.
 			driverc.Call(func() {
 				texture := driverc.CreateTexture(screenImage, 1)
 				img.SetTexture(texture)
