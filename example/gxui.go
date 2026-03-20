@@ -343,7 +343,6 @@ func appMain(driver gxui.Driver) {
 func update() {
 	go func() {
 		for bs := range bitmapCH {
-			// Draw this batch to the screen image.
 			screenMu.Lock()
 			paintBitmapsLocked(bs)
 			// Coalesce: drain any queued batches so we upload one
@@ -491,7 +490,7 @@ func transKey(in gxui.KeyboardKey) int {
 }
 
 func main() {
-	handler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})
+	handler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})
 	slog.SetDefault(slog.New(handler))
 	gl.StartDriver(appMain)
 }

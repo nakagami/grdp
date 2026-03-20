@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 
 	"github.com/nakagami/grdp/core"
 	"github.com/nakagami/grdp/plugin"
@@ -119,27 +120,24 @@ type cacheEntry struct {
 
 // GfxHandler implements the RDPGFX (MS-RDPEGFX) protocol.
 type GfxHandler struct {
-	surfaces      map[uint16]*surface
-	cacheEntries  map[uint16]cacheEntry
-	clearCtx      *clearCodecCtx
-	zgfx          *zgfxContext
-	rfx           *rfxDecoder
-	progressive   *rfxProgressiveDecoder
-	h264dec       h264Decoder
-	framesDecoded uint32
+	surfaces     map[uint16]*surface
+	cacheEntries map[uint16]cacheEntry
+	clearCtx     *clearCodecCtx
+	zgfx         *zgfxContext
+	rfx          *rfxDecoder
+	progressive  *rfxProgressiveDecoder
+	h264dec      h264Decoder
+	// framesDecoded is accessed from both read and decode goroutines.
+	framesDecoded atomic.Uint32
 	sendFn        func(data []byte)
 	onBitmap      func([]BitmapUpdate)
 	// decodeCh receives decompressed PDU data for asynchronous decode.
 	decodeCh chan []byte
-	// latestAck / ackReady implement a "latest value" pattern for frame
-	// ACKs.  The decode goroutine stores the most recent ACK PDU and
-	// signals ackReady; the writeLoop goroutine picks it up and sends
-	// via sendFn.  If writeLoop is blocked on socket.Write, successive
-	// ACKs simply overwrite latestAck so the server always receives the
-	// most up-to-date acknowledgement — no ACKs are silently lost.
-	ackMu     sync.Mutex
-	latestAck []byte
-	ackReady  chan struct{}
+	// ackCh is a buffered channel of serialized ACK PDUs.  Every
+	// EndFrame ACK is enqueued here and the writeLoop goroutine sends
+	// each one to the server.  The server tracks outstanding frames
+	// individually, so skipping ACKs causes it to stop sending.
+	ackCh chan []byte
 }
 
 // NewGfxHandler creates a new RDPGFX handler.
@@ -153,8 +151,8 @@ func NewGfxHandler(onBitmap func([]BitmapUpdate)) *GfxHandler {
 		progressive:  newRfxProgressiveDecoder(),
 		h264dec:      newH264Decoder(),
 		onBitmap:     onBitmap,
-		decodeCh:     make(chan []byte, 64),
-		ackReady:     make(chan struct{}, 1),
+		decodeCh:     make(chan []byte, 256),
+		ackCh:        make(chan []byte, 256),
 	}
 	go g.decodeLoop()
 	go g.writeLoop()
@@ -249,6 +247,33 @@ func (g *GfxHandler) Process(data []byte) {
 	select {
 	case g.decodeCh <- msg:
 	default:
+		// Channel full — video decode is dropped, but we must still
+		// ACK any EndFrame PDUs so the server's outstanding-frame
+		// count stays accurate and it keeps sending.
+		slog.Warn("RDPGFX: decodeCh full, dropping frame (ACKs preserved)", "queueCap", cap(g.decodeCh))
+		g.ackDroppedFrames(msg)
+	}
+}
+
+// ackDroppedFrames scans decompressed PDU data for EndFrame commands
+// and sends ACKs for them.  Called on the read goroutine when decodeCh
+// is full and the message is being dropped.  Without this, dropped
+// EndFrames would leave the server's outstanding-frame count stuck,
+// eventually causing it to stop sending entirely.
+func (g *GfxHandler) ackDroppedFrames(data []byte) {
+	for offset := 0; offset+headerSize <= len(data); {
+		cmdId := binary.LittleEndian.Uint16(data[offset:])
+		pduLength := binary.LittleEndian.Uint32(data[offset+4:])
+		if pduLength < uint32(headerSize) || int(pduLength) > len(data)-offset {
+			break
+		}
+		if cmdId == cmdidEndFrame {
+			pduData := data[offset+headerSize : offset+int(pduLength)]
+			if len(pduData) >= 4 {
+				g.sendFrameAck(binary.LittleEndian.Uint32(pduData))
+			}
+		}
+		offset += int(pduLength)
 	}
 }
 
@@ -316,12 +341,18 @@ func (g *GfxHandler) decodeLoop() {
 	}
 }
 
+// skipHeavyThreshold controls when CaVideo/progressive decode is skipped.
+// When the queue has more items than this, heavy decode is skipped to drain
+// the backlog quickly.  A small threshold means we decode almost every frame
+// during normal playback, only skipping under severe backpressure.
+const skipHeavyThreshold = 16
+
 // decodePDUs processes all PDUs in decompressed data.
 // Frame ACKs (EndFrame) are ALWAYS processed so the server gets timely
 // acknowledgements.  Heavy CaVideo/progressive decode is skipped when
-// the queue is backed up to drain quickly and catch up.
+// the queue is significantly backed up.
 func (g *GfxHandler) decodePDUs(data []byte) {
-	skipHeavy := len(g.decodeCh) > 0
+	skipHeavy := len(g.decodeCh) > skipHeavyThreshold
 
 	for offset := 0; offset+headerSize <= len(data); {
 		cmdId := binary.LittleEndian.Uint16(data[offset:])
@@ -373,29 +404,18 @@ func (g *GfxHandler) dispatchDecode(cmdId uint16, data []byte, skipHeavy bool) {
 	}
 }
 
-// writeLoop runs in a dedicated goroutine.  It waits for ackReady
-// signals, then sends the latest ACK via sendFn.  Because it always
-// re-checks latestAck after each send, it never misses an ACK that
-// arrived while sendFn was blocked.
+// writeLoop runs in a dedicated goroutine.  It reads serialized ACK
+// PDUs from ackCh and sends each one via sendFn.  Every ACK must reach
+// the server — the server tracks outstanding frames individually and
+// stops sending if ACKs are missing.  Automatically restarts on panic.
 func (g *GfxHandler) writeLoop() {
-	for range g.ackReady {
-		g.drainAcks()
-	}
-}
-
-// drainAcks sends all pending ACKs.  Because successive ACKs overwrite
-// latestAck, at most one send per wake-up is needed.  After sendFn
-// returns (which may have blocked for seconds), it checks again for a
-// newer ACK that arrived in the meantime.
-func (g *GfxHandler) drainAcks() {
-	for {
-		g.ackMu.Lock()
-		pdu := g.latestAck
-		g.latestAck = nil
-		g.ackMu.Unlock()
-		if pdu == nil {
-			return
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("RDPGFX: panic in writeLoop, restarting", "err", r)
+			go g.writeLoop()
 		}
+	}()
+	for pdu := range g.ackCh {
 		if g.sendFn != nil {
 			g.sendFn(pdu)
 		}
@@ -416,23 +436,19 @@ func (g *GfxHandler) sendPdu(cmdId uint16, payload []byte) {
 	g.sendFn(b.Bytes())
 }
 
-// sendPduAsync stores a PDU as the latest pending ACK and signals the
-// writeLoop goroutine.  If an older ACK hasn't been sent yet it is
-// replaced — the server only needs the most recent acknowledgement.
+// sendPduAsync enqueues a PDU for the writeLoop goroutine to send.
+// Every ACK must be delivered to the server, so this uses a buffered
+// channel rather than a single-value "latest" slot.
 func (g *GfxHandler) sendPduAsync(cmdId uint16, payload []byte) {
 	b := &bytes.Buffer{}
 	core.WriteUInt16LE(cmdId, b)
 	core.WriteUInt16LE(0, b) // flags
 	core.WriteUInt32LE(uint32(headerSize+len(payload)), b)
 	b.Write(payload)
-	g.ackMu.Lock()
-	g.latestAck = b.Bytes()
-	g.ackMu.Unlock()
-	// Signal writeLoop (non-blocking; if already signaled, writeLoop
-	// will pick up the latest ACK after its current sendFn returns).
 	select {
-	case g.ackReady <- struct{}{}:
+	case g.ackCh <- b.Bytes():
 	default:
+		slog.Warn("RDPGFX: ackCh full, ACK dropped")
 	}
 }
 
@@ -510,18 +526,26 @@ func (g *GfxHandler) onMapSurfaceToOutput(data []byte) {
 	}
 }
 
+// sendFrameAck builds and queues a FRAME_ACKNOWLEDGE PDU.
+// Safe to call from any goroutine (uses atomic framesDecoded and
+// mutex-protected latestAck).
+func (g *GfxHandler) sendFrameAck(frameId uint32) {
+	decoded := g.framesDecoded.Add(1)
+	p := &bytes.Buffer{}
+	// queueDepth 0 tells the server we have no presentation backlog,
+	// keeping it sending at full rate.  Local backpressure is handled
+	// by skipHeavy / frame dropping in decodePDUs.
+	core.WriteUInt32LE(0, p)
+	core.WriteUInt32LE(frameId, p)
+	core.WriteUInt32LE(decoded, p)
+	g.sendPduAsync(cmdidFrameAcknowledge, p.Bytes())
+}
+
 func (g *GfxHandler) onEndFrame(data []byte) {
 	if len(data) < 4 {
 		return
 	}
-	frameId := binary.LittleEndian.Uint32(data)
-	g.framesDecoded++
-	p := &bytes.Buffer{}
-	queueDepth := uint32(len(g.decodeCh))
-	core.WriteUInt32LE(queueDepth, p)
-	core.WriteUInt32LE(frameId, p)
-	core.WriteUInt32LE(g.framesDecoded, p)
-	g.sendPduAsync(cmdidFrameAcknowledge, p.Bytes())
+	g.sendFrameAck(binary.LittleEndian.Uint32(data))
 }
 
 func (g *GfxHandler) onWireToSurface1Decode(data []byte, skipHeavy bool) {
