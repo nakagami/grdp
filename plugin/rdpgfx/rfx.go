@@ -19,6 +19,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log/slog"
+	"runtime"
+	"sync"
 )
 
 const (
@@ -172,7 +174,11 @@ func (d *rfxDecoder) decodeTileset(data []byte, left, top int, surfData []byte, 
 		off += 5
 	}
 
-	// Parse and decode tiles (each wrapped in CBT_TILE block)
+	// Collect tile content slices for parallel decoding.
+	type tileWork struct {
+		content []byte
+	}
+	var tiles []tileWork
 	for i := 0; i < numTiles; i++ {
 		if off+6 > len(data) {
 			break
@@ -188,9 +194,40 @@ func (d *rfxDecoder) decodeTileset(data []byte, left, top int, surfData []byte, 
 			break
 		}
 
-		tileContent := data[off+6 : off+tileBlockLen]
-		d.decodeTile(tileContent, quants, left, top, surfData, width, height)
+		tiles = append(tiles, tileWork{content: data[off+6 : off+tileBlockLen]})
 		off += tileBlockLen
+	}
+
+	// Decode tiles concurrently — each tile writes to its own non-overlapping
+	// 64×64 region of the output buffer so no locking is needed.
+	if len(tiles) > 1 {
+		workers := runtime.NumCPU()
+		if workers > len(tiles) {
+			workers = len(tiles)
+		}
+		var wg sync.WaitGroup
+		ch := make(chan tileWork, len(tiles))
+		for _, t := range tiles {
+			ch <- t
+		}
+		close(ch)
+		wg.Add(workers)
+		for w := 0; w < workers; w++ {
+			go func() {
+				defer wg.Done()
+				defer func() {
+					if r := recover(); r != nil {
+						slog.Error("RFX: tile decode panic", "err", r)
+					}
+				}()
+				for t := range ch {
+					d.decodeTile(t.content, quants, left, top, surfData, width, height)
+				}
+			}()
+		}
+		wg.Wait()
+	} else if len(tiles) == 1 {
+		d.decodeTile(tiles[0].content, quants, left, top, surfData, width, height)
 	}
 
 	return quants
@@ -232,4 +269,8 @@ func (d *rfxDecoder) decodeTile(data []byte, quants []rfxQuant, left, top int, o
 	// Apply WTS1 left/top offset: tile pixel position on surface =
 	// left + xIdx*64, top + yIdx*64 (per FreeRDP/MS-RDPRFX).
 	rfxPlaceTileAbs(yPixels, cbPixels, crPixels, left+xIdx*rfxTileSize, top+yIdx*rfxTileSize, output, outW, outH)
+
+	coeffPool.Put(yPixels)
+	coeffPool.Put(cbPixels)
+	coeffPool.Put(crPixels)
 }

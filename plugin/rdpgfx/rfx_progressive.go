@@ -175,6 +175,10 @@ func (d *rfxProgressiveDecoder) decodeTileSimple(data []byte, quants []rfxQuant,
 	crPixels := rfxDecodeComponent(crData, qCr)
 
 	rfxPlaceTile(yPixels, cbPixels, crPixels, int(xIdx), int(yIdx), output, outW, outH)
+
+	coeffPool.Put(yPixels)
+	coeffPool.Put(cbPixels)
+	coeffPool.Put(crPixels)
 }
 
 // decodeTileFirst handles PROGRESSIVE_WBT_TILE_FIRST (0xCCC6).
@@ -211,6 +215,10 @@ func (d *rfxProgressiveDecoder) decodeTileFirst(data []byte, quants []rfxQuant, 
 	crPixels := rfxDecodeComponent(crData, qCr)
 
 	rfxPlaceTile(yPixels, cbPixels, crPixels, int(xIdx), int(yIdx), output, outW, outH)
+
+	coeffPool.Put(yPixels)
+	coeffPool.Put(cbPixels)
+	coeffPool.Put(crPixels)
 }
 
 func rfxGetQuant(quants []rfxQuant, idx int) rfxQuant {
@@ -231,12 +239,18 @@ func safeSlice(data []byte, offset, length int) []byte {
 func rfxDecodeComponent(data []byte, quant rfxQuant) []int16 {
 	const tilePixels = rfxTileSize * rfxTileSize // 4096
 
+	// Reuse a pooled coefficient buffer to avoid per-tile allocation.
+	coeffs := coeffPool.Get().([]int16)
+
 	if data == nil {
-		return make([]int16, tilePixels)
+		for i := range coeffs {
+			coeffs[i] = 0
+		}
+		return coeffs
 	}
 
 	// 1. RLGR1 entropy decode → 4096 coefficients
-	coeffs := rlgr1Decode(data, tilePixels)
+	coeffs = rlgr1Decode(data, tilePixels, coeffs)
 
 	// 2. Differential decode LL3 (positions 4032..4095)
 	for i := 4033; i < 4096; i++ {
@@ -294,16 +308,17 @@ func rfxIDWT2DLevel(buf []int16, n int) {
 	nn := n * n
 	size := 2 * n
 
-	hl := make([]int16, nn)
-	lh := make([]int16, nn)
-	hh := make([]int16, nn)
-	ll := make([]int16, nn)
+	bufs := idwtBufPool.Get().(*idwtBufs)
+	hl := bufs.sub[0][:nn]
+	lh := bufs.sub[1][:nn]
+	hh := bufs.sub[2][:nn]
+	ll := bufs.sub[3][:nn]
 	copy(hl, buf[0:nn])
 	copy(lh, buf[nn:2*nn])
 	copy(hh, buf[2*nn:3*nn])
 	copy(ll, buf[3*nn:4*nn])
 
-	tmp := make([]int16, size*size)
+	tmp := bufs.tmp[:size*size]
 
 	// Step 1: Horizontal IDWT on each row
 	for row := 0; row < n; row++ {
@@ -357,6 +372,7 @@ func rfxIDWT2DLevel(buf []int16, n int) {
 		lastH := int32(tmp[(2*n-1)*size+col])
 		buf[(2*n-1)*size+col] = int16((lastH << 1) + lastEven)
 	}
+	idwtBufPool.Put(bufs)
 }
 
 // rfxPlaceTile converts YCbCr tile to BGRA using tile-grid indices (xIdx, yIdx).
