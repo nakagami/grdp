@@ -59,6 +59,8 @@ const (
 	codecClearCodec   uint16 = 0x0003
 	codecPlanar       uint16 = 0x0004
 	codecProgressive  uint16 = 0x0009
+	codecAVC420       uint16 = 0x000A
+	codecAVC444       uint16 = 0x000B
 )
 
 // Capability versions and flags
@@ -121,6 +123,7 @@ type GfxHandler struct {
 	clearCtx      *clearCodecCtx
 	zgfx          *zgfxContext
 	progressive   *rfxProgressiveDecoder
+	h264dec       h264Decoder
 	framesDecoded uint32
 	sendFn        func(data []byte)
 	onBitmap      func([]BitmapUpdate)
@@ -134,6 +137,7 @@ func NewGfxHandler(onBitmap func([]BitmapUpdate)) *GfxHandler {
 		clearCtx:     newClearCodecCtx(),
 		zgfx:         newZgfxContext(),
 		progressive:  newRfxProgressiveDecoder(),
+		h264dec:      newH264Decoder(),
 		onBitmap:     onBitmap,
 	}
 }
@@ -154,14 +158,31 @@ func (g *GfxHandler) OnChannelCreated() {
 // send any graphics data (MS-RDPEGFX 2.2.3.1).
 func (g *GfxHandler) sendCapsAdvertise() {
 	p := &bytes.Buffer{}
-	// capsSetCount
-	core.WriteUInt16LE(1, p)
-	// RDPGFX_CAPSET: version 8.0
-	core.WriteUInt32LE(capVersion8, p)
-	core.WriteUInt32LE(4, p) // capsDataLength
-	core.WriteUInt32LE(capFlagThinClient|capFlagSmallCache|capFlagAVCDisabled, p)
-	g.sendPdu(cmdidCapsAdvertise, p.Bytes())
-	slog.Info("RDPGFX: sent CAPS_ADVERTISE (v8.0, THINCLIENT|SMALLCACHE|AVC_DISABLED)")
+	if g.h264dec != nil {
+		// H.264 available: advertise v10 + v8.1 + v8.0 with AVC enabled.
+		core.WriteUInt16LE(3, p)
+		// v10 (AVC444 + AVC420)
+		core.WriteUInt32LE(capVersion10, p)
+		core.WriteUInt32LE(4, p)
+		core.WriteUInt32LE(capFlagThinClient|capFlagSmallCache, p)
+		// v8.1 (AVC420)
+		core.WriteUInt32LE(capVersion81, p)
+		core.WriteUInt32LE(4, p)
+		core.WriteUInt32LE(capFlagThinClient|capFlagSmallCache, p)
+		// v8.0 fallback
+		core.WriteUInt32LE(capVersion8, p)
+		core.WriteUInt32LE(4, p)
+		core.WriteUInt32LE(capFlagThinClient|capFlagSmallCache|capFlagAVCDisabled, p)
+		g.sendPdu(cmdidCapsAdvertise, p.Bytes())
+		slog.Info("RDPGFX: sent CAPS_ADVERTISE (v10+v8.1+v8.0, AVC enabled)")
+	} else {
+		core.WriteUInt16LE(1, p)
+		core.WriteUInt32LE(capVersion8, p)
+		core.WriteUInt32LE(4, p)
+		core.WriteUInt32LE(capFlagThinClient|capFlagSmallCache|capFlagAVCDisabled, p)
+		g.sendPdu(cmdidCapsAdvertise, p.Bytes())
+		slog.Info("RDPGFX: sent CAPS_ADVERTISE (v8.0, AVC disabled)")
+	}
 }
 
 // ZGFX segment descriptors (MS-RDPEGFX 2.2.4)
@@ -338,6 +359,10 @@ func (g *GfxHandler) onResetGraphics(data []byte) {
 	slog.Info(fmt.Sprintf("RDPGFX: RESET_GRAPHICS %dx%d", w, h))
 	g.surfaces = make(map[uint16]*surface)
 	g.clearCtx = newClearCodecCtx()
+	if g.h264dec != nil {
+		g.h264dec.Close()
+		g.h264dec = newH264Decoder()
+	}
 }
 
 func (g *GfxHandler) onCreateSurface(data []byte) {
@@ -428,6 +453,10 @@ func (g *GfxHandler) onWireToSurface1(data []byte) {
 		decoded = decodePlanar(bmpData, w, h)
 	case codecClearCodec:
 		decoded = g.clearCtx.decode(bmpData, w, h)
+	case codecAVC420:
+		decoded = g.decodeAVC420(bmpData, w, h)
+	case codecAVC444:
+		decoded = g.decodeAVC444(bmpData, w, h)
 	default:
 		slog.Debug(fmt.Sprintf("RDPGFX: unsupported codec 0x%04X", codecId))
 		return
@@ -476,6 +505,18 @@ func (g *GfxHandler) onWireToSurface2(data []byte) {
 		decoded = g.clearCtx.decode(bmpData, w, h)
 		blitToSurface(s, 0, 0, w, h, decoded)
 		g.emitBitmap(s, 0, 0, w, h, decoded)
+	case codecAVC420:
+		decoded = g.decodeAVC420(bmpData, w, h)
+		if decoded != nil {
+			blitToSurface(s, 0, 0, w, h, decoded)
+			g.emitBitmap(s, 0, 0, w, h, decoded)
+		}
+	case codecAVC444:
+		decoded = g.decodeAVC444(bmpData, w, h)
+		if decoded != nil {
+			blitToSurface(s, 0, 0, w, h, decoded)
+			g.emitBitmap(s, 0, 0, w, h, decoded)
+		}
 	case codecProgressive:
 		// Decode tiles directly onto the persistent surface buffer.
 		// Each WTS2 PDU may contain only a subset of tiles; decoding
