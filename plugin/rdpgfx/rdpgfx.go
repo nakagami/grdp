@@ -26,25 +26,25 @@ const (
 	cmdidWireToSurface1           uint16 = 0x0001
 	cmdidWireToSurface2           uint16 = 0x0002
 	cmdidDeleteEncodingContext    uint16 = 0x0003
-	cmdidSolidFill               uint16 = 0x0004
+	cmdidSolidFill                uint16 = 0x0004
 	cmdidSurfaceToSurface         uint16 = 0x0005
 	cmdidSurfaceToCache           uint16 = 0x0006
-	cmdidCacheToSurface          uint16 = 0x0007
-	cmdidEvictCacheEntry         uint16 = 0x0008
-	cmdidCreateSurface           uint16 = 0x0009
-	cmdidDeleteSurface           uint16 = 0x000A
-	cmdidStartFrame              uint16 = 0x000B
-	cmdidEndFrame                uint16 = 0x000C
-	cmdidFrameAcknowledge        uint16 = 0x000D
-	cmdidResetGraphics           uint16 = 0x000E
-	cmdidMapSurfaceToOutput      uint16 = 0x000F
-	cmdidCacheImportOffer        uint16 = 0x0010
-	cmdidCacheImportReply        uint16 = 0x0011
-	cmdidCapsAdvertise           uint16 = 0x0012
-	cmdidCapsConfirm             uint16 = 0x0013
+	cmdidCacheToSurface           uint16 = 0x0007
+	cmdidEvictCacheEntry          uint16 = 0x0008
+	cmdidCreateSurface            uint16 = 0x0009
+	cmdidDeleteSurface            uint16 = 0x000A
+	cmdidStartFrame               uint16 = 0x000B
+	cmdidEndFrame                 uint16 = 0x000C
+	cmdidFrameAcknowledge         uint16 = 0x000D
+	cmdidResetGraphics            uint16 = 0x000E
+	cmdidMapSurfaceToOutput       uint16 = 0x000F
+	cmdidCacheImportOffer         uint16 = 0x0010
+	cmdidCacheImportReply         uint16 = 0x0011
+	cmdidCapsAdvertise            uint16 = 0x0012
+	cmdidCapsConfirm              uint16 = 0x0013
 	cmdidMapSurfaceToScaledOutput uint16 = 0x0015
 	cmdidMapSurfaceToScaledWindow uint16 = 0x0016
-	cmdidMapSurfaceToWindow      uint16 = 0x0018
+	cmdidMapSurfaceToWindow       uint16 = 0x0018
 )
 
 // Pixel Formats
@@ -129,11 +129,22 @@ type GfxHandler struct {
 	framesDecoded uint32
 	sendFn        func(data []byte)
 	onBitmap      func([]BitmapUpdate)
+	// decodeCh receives decompressed PDU data for asynchronous decode.
+	decodeCh chan []byte
+	// latestAck / ackReady implement a "latest value" pattern for frame
+	// ACKs.  The decode goroutine stores the most recent ACK PDU and
+	// signals ackReady; the writeLoop goroutine picks it up and sends
+	// via sendFn.  If writeLoop is blocked on socket.Write, successive
+	// ACKs simply overwrite latestAck so the server always receives the
+	// most up-to-date acknowledgement — no ACKs are silently lost.
+	ackMu     sync.Mutex
+	latestAck []byte
+	ackReady  chan struct{}
 }
 
 // NewGfxHandler creates a new RDPGFX handler.
 func NewGfxHandler(onBitmap func([]BitmapUpdate)) *GfxHandler {
-	return &GfxHandler{
+	g := &GfxHandler{
 		surfaces:     make(map[uint16]*surface),
 		cacheEntries: make(map[uint16]cacheEntry),
 		clearCtx:     newClearCodecCtx(),
@@ -142,7 +153,12 @@ func NewGfxHandler(onBitmap func([]BitmapUpdate)) *GfxHandler {
 		progressive:  newRfxProgressiveDecoder(),
 		h264dec:      newH264Decoder(),
 		onBitmap:     onBitmap,
+		decodeCh:     make(chan []byte, 64),
+		ackReady:     make(chan struct{}, 1),
 	}
+	go g.decodeLoop()
+	go g.writeLoop()
+	return g
 }
 
 // SetSendFunc sets the function used to send RDPGFX responses via DVC.
@@ -190,6 +206,12 @@ const (
 
 // Process handles a complete RDPGFX payload (may contain multiple PDUs).
 // Data arrives wrapped in ZGFX (RDP8 Bulk Compression) segments (MS-RDPEGFX 2.2.4).
+//
+// Called on the network read goroutine.  Decompression happens here;
+// the decompressed payload is then queued for asynchronous processing
+// (including frame ACKs and decode) on the decode goroutine.
+// This keeps the read goroutine free from any socket.Write calls that
+// could cause TCP deadlock when both sides try to write simultaneously.
 func (g *GfxHandler) Process(data []byte) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -200,28 +222,41 @@ func (g *GfxHandler) Process(data []byte) {
 		return
 	}
 
+	var decompressed []byte
+
 	descriptor := data[0]
 	switch descriptor {
 	case zgfxSingle:
 		if len(data) < 2 {
 			return
 		}
-		raw := g.decompressSegment(data[1:])
-		if raw != nil {
-			g.processPDUs(raw)
-		}
+		decompressed = g.decompressSegment(data[1:])
 	case zgfxMultipart:
-		g.processMultipart(data[1:])
+		decompressed = g.decompressMultipart(data[1:])
 	default:
 		slog.Warn(fmt.Sprintf("RDPGFX: unknown ZGFX descriptor 0x%02X, trying raw", descriptor))
-		g.processPDUs(data)
+		decompressed = data
+	}
+
+	if len(decompressed) == 0 {
+		return
+	}
+
+	// Queue decompressed data for async processing (ACKs + decode).
+	// Copy the slice so the decompression buffers can be reused.
+	msg := make([]byte, len(decompressed))
+	copy(msg, decompressed)
+	select {
+	case g.decodeCh <- msg:
+	default:
 	}
 }
 
 // decompressSegment handles a single ZGFX segment (after the descriptor byte).
 // First byte is RDP8_BULK_ENCODED_DATA header:
-//   bits 0-3: compression type (0x04 = RDP8)
-//   bit 5: PACKET_COMPRESSED (0x20)
+//
+//	bits 0-3: compression type (0x04 = RDP8)
+//	bit 5: PACKET_COMPRESSED (0x20)
 func (g *GfxHandler) decompressSegment(seg []byte) []byte {
 	if len(seg) < 1 {
 		return nil
@@ -229,59 +264,81 @@ func (g *GfxHandler) decompressSegment(seg []byte) []byte {
 	header := seg[0]
 	payload := seg[1:]
 	if header&0x20 != 0 {
-		// PACKET_COMPRESSED: use ZGFX decompression
 		return g.zgfx.Decompress(payload)
 	}
-	// Not compressed: raw data (still update history for future match references)
 	g.zgfx.historyWrite(payload)
 	return payload
 }
 
-// processMultipart handles ZGFX multipart segments (MS-RDPEGFX 2.2.4.1).
-func (g *GfxHandler) processMultipart(data []byte) {
+// decompressMultipart handles ZGFX multipart segments and returns the
+// concatenated decompressed data (without processing PDUs).
+func (g *GfxHandler) decompressMultipart(data []byte) []byte {
 	if len(data) < 6 {
-		return
+		return nil
 	}
 	r := bytes.NewReader(data)
 	segCount, _ := core.ReadUint16LE(r)
-	uncompSize, _ := core.ReadUInt32LE(r)
+	core.ReadUInt32LE(r) // uncompSize
 
 	buf := &bytes.Buffer{}
 	for i := uint16(0); i < segCount; i++ {
 		segSize, err := core.ReadUInt32LE(r)
 		if err != nil {
-			return
+			return nil
 		}
 		segData, err := core.ReadBytes(int(segSize), r)
 		if err != nil {
-			return
+			return nil
 		}
 		raw := g.decompressSegment(segData)
 		if raw != nil {
 			buf.Write(raw)
 		}
 	}
-	_ = uncompSize
-	g.processPDUs(buf.Bytes())
+	return buf.Bytes()
 }
 
-// processPDUs parses one or more RDPGFX PDUs from raw (uncompressed) data.
-func (g *GfxHandler) processPDUs(data []byte) {
+// decodeLoop runs in a dedicated goroutine, reading decompressed PDU data
+// from decodeCh and dispatching all processing — including frame ACKs and
+// heavy decode work.  Keeping socket.Write calls off the read goroutine
+// avoids TCP deadlock (where both sides try to write while neither reads).
+// It automatically restarts on panic.
+func (g *GfxHandler) decodeLoop() {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("RDPGFX: panic in decodeLoop, restarting", "err", r)
+			go g.decodeLoop()
+		}
+	}()
+	slog.Info("RDPGFX: decodeLoop started")
+	for data := range g.decodeCh {
+		g.decodePDUs(data)
+	}
+}
+
+// decodePDUs processes all PDUs in decompressed data.
+// Frame ACKs (EndFrame) are ALWAYS processed so the server gets timely
+// acknowledgements.  Heavy CaVideo/progressive decode is skipped when
+// the queue is backed up to drain quickly and catch up.
+func (g *GfxHandler) decodePDUs(data []byte) {
+	skipHeavy := len(g.decodeCh) > 0
+
 	for offset := 0; offset+headerSize <= len(data); {
 		cmdId := binary.LittleEndian.Uint16(data[offset:])
 		pduLength := binary.LittleEndian.Uint32(data[offset+4:])
 		if pduLength < uint32(headerSize) || int(pduLength) > len(data)-offset {
-			slog.Warn("RDPGFX: invalid PDU", "cmdId", cmdId, "pduLen", pduLength,
-				"offset", offset, "dataLen", len(data))
 			break
 		}
 		pduData := data[offset+headerSize : offset+int(pduLength)]
-		g.dispatch(cmdId, pduData)
+		g.dispatchDecode(cmdId, pduData, skipHeavy)
 		offset += int(pduLength)
 	}
 }
 
-func (g *GfxHandler) dispatch(cmdId uint16, data []byte) {
+// dispatchDecode routes a single PDU.  When skipHeavy is true, CaVideo
+// and progressive decode are skipped to drain the queue quickly.
+// EndFrame (frame ACK) is always processed regardless of skipHeavy.
+func (g *GfxHandler) dispatchDecode(cmdId uint16, data []byte, skipHeavy bool) {
 	switch cmdId {
 	case cmdidCapsConfirm:
 		g.onCapsConfirm(data)
@@ -296,11 +353,11 @@ func (g *GfxHandler) dispatch(cmdId uint16, data []byte) {
 	case cmdidStartFrame:
 		// nothing to do
 	case cmdidEndFrame:
-		g.onEndFrame(data)
+		g.onEndFrame(data) // always ACK, even when skipHeavy
 	case cmdidWireToSurface1:
-		g.onWireToSurface1(data)
+		g.onWireToSurface1Decode(data, skipHeavy)
 	case cmdidWireToSurface2:
-		g.onWireToSurface2(data)
+		g.onWireToSurface2Decode(data, skipHeavy)
 	case cmdidSolidFill:
 		g.onSolidFill(data)
 	case cmdidCacheToSurface:
@@ -316,6 +373,37 @@ func (g *GfxHandler) dispatch(cmdId uint16, data []byte) {
 	}
 }
 
+// writeLoop runs in a dedicated goroutine.  It waits for ackReady
+// signals, then sends the latest ACK via sendFn.  Because it always
+// re-checks latestAck after each send, it never misses an ACK that
+// arrived while sendFn was blocked.
+func (g *GfxHandler) writeLoop() {
+	for range g.ackReady {
+		g.drainAcks()
+	}
+}
+
+// drainAcks sends all pending ACKs.  Because successive ACKs overwrite
+// latestAck, at most one send per wake-up is needed.  After sendFn
+// returns (which may have blocked for seconds), it checks again for a
+// newer ACK that arrived in the meantime.
+func (g *GfxHandler) drainAcks() {
+	for {
+		g.ackMu.Lock()
+		pdu := g.latestAck
+		g.latestAck = nil
+		g.ackMu.Unlock()
+		if pdu == nil {
+			return
+		}
+		if g.sendFn != nil {
+			g.sendFn(pdu)
+		}
+	}
+}
+
+// sendPdu sends a PDU synchronously.  Used for rare control messages
+// (CapsAdvertise, CacheImportReply) that must not be dropped.
 func (g *GfxHandler) sendPdu(cmdId uint16, payload []byte) {
 	if g.sendFn == nil {
 		return
@@ -326,6 +414,26 @@ func (g *GfxHandler) sendPdu(cmdId uint16, payload []byte) {
 	core.WriteUInt32LE(uint32(headerSize+len(payload)), b)
 	b.Write(payload)
 	g.sendFn(b.Bytes())
+}
+
+// sendPduAsync stores a PDU as the latest pending ACK and signals the
+// writeLoop goroutine.  If an older ACK hasn't been sent yet it is
+// replaced — the server only needs the most recent acknowledgement.
+func (g *GfxHandler) sendPduAsync(cmdId uint16, payload []byte) {
+	b := &bytes.Buffer{}
+	core.WriteUInt16LE(cmdId, b)
+	core.WriteUInt16LE(0, b) // flags
+	core.WriteUInt32LE(uint32(headerSize+len(payload)), b)
+	b.Write(payload)
+	g.ackMu.Lock()
+	g.latestAck = b.Bytes()
+	g.ackMu.Unlock()
+	// Signal writeLoop (non-blocking; if already signaled, writeLoop
+	// will pick up the latest ACK after its current sendFn returns).
+	select {
+	case g.ackReady <- struct{}{}:
+	default:
+	}
 }
 
 // --- Command Handlers ---
@@ -409,13 +517,14 @@ func (g *GfxHandler) onEndFrame(data []byte) {
 	frameId := binary.LittleEndian.Uint32(data)
 	g.framesDecoded++
 	p := &bytes.Buffer{}
-	core.WriteUInt32LE(0xFFFFFFFF, p) // queueDepth
+	queueDepth := uint32(len(g.decodeCh))
+	core.WriteUInt32LE(queueDepth, p)
 	core.WriteUInt32LE(frameId, p)
 	core.WriteUInt32LE(g.framesDecoded, p)
-	g.sendPdu(cmdidFrameAcknowledge, p.Bytes())
+	g.sendPduAsync(cmdidFrameAcknowledge, p.Bytes())
 }
 
-func (g *GfxHandler) onWireToSurface1(data []byte) {
+func (g *GfxHandler) onWireToSurface1Decode(data []byte, skipHeavy bool) {
 	if len(data) < 17 {
 		return
 	}
@@ -444,16 +553,18 @@ func (g *GfxHandler) onWireToSurface1(data []byte) {
 	// CaVideo (0x0003) carries RFX tile-encoded data; decode onto the
 	// persistent surface buffer like the progressive codec in WTS2.
 	if codecId == codecCaVideo {
+		if skipHeavy {
+			return
+		}
 		rects := g.rfx.Decode(bmpData, int(left), int(top), s.data, int(s.width), int(s.height))
+		if !s.mapped || g.onBitmap == nil || len(rects) == 0 {
+			return
+		}
+		updates := make([]BitmapUpdate, 0, len(rects))
+		stride := int(s.width) * 4
 		for _, rc := range rects {
 			needed := rc.w * rc.h * 4
-			region := regionPool.Get().([]byte)
-			if cap(region) < needed {
-				region = make([]byte, needed)
-			} else {
-				region = region[:needed]
-			}
-			stride := int(s.width) * 4
+			region := make([]byte, needed)
 			rowBytes := rc.w * 4
 			for row := 0; row < rc.h; row++ {
 				srcOff := (rc.y+row)*stride + rc.x*4
@@ -462,9 +573,15 @@ func (g *GfxHandler) onWireToSurface1(data []byte) {
 					copy(region[dstOff:dstOff+rowBytes], s.data[srcOff:srcOff+rowBytes])
 				}
 			}
-			g.emitBitmap(s, rc.x, rc.y, rc.w, rc.h, region)
-			regionPool.Put(region)
+			destL := int(s.outputX) + rc.x
+			destT := int(s.outputY) + rc.y
+			updates = append(updates, BitmapUpdate{
+				DestLeft: destL, DestTop: destT,
+				DestRight: destL + rc.w - 1, DestBottom: destT + rc.h - 1,
+				Width: rc.w, Height: rc.h, Bpp: 4, Data: region,
+			})
 		}
+		g.onBitmap(updates)
 		return
 	}
 
@@ -490,9 +607,8 @@ func (g *GfxHandler) onWireToSurface1(data []byte) {
 	g.emitBitmap(s, int(left), int(top), w, h, decoded)
 }
 
-// onWireToSurface2 handles RDPGFX_WIRE_TO_SURFACE_PDU_2 (MS-RDPEGFX 2.2.2.2).
-// Used in RDPGFX v8.1+ with progressive or AVC codecs.
-func (g *GfxHandler) onWireToSurface2(data []byte) {
+// onWireToSurface2Decode handles RDPGFX_WIRE_TO_SURFACE_PDU_2 (MS-RDPEGFX 2.2.2.2).
+func (g *GfxHandler) onWireToSurface2Decode(data []byte, skipHeavy bool) {
 	if len(data) < 13 {
 		return
 	}
@@ -523,26 +639,33 @@ func (g *GfxHandler) onWireToSurface2(data []byte) {
 		blitToSurface(s, 0, 0, w, h, decoded)
 		g.emitBitmap(s, 0, 0, w, h, decoded)
 	case codecCaVideo:
+		if skipHeavy {
+			break // frame drop
+		}
 		rects := g.rfx.Decode(bmpData, 0, 0, s.data, w, h)
-		for _, rc := range rects {
-			needed := rc.w * rc.h * 4
-			region := regionPool.Get().([]byte)
-			if cap(region) < needed {
-				region = make([]byte, needed)
-			} else {
-				region = region[:needed]
-			}
+		if s.mapped && g.onBitmap != nil && len(rects) > 0 {
+			updates := make([]BitmapUpdate, 0, len(rects))
 			stride := w * 4
-			rowBytes := rc.w * 4
-			for row := 0; row < rc.h; row++ {
-				srcOff := (rc.y+row)*stride + rc.x*4
-				dstOff := row * rowBytes
-				if srcOff+rowBytes <= len(s.data) {
-					copy(region[dstOff:dstOff+rowBytes], s.data[srcOff:srcOff+rowBytes])
+			for _, rc := range rects {
+				needed := rc.w * rc.h * 4
+				region := make([]byte, needed)
+				rowBytes := rc.w * 4
+				for row := 0; row < rc.h; row++ {
+					srcOff := (rc.y+row)*stride + rc.x*4
+					dstOff := row * rowBytes
+					if srcOff+rowBytes <= len(s.data) {
+						copy(region[dstOff:dstOff+rowBytes], s.data[srcOff:srcOff+rowBytes])
+					}
 				}
+				destL := int(s.outputX) + rc.x
+				destT := int(s.outputY) + rc.y
+				updates = append(updates, BitmapUpdate{
+					DestLeft: destL, DestTop: destT,
+					DestRight: destL + rc.w - 1, DestBottom: destT + rc.h - 1,
+					Width: rc.w, Height: rc.h, Bpp: 4, Data: region,
+				})
 			}
-			g.emitBitmap(s, rc.x, rc.y, rc.w, rc.h, region)
-			regionPool.Put(region)
+			g.onBitmap(updates)
 		}
 	case codecAVC420:
 		decoded = g.decodeAVC420(bmpData, w, h)
@@ -557,12 +680,12 @@ func (g *GfxHandler) onWireToSurface2(data []byte) {
 			g.emitBitmap(s, 0, 0, w, h, decoded)
 		}
 	case codecProgressive:
+		if skipHeavy {
+			break // frame drop
+		}
 		// Decode tiles directly onto the persistent surface buffer.
-		// Each WTS2 PDU may contain only a subset of tiles; decoding
-		// onto s.data preserves previously rendered tiles.
 		rects := g.progressive.Decode(bmpData, s.data, w, h)
 		for _, rc := range rects {
-			// Reuse pooled buffer for rectangle extraction
 			needed := rc.w * rc.h * 4
 			region := regionPool.Get().([]byte)
 			if cap(region) < needed {
