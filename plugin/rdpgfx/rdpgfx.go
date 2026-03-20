@@ -53,14 +53,15 @@ const (
 	pixelFormatARGB8888 uint8 = 0x21
 )
 
-// Codec IDs
+// Codec IDs (MS-RDPEGFX 2.2.2.1 / FreeRDP rdpgfx.h)
 const (
 	codecUncompressed uint16 = 0x0000
-	codecClearCodec   uint16 = 0x0003
+	codecCaVideo      uint16 = 0x0003 // RDPGFX_CODECID_CAVIDEO (RemoteFX tiles)
 	codecPlanar       uint16 = 0x0004
 	codecProgressive  uint16 = 0x0009
-	codecAVC420       uint16 = 0x000A
-	codecAVC444       uint16 = 0x000B
+	codecAVC420       uint16 = 0x000B
+	codecAVC444       uint16 = 0x000E
+	codecAVC444v2     uint16 = 0x000F
 )
 
 // Capability versions and flags
@@ -122,6 +123,7 @@ type GfxHandler struct {
 	cacheEntries  map[uint16]cacheEntry
 	clearCtx      *clearCodecCtx
 	zgfx          *zgfxContext
+	rfx           *rfxDecoder
 	progressive   *rfxProgressiveDecoder
 	h264dec       h264Decoder
 	framesDecoded uint32
@@ -136,6 +138,7 @@ func NewGfxHandler(onBitmap func([]BitmapUpdate)) *GfxHandler {
 		cacheEntries: make(map[uint16]cacheEntry),
 		clearCtx:     newClearCodecCtx(),
 		zgfx:         newZgfxContext(),
+		rfx:          newRfxDecoder(),
 		progressive:  newRfxProgressiveDecoder(),
 		h264dec:      newH264Decoder(),
 		onBitmap:     onBitmap,
@@ -158,29 +161,21 @@ func (g *GfxHandler) OnChannelCreated() {
 // send any graphics data (MS-RDPEGFX 2.2.3.1).
 func (g *GfxHandler) sendCapsAdvertise() {
 	p := &bytes.Buffer{}
+	// Always advertise a single v8.0 capset to keep the proven protocol
+	// flow.  When the H.264 decoder is available we omit the AVC_DISABLED
+	// flag so the server may send AVC420 encoded bitmaps (MS-RDPEGFX 2.2.3.1).
+	core.WriteUInt16LE(1, p)
+	core.WriteUInt32LE(capVersion8, p)
+	core.WriteUInt32LE(4, p) // capsDataLength
+	flags := capFlagThinClient | capFlagSmallCache
+	if g.h264dec == nil {
+		flags |= capFlagAVCDisabled
+	}
+	core.WriteUInt32LE(flags, p)
+	g.sendPdu(cmdidCapsAdvertise, p.Bytes())
 	if g.h264dec != nil {
-		// H.264 available: advertise v10 + v8.1 + v8.0 with AVC enabled.
-		core.WriteUInt16LE(3, p)
-		// v10 (AVC444 + AVC420)
-		core.WriteUInt32LE(capVersion10, p)
-		core.WriteUInt32LE(4, p)
-		core.WriteUInt32LE(capFlagThinClient|capFlagSmallCache, p)
-		// v8.1 (AVC420)
-		core.WriteUInt32LE(capVersion81, p)
-		core.WriteUInt32LE(4, p)
-		core.WriteUInt32LE(capFlagThinClient|capFlagSmallCache, p)
-		// v8.0 fallback
-		core.WriteUInt32LE(capVersion8, p)
-		core.WriteUInt32LE(4, p)
-		core.WriteUInt32LE(capFlagThinClient|capFlagSmallCache|capFlagAVCDisabled, p)
-		g.sendPdu(cmdidCapsAdvertise, p.Bytes())
-		slog.Info("RDPGFX: sent CAPS_ADVERTISE (v10+v8.1+v8.0, AVC enabled)")
+		slog.Info("RDPGFX: sent CAPS_ADVERTISE (v8.0, AVC enabled)")
 	} else {
-		core.WriteUInt16LE(1, p)
-		core.WriteUInt32LE(capVersion8, p)
-		core.WriteUInt32LE(4, p)
-		core.WriteUInt32LE(capFlagThinClient|capFlagSmallCache|capFlagAVCDisabled, p)
-		g.sendPdu(cmdidCapsAdvertise, p.Bytes())
 		slog.Info("RDPGFX: sent CAPS_ADVERTISE (v8.0, AVC disabled)")
 	}
 }
@@ -237,7 +232,8 @@ func (g *GfxHandler) decompressSegment(seg []byte) []byte {
 		// PACKET_COMPRESSED: use ZGFX decompression
 		return g.zgfx.Decompress(payload)
 	}
-	// Not compressed: raw data
+	// Not compressed: raw data (still update history for future match references)
+	g.zgfx.historyWrite(payload)
 	return payload
 }
 
@@ -248,7 +244,7 @@ func (g *GfxHandler) processMultipart(data []byte) {
 	}
 	r := bytes.NewReader(data)
 	segCount, _ := core.ReadUint16LE(r)
-	_, _ = core.ReadUInt32LE(r) // uncompressedSize
+	uncompSize, _ := core.ReadUInt32LE(r)
 
 	buf := &bytes.Buffer{}
 	for i := uint16(0); i < segCount; i++ {
@@ -265,6 +261,7 @@ func (g *GfxHandler) processMultipart(data []byte) {
 			buf.Write(raw)
 		}
 	}
+	_ = uncompSize
 	g.processPDUs(buf.Bytes())
 }
 
@@ -285,7 +282,6 @@ func (g *GfxHandler) processPDUs(data []byte) {
 }
 
 func (g *GfxHandler) dispatch(cmdId uint16, data []byte) {
-	slog.Info(fmt.Sprintf("RDPGFX: cmd=0x%04X len=%d", cmdId, len(data)))
 	switch cmdId {
 	case cmdidCapsConfirm:
 		g.onCapsConfirm(data)
@@ -445,20 +441,45 @@ func (g *GfxHandler) onWireToSurface1(data []byte) {
 		return
 	}
 
+	// CaVideo (0x0003) carries RFX tile-encoded data; decode onto the
+	// persistent surface buffer like the progressive codec in WTS2.
+	if codecId == codecCaVideo {
+		rects := g.rfx.Decode(bmpData, int(left), int(top), s.data, int(s.width), int(s.height))
+		for _, rc := range rects {
+			needed := rc.w * rc.h * 4
+			region := regionPool.Get().([]byte)
+			if cap(region) < needed {
+				region = make([]byte, needed)
+			} else {
+				region = region[:needed]
+			}
+			stride := int(s.width) * 4
+			rowBytes := rc.w * 4
+			for row := 0; row < rc.h; row++ {
+				srcOff := (rc.y+row)*stride + rc.x*4
+				dstOff := row * rowBytes
+				if srcOff+rowBytes <= len(s.data) {
+					copy(region[dstOff:dstOff+rowBytes], s.data[srcOff:srcOff+rowBytes])
+				}
+			}
+			g.emitBitmap(s, rc.x, rc.y, rc.w, rc.h, region)
+			regionPool.Put(region)
+		}
+		return
+	}
+
 	var decoded []byte
 	switch codecId {
 	case codecUncompressed:
 		decoded = decodeUncompressed(bmpData, w, h, pixFmt)
 	case codecPlanar:
 		decoded = decodePlanar(bmpData, w, h)
-	case codecClearCodec:
-		decoded = g.clearCtx.decode(bmpData, w, h)
 	case codecAVC420:
 		decoded = g.decodeAVC420(bmpData, w, h)
-	case codecAVC444:
+	case codecAVC444, codecAVC444v2:
 		decoded = g.decodeAVC444(bmpData, w, h)
 	default:
-		slog.Debug(fmt.Sprintf("RDPGFX: unsupported codec 0x%04X", codecId))
+		slog.Warn(fmt.Sprintf("RDPGFX: unsupported codec 0x%04X in WTS1 (surf=%d %dx%d bmpLen=%d)", codecId, surfId, w, h, bmpLen))
 		return
 	}
 	if decoded == nil {
@@ -501,17 +522,35 @@ func (g *GfxHandler) onWireToSurface2(data []byte) {
 		decoded = decodePlanar(bmpData, w, h)
 		blitToSurface(s, 0, 0, w, h, decoded)
 		g.emitBitmap(s, 0, 0, w, h, decoded)
-	case codecClearCodec:
-		decoded = g.clearCtx.decode(bmpData, w, h)
-		blitToSurface(s, 0, 0, w, h, decoded)
-		g.emitBitmap(s, 0, 0, w, h, decoded)
+	case codecCaVideo:
+		rects := g.rfx.Decode(bmpData, 0, 0, s.data, w, h)
+		for _, rc := range rects {
+			needed := rc.w * rc.h * 4
+			region := regionPool.Get().([]byte)
+			if cap(region) < needed {
+				region = make([]byte, needed)
+			} else {
+				region = region[:needed]
+			}
+			stride := w * 4
+			rowBytes := rc.w * 4
+			for row := 0; row < rc.h; row++ {
+				srcOff := (rc.y+row)*stride + rc.x*4
+				dstOff := row * rowBytes
+				if srcOff+rowBytes <= len(s.data) {
+					copy(region[dstOff:dstOff+rowBytes], s.data[srcOff:srcOff+rowBytes])
+				}
+			}
+			g.emitBitmap(s, rc.x, rc.y, rc.w, rc.h, region)
+			regionPool.Put(region)
+		}
 	case codecAVC420:
 		decoded = g.decodeAVC420(bmpData, w, h)
 		if decoded != nil {
 			blitToSurface(s, 0, 0, w, h, decoded)
 			g.emitBitmap(s, 0, 0, w, h, decoded)
 		}
-	case codecAVC444:
+	case codecAVC444, codecAVC444v2:
 		decoded = g.decodeAVC444(bmpData, w, h)
 		if decoded != nil {
 			blitToSurface(s, 0, 0, w, h, decoded)
@@ -687,7 +726,6 @@ func (g *GfxHandler) emitBitmap(s *surface, x, y, w, h int, decoded []byte) {
 	}
 	destL := int(s.outputX) + x
 	destT := int(s.outputY) + y
-	slog.Info("RDPGFX: emit bitmap", "x", destL, "y", destT, "w", w, "h", h)
 	g.onBitmap([]BitmapUpdate{{
 		DestLeft: destL, DestTop: destT,
 		DestRight: destL + w - 1, DestBottom: destT + h - 1,
