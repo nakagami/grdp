@@ -72,6 +72,26 @@ cd grdp
 go run example/gxui.go
 ```
 
+### AVC/H.264 Hardware Accelerated Codec (Optional)
+
+By default, grdp is pure Go and AVC (H.264) codecs are disabled.
+To enable hardware-accelerated H.264 decoding, build with the `h264` tag and FFmpeg (≥ 3.4) development libraries:
+
+```
+# macOS
+brew install ffmpeg
+
+# Debian/Ubuntu
+sudo apt install libavcodec-dev libavutil-dev libswscale-dev pkg-config
+
+# Build with AVC support
+go run -tags h264 example/gxui.go
+```
+
+When built with `-tags h264`, the client advertises RDPGFX v10/v8.1 capabilities
+and supports AVC420/AVC444 codecs. Hardware acceleration (VideoToolbox on macOS,
+VAAPI on Linux) is automatically used when available, with a software fallback.
+
 This example uses gxui.
 Since gxui is no longer being updated, I hope to have some kind of cross-platform GUI example.
 
