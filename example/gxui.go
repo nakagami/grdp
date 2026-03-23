@@ -175,7 +175,13 @@ func uiRdp(hostPort, domain, user, password string, width, height int, keyboardT
 			copy(d, bs[i].Data)
 			bs[i].Data = d
 		}
-		bitmapCH <- bs
+		// Non-blocking send: drop frames if the paint goroutine can't
+		// keep up.  This prevents the decode goroutine from blocking on
+		// downstream rendering, which would stall frame ACKs.
+		select {
+		case bitmapCH <- bs:
+		default:
+		}
 	})
 
 	return nil, g
@@ -336,31 +342,34 @@ func appMain(driver gxui.Driver) {
 
 func update() {
 	go func() {
-		for {
-			select {
-			case bs := <-bitmapCH:
-				paint_bitmap(bs)
-			default:
+		for bs := range bitmapCH {
+			screenMu.Lock()
+			paintBitmapsLocked(bs)
+		drain:
+			for {
+				select {
+				case more := <-bitmapCH:
+					paintBitmapsLocked(more)
+				default:
+					break drain
+				}
 			}
+			screenMu.Unlock()
+
+			driverc.Call(func() {
+				texture := driverc.CreateTexture(screenImage, 1)
+				img.SetTexture(texture)
+			})
 		}
 	}()
 }
 
-func paint_bitmap(bs []grdp.Bitmap) {
-	screenMu.Lock()
+func paintBitmapsLocked(bs []grdp.Bitmap) {
 	for _, bm := range bs {
 		m := bm.RGBA()
-		// Clip to the visible destination rectangle; bitmap Width may be
-		// padded wider than the actual visible area (DestRight-DestLeft+1).
 		destRect := image.Rect(bm.DestLeft, bm.DestTop, bm.DestRight+1, bm.DestBottom+1)
 		draw.Draw(screenImage, destRect, m, image.Pt(0, 0), draw.Src)
 	}
-	screenMu.Unlock()
-
-	driverc.Call(func() {
-		texture := driverc.CreateTexture(screenImage, 1)
-		img.SetTexture(texture)
-	})
 }
 
 func transKey(in gxui.KeyboardKey) int {
@@ -478,7 +487,7 @@ func transKey(in gxui.KeyboardKey) int {
 }
 
 func main() {
-	handler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})
+	handler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})
 	slog.SetDefault(slog.New(handler))
 	gl.StartDriver(appMain)
 }
