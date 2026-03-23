@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 
 	"github.com/nakagami/grdp/core"
 	"github.com/nakagami/grdp/plugin"
@@ -26,25 +27,25 @@ const (
 	cmdidWireToSurface1           uint16 = 0x0001
 	cmdidWireToSurface2           uint16 = 0x0002
 	cmdidDeleteEncodingContext    uint16 = 0x0003
-	cmdidSolidFill               uint16 = 0x0004
+	cmdidSolidFill                uint16 = 0x0004
 	cmdidSurfaceToSurface         uint16 = 0x0005
 	cmdidSurfaceToCache           uint16 = 0x0006
-	cmdidCacheToSurface          uint16 = 0x0007
-	cmdidEvictCacheEntry         uint16 = 0x0008
-	cmdidCreateSurface           uint16 = 0x0009
-	cmdidDeleteSurface           uint16 = 0x000A
-	cmdidStartFrame              uint16 = 0x000B
-	cmdidEndFrame                uint16 = 0x000C
-	cmdidFrameAcknowledge        uint16 = 0x000D
-	cmdidResetGraphics           uint16 = 0x000E
-	cmdidMapSurfaceToOutput      uint16 = 0x000F
-	cmdidCacheImportOffer        uint16 = 0x0010
-	cmdidCacheImportReply        uint16 = 0x0011
-	cmdidCapsAdvertise           uint16 = 0x0012
-	cmdidCapsConfirm             uint16 = 0x0013
+	cmdidCacheToSurface           uint16 = 0x0007
+	cmdidEvictCacheEntry          uint16 = 0x0008
+	cmdidCreateSurface            uint16 = 0x0009
+	cmdidDeleteSurface            uint16 = 0x000A
+	cmdidStartFrame               uint16 = 0x000B
+	cmdidEndFrame                 uint16 = 0x000C
+	cmdidFrameAcknowledge         uint16 = 0x000D
+	cmdidResetGraphics            uint16 = 0x000E
+	cmdidMapSurfaceToOutput       uint16 = 0x000F
+	cmdidCacheImportOffer         uint16 = 0x0010
+	cmdidCacheImportReply         uint16 = 0x0011
+	cmdidCapsAdvertise            uint16 = 0x0012
+	cmdidCapsConfirm              uint16 = 0x0013
 	cmdidMapSurfaceToScaledOutput uint16 = 0x0015
 	cmdidMapSurfaceToScaledWindow uint16 = 0x0016
-	cmdidMapSurfaceToWindow      uint16 = 0x0018
+	cmdidMapSurfaceToWindow       uint16 = 0x0018
 )
 
 // Pixel Formats
@@ -53,12 +54,15 @@ const (
 	pixelFormatARGB8888 uint8 = 0x21
 )
 
-// Codec IDs
+// Codec IDs (MS-RDPEGFX 2.2.2.1 / FreeRDP rdpgfx.h)
 const (
 	codecUncompressed uint16 = 0x0000
-	codecClearCodec   uint16 = 0x0003
+	codecCaVideo      uint16 = 0x0003 // RDPGFX_CODECID_CAVIDEO (RemoteFX tiles)
 	codecPlanar       uint16 = 0x0004
 	codecProgressive  uint16 = 0x0009
+	codecAVC420       uint16 = 0x000B
+	codecAVC444       uint16 = 0x000E
+	codecAVC444v2     uint16 = 0x000F
 )
 
 // Capability versions and flags
@@ -116,26 +120,43 @@ type cacheEntry struct {
 
 // GfxHandler implements the RDPGFX (MS-RDPEGFX) protocol.
 type GfxHandler struct {
-	surfaces      map[uint16]*surface
-	cacheEntries  map[uint16]cacheEntry
-	clearCtx      *clearCodecCtx
-	zgfx          *zgfxContext
-	progressive   *rfxProgressiveDecoder
-	framesDecoded uint32
+	surfaces     map[uint16]*surface
+	cacheEntries map[uint16]cacheEntry
+	clearCtx     *clearCodecCtx
+	zgfx         *zgfxContext
+	rfx          *rfxDecoder
+	progressive  *rfxProgressiveDecoder
+	h264dec      h264Decoder
+	// framesDecoded is accessed from both read and decode goroutines.
+	framesDecoded atomic.Uint32
 	sendFn        func(data []byte)
 	onBitmap      func([]BitmapUpdate)
+	// decodeCh receives decompressed PDU data for asynchronous decode.
+	decodeCh chan []byte
+	// ackCh is a buffered channel of serialized ACK PDUs.  Every
+	// EndFrame ACK is enqueued here and the writeLoop goroutine sends
+	// each one to the server.  The server tracks outstanding frames
+	// individually, so skipping ACKs causes it to stop sending.
+	ackCh chan []byte
 }
 
 // NewGfxHandler creates a new RDPGFX handler.
 func NewGfxHandler(onBitmap func([]BitmapUpdate)) *GfxHandler {
-	return &GfxHandler{
+	g := &GfxHandler{
 		surfaces:     make(map[uint16]*surface),
 		cacheEntries: make(map[uint16]cacheEntry),
 		clearCtx:     newClearCodecCtx(),
 		zgfx:         newZgfxContext(),
+		rfx:          newRfxDecoder(),
 		progressive:  newRfxProgressiveDecoder(),
+		h264dec:      newH264Decoder(),
 		onBitmap:     onBitmap,
+		decodeCh:     make(chan []byte, 256),
+		ackCh:        make(chan []byte, 256),
 	}
+	go g.decodeLoop()
+	go g.writeLoop()
+	return g
 }
 
 // SetSendFunc sets the function used to send RDPGFX responses via DVC.
@@ -154,14 +175,23 @@ func (g *GfxHandler) OnChannelCreated() {
 // send any graphics data (MS-RDPEGFX 2.2.3.1).
 func (g *GfxHandler) sendCapsAdvertise() {
 	p := &bytes.Buffer{}
-	// capsSetCount
+	// Always advertise a single v8.0 capset to keep the proven protocol
+	// flow.  When the H.264 decoder is available we omit the AVC_DISABLED
+	// flag so the server may send AVC420 encoded bitmaps (MS-RDPEGFX 2.2.3.1).
 	core.WriteUInt16LE(1, p)
-	// RDPGFX_CAPSET: version 8.0
 	core.WriteUInt32LE(capVersion8, p)
 	core.WriteUInt32LE(4, p) // capsDataLength
-	core.WriteUInt32LE(capFlagThinClient|capFlagSmallCache|capFlagAVCDisabled, p)
+	flags := capFlagThinClient | capFlagSmallCache
+	if g.h264dec == nil {
+		flags |= capFlagAVCDisabled
+	}
+	core.WriteUInt32LE(flags, p)
 	g.sendPdu(cmdidCapsAdvertise, p.Bytes())
-	slog.Info("RDPGFX: sent CAPS_ADVERTISE (v8.0, THINCLIENT|SMALLCACHE|AVC_DISABLED)")
+	if g.h264dec != nil {
+		slog.Info("RDPGFX: sent CAPS_ADVERTISE (v8.0, AVC enabled)")
+	} else {
+		slog.Info("RDPGFX: sent CAPS_ADVERTISE (v8.0, AVC disabled)")
+	}
 }
 
 // ZGFX segment descriptors (MS-RDPEGFX 2.2.4)
@@ -174,6 +204,12 @@ const (
 
 // Process handles a complete RDPGFX payload (may contain multiple PDUs).
 // Data arrives wrapped in ZGFX (RDP8 Bulk Compression) segments (MS-RDPEGFX 2.2.4).
+//
+// Called on the network read goroutine.  Decompression happens here;
+// the decompressed payload is then queued for asynchronous processing
+// (including frame ACKs and decode) on the decode goroutine.
+// This keeps the read goroutine free from any socket.Write calls that
+// could cause TCP deadlock when both sides try to write simultaneously.
 func (g *GfxHandler) Process(data []byte) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -184,28 +220,68 @@ func (g *GfxHandler) Process(data []byte) {
 		return
 	}
 
+	var decompressed []byte
+
 	descriptor := data[0]
 	switch descriptor {
 	case zgfxSingle:
 		if len(data) < 2 {
 			return
 		}
-		raw := g.decompressSegment(data[1:])
-		if raw != nil {
-			g.processPDUs(raw)
-		}
+		decompressed = g.decompressSegment(data[1:])
 	case zgfxMultipart:
-		g.processMultipart(data[1:])
+		decompressed = g.decompressMultipart(data[1:])
 	default:
 		slog.Warn(fmt.Sprintf("RDPGFX: unknown ZGFX descriptor 0x%02X, trying raw", descriptor))
-		g.processPDUs(data)
+		decompressed = data
+	}
+
+	if len(decompressed) == 0 {
+		return
+	}
+
+	// Queue decompressed data for async processing (ACKs + decode).
+	// Copy the slice so the decompression buffers can be reused.
+	msg := make([]byte, len(decompressed))
+	copy(msg, decompressed)
+	select {
+	case g.decodeCh <- msg:
+	default:
+		// Channel full — video decode is dropped, but we must still
+		// ACK any EndFrame PDUs so the server's outstanding-frame
+		// count stays accurate and it keeps sending.
+		slog.Warn("RDPGFX: decodeCh full, dropping frame (ACKs preserved)", "queueCap", cap(g.decodeCh))
+		g.ackDroppedFrames(msg)
+	}
+}
+
+// ackDroppedFrames scans decompressed PDU data for EndFrame commands
+// and sends ACKs for them.  Called on the read goroutine when decodeCh
+// is full and the message is being dropped.  Without this, dropped
+// EndFrames would leave the server's outstanding-frame count stuck,
+// eventually causing it to stop sending entirely.
+func (g *GfxHandler) ackDroppedFrames(data []byte) {
+	for offset := 0; offset+headerSize <= len(data); {
+		cmdId := binary.LittleEndian.Uint16(data[offset:])
+		pduLength := binary.LittleEndian.Uint32(data[offset+4:])
+		if pduLength < uint32(headerSize) || int(pduLength) > len(data)-offset {
+			break
+		}
+		if cmdId == cmdidEndFrame {
+			pduData := data[offset+headerSize : offset+int(pduLength)]
+			if len(pduData) >= 4 {
+				g.sendFrameAck(binary.LittleEndian.Uint32(pduData))
+			}
+		}
+		offset += int(pduLength)
 	}
 }
 
 // decompressSegment handles a single ZGFX segment (after the descriptor byte).
 // First byte is RDP8_BULK_ENCODED_DATA header:
-//   bits 0-3: compression type (0x04 = RDP8)
-//   bit 5: PACKET_COMPRESSED (0x20)
+//
+//	bits 0-3: compression type (0x04 = RDP8)
+//	bit 5: PACKET_COMPRESSED (0x20)
 func (g *GfxHandler) decompressSegment(seg []byte) []byte {
 	if len(seg) < 1 {
 		return nil
@@ -213,58 +289,87 @@ func (g *GfxHandler) decompressSegment(seg []byte) []byte {
 	header := seg[0]
 	payload := seg[1:]
 	if header&0x20 != 0 {
-		// PACKET_COMPRESSED: use ZGFX decompression
 		return g.zgfx.Decompress(payload)
 	}
-	// Not compressed: raw data
+	g.zgfx.historyWrite(payload)
 	return payload
 }
 
-// processMultipart handles ZGFX multipart segments (MS-RDPEGFX 2.2.4.1).
-func (g *GfxHandler) processMultipart(data []byte) {
+// decompressMultipart handles ZGFX multipart segments and returns the
+// concatenated decompressed data (without processing PDUs).
+func (g *GfxHandler) decompressMultipart(data []byte) []byte {
 	if len(data) < 6 {
-		return
+		return nil
 	}
 	r := bytes.NewReader(data)
 	segCount, _ := core.ReadUint16LE(r)
-	_, _ = core.ReadUInt32LE(r) // uncompressedSize
+	core.ReadUInt32LE(r) // uncompSize
 
 	buf := &bytes.Buffer{}
 	for i := uint16(0); i < segCount; i++ {
 		segSize, err := core.ReadUInt32LE(r)
 		if err != nil {
-			return
+			return nil
 		}
 		segData, err := core.ReadBytes(int(segSize), r)
 		if err != nil {
-			return
+			return nil
 		}
 		raw := g.decompressSegment(segData)
 		if raw != nil {
 			buf.Write(raw)
 		}
 	}
-	g.processPDUs(buf.Bytes())
+	return buf.Bytes()
 }
 
-// processPDUs parses one or more RDPGFX PDUs from raw (uncompressed) data.
-func (g *GfxHandler) processPDUs(data []byte) {
+// decodeLoop runs in a dedicated goroutine, reading decompressed PDU data
+// from decodeCh and dispatching all processing — including frame ACKs and
+// heavy decode work.  Keeping socket.Write calls off the read goroutine
+// avoids TCP deadlock (where both sides try to write while neither reads).
+// It automatically restarts on panic.
+func (g *GfxHandler) decodeLoop() {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("RDPGFX: panic in decodeLoop, restarting", "err", r)
+			go g.decodeLoop()
+		}
+	}()
+	slog.Info("RDPGFX: decodeLoop started")
+	for data := range g.decodeCh {
+		g.decodePDUs(data)
+	}
+}
+
+// skipHeavyThreshold controls when CaVideo/progressive decode is skipped.
+// When the queue has more items than this, heavy decode is skipped to drain
+// the backlog quickly.  A small threshold means we decode almost every frame
+// during normal playback, only skipping under severe backpressure.
+const skipHeavyThreshold = 16
+
+// decodePDUs processes all PDUs in decompressed data.
+// Frame ACKs (EndFrame) are ALWAYS processed so the server gets timely
+// acknowledgements.  Heavy CaVideo/progressive decode is skipped when
+// the queue is significantly backed up.
+func (g *GfxHandler) decodePDUs(data []byte) {
+	skipHeavy := len(g.decodeCh) > skipHeavyThreshold
+
 	for offset := 0; offset+headerSize <= len(data); {
 		cmdId := binary.LittleEndian.Uint16(data[offset:])
 		pduLength := binary.LittleEndian.Uint32(data[offset+4:])
 		if pduLength < uint32(headerSize) || int(pduLength) > len(data)-offset {
-			slog.Warn("RDPGFX: invalid PDU", "cmdId", cmdId, "pduLen", pduLength,
-				"offset", offset, "dataLen", len(data))
 			break
 		}
 		pduData := data[offset+headerSize : offset+int(pduLength)]
-		g.dispatch(cmdId, pduData)
+		g.dispatchDecode(cmdId, pduData, skipHeavy)
 		offset += int(pduLength)
 	}
 }
 
-func (g *GfxHandler) dispatch(cmdId uint16, data []byte) {
-	slog.Info(fmt.Sprintf("RDPGFX: cmd=0x%04X len=%d", cmdId, len(data)))
+// dispatchDecode routes a single PDU.  When skipHeavy is true, CaVideo
+// and progressive decode are skipped to drain the queue quickly.
+// EndFrame (frame ACK) is always processed regardless of skipHeavy.
+func (g *GfxHandler) dispatchDecode(cmdId uint16, data []byte, skipHeavy bool) {
 	switch cmdId {
 	case cmdidCapsConfirm:
 		g.onCapsConfirm(data)
@@ -279,11 +384,11 @@ func (g *GfxHandler) dispatch(cmdId uint16, data []byte) {
 	case cmdidStartFrame:
 		// nothing to do
 	case cmdidEndFrame:
-		g.onEndFrame(data)
+		g.onEndFrame(data) // always ACK, even when skipHeavy
 	case cmdidWireToSurface1:
-		g.onWireToSurface1(data)
+		g.onWireToSurface1Decode(data, skipHeavy)
 	case cmdidWireToSurface2:
-		g.onWireToSurface2(data)
+		g.onWireToSurface2Decode(data, skipHeavy)
 	case cmdidSolidFill:
 		g.onSolidFill(data)
 	case cmdidCacheToSurface:
@@ -299,6 +404,26 @@ func (g *GfxHandler) dispatch(cmdId uint16, data []byte) {
 	}
 }
 
+// writeLoop runs in a dedicated goroutine.  It reads serialized ACK
+// PDUs from ackCh and sends each one via sendFn.  Every ACK must reach
+// the server — the server tracks outstanding frames individually and
+// stops sending if ACKs are missing.  Automatically restarts on panic.
+func (g *GfxHandler) writeLoop() {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("RDPGFX: panic in writeLoop, restarting", "err", r)
+			go g.writeLoop()
+		}
+	}()
+	for pdu := range g.ackCh {
+		if g.sendFn != nil {
+			g.sendFn(pdu)
+		}
+	}
+}
+
+// sendPdu sends a PDU synchronously.  Used for rare control messages
+// (CapsAdvertise, CacheImportReply) that must not be dropped.
 func (g *GfxHandler) sendPdu(cmdId uint16, payload []byte) {
 	if g.sendFn == nil {
 		return
@@ -309,6 +434,22 @@ func (g *GfxHandler) sendPdu(cmdId uint16, payload []byte) {
 	core.WriteUInt32LE(uint32(headerSize+len(payload)), b)
 	b.Write(payload)
 	g.sendFn(b.Bytes())
+}
+
+// sendPduAsync enqueues a PDU for the writeLoop goroutine to send.
+// Every ACK must be delivered to the server, so this uses a buffered
+// channel rather than a single-value "latest" slot.
+func (g *GfxHandler) sendPduAsync(cmdId uint16, payload []byte) {
+	b := &bytes.Buffer{}
+	core.WriteUInt16LE(cmdId, b)
+	core.WriteUInt16LE(0, b) // flags
+	core.WriteUInt32LE(uint32(headerSize+len(payload)), b)
+	b.Write(payload)
+	select {
+	case g.ackCh <- b.Bytes():
+	default:
+		slog.Warn("RDPGFX: ackCh full, ACK dropped")
+	}
 }
 
 // --- Command Handlers ---
@@ -338,6 +479,11 @@ func (g *GfxHandler) onResetGraphics(data []byte) {
 	slog.Info(fmt.Sprintf("RDPGFX: RESET_GRAPHICS %dx%d", w, h))
 	g.surfaces = make(map[uint16]*surface)
 	g.clearCtx = newClearCodecCtx()
+	g.framesDecoded.Store(0)
+	if g.h264dec != nil {
+		g.h264dec.Close()
+		g.h264dec = newH264Decoder()
+	}
 }
 
 func (g *GfxHandler) onCreateSurface(data []byte) {
@@ -381,20 +527,26 @@ func (g *GfxHandler) onMapSurfaceToOutput(data []byte) {
 	}
 }
 
+// sendFrameAck builds and queues a FRAME_ACKNOWLEDGE PDU.
+// Safe to call from any goroutine (uses atomic framesDecoded and
+// mutex-protected latestAck).
+func (g *GfxHandler) sendFrameAck(frameId uint32) {
+	decoded := g.framesDecoded.Add(1)
+	p := &bytes.Buffer{}
+	core.WriteUInt32LE(0, p)
+	core.WriteUInt32LE(frameId, p)
+	core.WriteUInt32LE(decoded, p)
+	g.sendPduAsync(cmdidFrameAcknowledge, p.Bytes())
+}
+
 func (g *GfxHandler) onEndFrame(data []byte) {
 	if len(data) < 4 {
 		return
 	}
-	frameId := binary.LittleEndian.Uint32(data)
-	g.framesDecoded++
-	p := &bytes.Buffer{}
-	core.WriteUInt32LE(0xFFFFFFFF, p) // queueDepth
-	core.WriteUInt32LE(frameId, p)
-	core.WriteUInt32LE(g.framesDecoded, p)
-	g.sendPdu(cmdidFrameAcknowledge, p.Bytes())
+	g.sendFrameAck(binary.LittleEndian.Uint32(data))
 }
 
-func (g *GfxHandler) onWireToSurface1(data []byte) {
+func (g *GfxHandler) onWireToSurface1Decode(data []byte, skipHeavy bool) {
 	if len(data) < 17 {
 		return
 	}
@@ -420,16 +572,53 @@ func (g *GfxHandler) onWireToSurface1(data []byte) {
 		return
 	}
 
+	// CaVideo (0x0003) carries RFX tile-encoded data; decode onto the
+	// persistent surface buffer like the progressive codec in WTS2.
+	if codecId == codecCaVideo {
+		if skipHeavy {
+			return
+		}
+		rects := g.rfx.Decode(bmpData, int(left), int(top), s.data, int(s.width), int(s.height))
+		if !s.mapped || g.onBitmap == nil || len(rects) == 0 {
+			return
+		}
+		updates := make([]BitmapUpdate, 0, len(rects))
+		stride := int(s.width) * 4
+		for _, rc := range rects {
+			needed := rc.w * rc.h * 4
+			region := make([]byte, needed)
+			rowBytes := rc.w * 4
+			for row := 0; row < rc.h; row++ {
+				srcOff := (rc.y+row)*stride + rc.x*4
+				dstOff := row * rowBytes
+				if srcOff+rowBytes <= len(s.data) {
+					copy(region[dstOff:dstOff+rowBytes], s.data[srcOff:srcOff+rowBytes])
+				}
+			}
+			destL := int(s.outputX) + rc.x
+			destT := int(s.outputY) + rc.y
+			updates = append(updates, BitmapUpdate{
+				DestLeft: destL, DestTop: destT,
+				DestRight: destL + rc.w - 1, DestBottom: destT + rc.h - 1,
+				Width: rc.w, Height: rc.h, Bpp: 4, Data: region,
+			})
+		}
+		g.onBitmap(updates)
+		return
+	}
+
 	var decoded []byte
 	switch codecId {
 	case codecUncompressed:
 		decoded = decodeUncompressed(bmpData, w, h, pixFmt)
 	case codecPlanar:
 		decoded = decodePlanar(bmpData, w, h)
-	case codecClearCodec:
-		decoded = g.clearCtx.decode(bmpData, w, h)
+	case codecAVC420:
+		decoded = g.decodeAVC420(bmpData, w, h)
+	case codecAVC444, codecAVC444v2:
+		decoded = g.decodeAVC444(bmpData, w, h)
 	default:
-		slog.Debug(fmt.Sprintf("RDPGFX: unsupported codec 0x%04X", codecId))
+		slog.Warn(fmt.Sprintf("RDPGFX: unsupported codec 0x%04X in WTS1 (surf=%d %dx%d bmpLen=%d)", codecId, surfId, w, h, bmpLen))
 		return
 	}
 	if decoded == nil {
@@ -440,9 +629,8 @@ func (g *GfxHandler) onWireToSurface1(data []byte) {
 	g.emitBitmap(s, int(left), int(top), w, h, decoded)
 }
 
-// onWireToSurface2 handles RDPGFX_WIRE_TO_SURFACE_PDU_2 (MS-RDPEGFX 2.2.2.2).
-// Used in RDPGFX v8.1+ with progressive or AVC codecs.
-func (g *GfxHandler) onWireToSurface2(data []byte) {
+// onWireToSurface2Decode handles RDPGFX_WIRE_TO_SURFACE_PDU_2 (MS-RDPEGFX 2.2.2.2).
+func (g *GfxHandler) onWireToSurface2Decode(data []byte, skipHeavy bool) {
 	if len(data) < 13 {
 		return
 	}
@@ -472,17 +660,54 @@ func (g *GfxHandler) onWireToSurface2(data []byte) {
 		decoded = decodePlanar(bmpData, w, h)
 		blitToSurface(s, 0, 0, w, h, decoded)
 		g.emitBitmap(s, 0, 0, w, h, decoded)
-	case codecClearCodec:
-		decoded = g.clearCtx.decode(bmpData, w, h)
-		blitToSurface(s, 0, 0, w, h, decoded)
-		g.emitBitmap(s, 0, 0, w, h, decoded)
+	case codecCaVideo:
+		if skipHeavy {
+			break // frame drop
+		}
+		rects := g.rfx.Decode(bmpData, 0, 0, s.data, w, h)
+		if s.mapped && g.onBitmap != nil && len(rects) > 0 {
+			updates := make([]BitmapUpdate, 0, len(rects))
+			stride := w * 4
+			for _, rc := range rects {
+				needed := rc.w * rc.h * 4
+				region := make([]byte, needed)
+				rowBytes := rc.w * 4
+				for row := 0; row < rc.h; row++ {
+					srcOff := (rc.y+row)*stride + rc.x*4
+					dstOff := row * rowBytes
+					if srcOff+rowBytes <= len(s.data) {
+						copy(region[dstOff:dstOff+rowBytes], s.data[srcOff:srcOff+rowBytes])
+					}
+				}
+				destL := int(s.outputX) + rc.x
+				destT := int(s.outputY) + rc.y
+				updates = append(updates, BitmapUpdate{
+					DestLeft: destL, DestTop: destT,
+					DestRight: destL + rc.w - 1, DestBottom: destT + rc.h - 1,
+					Width: rc.w, Height: rc.h, Bpp: 4, Data: region,
+				})
+			}
+			g.onBitmap(updates)
+		}
+	case codecAVC420:
+		decoded = g.decodeAVC420(bmpData, w, h)
+		if decoded != nil {
+			blitToSurface(s, 0, 0, w, h, decoded)
+			g.emitBitmap(s, 0, 0, w, h, decoded)
+		}
+	case codecAVC444, codecAVC444v2:
+		decoded = g.decodeAVC444(bmpData, w, h)
+		if decoded != nil {
+			blitToSurface(s, 0, 0, w, h, decoded)
+			g.emitBitmap(s, 0, 0, w, h, decoded)
+		}
 	case codecProgressive:
+		if skipHeavy {
+			break // frame drop
+		}
 		// Decode tiles directly onto the persistent surface buffer.
-		// Each WTS2 PDU may contain only a subset of tiles; decoding
-		// onto s.data preserves previously rendered tiles.
 		rects := g.progressive.Decode(bmpData, s.data, w, h)
 		for _, rc := range rects {
-			// Reuse pooled buffer for rectangle extraction
 			needed := rc.w * rc.h * 4
 			region := regionPool.Get().([]byte)
 			if cap(region) < needed {
@@ -646,7 +871,6 @@ func (g *GfxHandler) emitBitmap(s *surface, x, y, w, h int, decoded []byte) {
 	}
 	destL := int(s.outputX) + x
 	destT := int(s.outputY) + y
-	slog.Info("RDPGFX: emit bitmap", "x", destL, "y", destT, "w", w, "h", h)
 	g.onBitmap([]BitmapUpdate{{
 		DestLeft: destL, DestTop: destT,
 		DestRight: destL + w - 1, DestBottom: destT + h - 1,
