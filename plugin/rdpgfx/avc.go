@@ -163,6 +163,8 @@ func (g *GfxHandler) decodeAVC444(data []byte, destW, destH int) []byte {
 	if frame == nil {
 		return nil
 	}
+	slog.Info("RDPGFX: AVC444 decoded", "frameW", frame.Width, "frameH", frame.Height,
+		"destW", destW, "destH", destH, "h264Len", len(stream.h264Data))
 	return cropBGRA(frame.Data, frame.Width, frame.Height, destW, destH)
 }
 
