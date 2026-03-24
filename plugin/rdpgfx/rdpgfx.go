@@ -175,21 +175,31 @@ func (g *GfxHandler) OnChannelCreated() {
 // send any graphics data (MS-RDPEGFX 2.2.3.1).
 func (g *GfxHandler) sendCapsAdvertise() {
 	p := &bytes.Buffer{}
-	// Always advertise a single v8.0 capset to keep the proven protocol
-	// flow.  When the H.264 decoder is available we omit the AVC_DISABLED
-	// flag so the server may send AVC420 encoded bitmaps (MS-RDPEGFX 2.2.3.1).
-	core.WriteUInt16LE(1, p)
-	core.WriteUInt32LE(capVersion8, p)
-	core.WriteUInt32LE(4, p) // capsDataLength
-	flags := capFlagThinClient | capFlagSmallCache
-	if g.h264dec == nil {
-		flags |= capFlagAVCDisabled
-	}
-	core.WriteUInt32LE(flags, p)
-	g.sendPdu(cmdidCapsAdvertise, p.Bytes())
+
 	if g.h264dec != nil {
-		slog.Info("RDPGFX: sent CAPS_ADVERTISE (v8.0, AVC enabled)")
+		// Advertise v10 (AVC444) and v8.0 (AVC420) capsets.
+		// Do NOT set capFlagThinClient — the flag causes the server
+		// to prefer RemoteFX over H.264 even when AVC is not disabled.
+		core.WriteUInt16LE(2, p) // capsSetCount
+
+		// v10 capset — preferred; enables AVC444 + AVC420
+		core.WriteUInt32LE(capVersion10, p)
+		core.WriteUInt32LE(4, p) // capsDataLength
+		core.WriteUInt32LE(capFlagSmallCache, p)
+
+		// v8.0 capset — fallback; enables AVC420
+		core.WriteUInt32LE(capVersion8, p)
+		core.WriteUInt32LE(4, p) // capsDataLength
+		core.WriteUInt32LE(capFlagSmallCache, p)
+
+		g.sendPdu(cmdidCapsAdvertise, p.Bytes())
+		slog.Info("RDPGFX: sent CAPS_ADVERTISE (v10+v8.0, AVC enabled)")
 	} else {
+		core.WriteUInt16LE(1, p) // capsSetCount
+		core.WriteUInt32LE(capVersion8, p)
+		core.WriteUInt32LE(4, p) // capsDataLength
+		core.WriteUInt32LE(capFlagThinClient|capFlagSmallCache|capFlagAVCDisabled, p)
+		g.sendPdu(cmdidCapsAdvertise, p.Bytes())
 		slog.Info("RDPGFX: sent CAPS_ADVERTISE (v8.0, AVC disabled)")
 	}
 }
@@ -561,6 +571,8 @@ func (g *GfxHandler) onWireToSurface1Decode(data []byte, skipHeavy bool) {
 	bmpLen, _ := core.ReadUInt32LE(r)
 	bmpData, _ := core.ReadBytes(int(bmpLen), r)
 
+	slog.Info(fmt.Sprintf("RDPGFX: WTS1 surfId=%d codecId=0x%04X %dx%d bmpLen=%d", surfId, codecId, right-left, bottom-top, bmpLen))
+
 	w := int(right - left)
 	h := int(bottom - top)
 	if w <= 0 || h <= 0 {
@@ -649,6 +661,8 @@ func (g *GfxHandler) onWireToSurface2Decode(data []byte, skipHeavy bool) {
 
 	w := int(s.width)
 	h := int(s.height)
+
+	slog.Info(fmt.Sprintf("RDPGFX: WTS2 surfId=%d codecId=0x%04X %dx%d bmpLen=%d", surfId, codecId, w, h, bmpLen))
 
 	var decoded []byte
 	switch codecId {
