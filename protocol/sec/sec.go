@@ -700,22 +700,22 @@ func (c *Client) recvLicenceInfo(channel string, s []byte) {
 	p := lic.ReadLicensePacket(r)
 	switch p.BMsgtype {
 	case lic.NEW_LICENSE:
-		slog.Info("sec NEW_LICENSE")
+		slog.Debug("sec NEW_LICENSE")
 		c.Emit("success")
 		goto connect
 	case lic.ERROR_ALERT:
 		message := p.LicensingMessage.(*lic.ErrorMessage)
-		slog.Info("recvLicenceInfo ERROR_ALERT", "ErrorCode", message.DwErrorCode)
+		slog.Debug("recvLicenceInfo ERROR_ALERT", "ErrorCode", message.DwErrorCode)
 		if message.DwErrorCode == lic.STATUS_VALID_CLIENT && message.DwStateTransaction == lic.ST_NO_TRANSITION {
 			goto connect
 		}
 		goto retry
 	case lic.LICENSE_REQUEST:
-		slog.Info("recvLicenceInfo LICENSE_REQUEST")
+		slog.Debug("recvLicenceInfo LICENSE_REQUEST")
 		c.sendClientNewLicenseRequest(p.LicensingMessage.([]byte))
 		goto retry
 	case lic.PLATFORM_CHALLENGE:
-		slog.Info("recvLicenceInfo PLATFORM_CHALLENGE")
+		slog.Debug("recvLicenceInfo PLATFORM_CHALLENGE")
 		c.sendClientChallengeResponse(p.LicensingMessage.([]byte))
 		goto retry
 	default:

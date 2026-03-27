@@ -385,7 +385,7 @@ func readConfirmActivePDU(r io.Reader) (*ConfirmActivePDU, error) {
 		p.CapabilitySets = append(p.CapabilitySets, c)
 	}
 	s, _ := core.ReadUInt32LE(r)
-	slog.Info("readConfirmActivePDU", "sessionid", s)
+	slog.Debug("readConfirmActivePDU", "sessionid", s)
 	return p, nil
 }
 
@@ -480,7 +480,7 @@ func readServerRedirectionPDU(r io.Reader) (*ServerRedirectionPDU, error) {
 		}
 	}
 
-	slog.Info("Server Redirection PDU",
+	slog.Debug("Server Redirection PDU",
 		"flags", fmt.Sprintf("0x%04x", redir.Flags),
 		"sessionID", redir.SessionID,
 		"redirFlags", fmt.Sprintf("0x%08x", redir.RedirFlags),
@@ -806,7 +806,7 @@ func (s *SaveSessionInfo) logonInfoV1(r io.Reader) (err error) {
 
 	sessionId, _ := core.ReadUInt32LE(r)
 	s.LogonId = sessionId
-	slog.Info(fmt.Sprintf("SessionId:[%d] UserName:[%s] Domain:[%s]", s.LogonId, userName, domain))
+	slog.Debug(fmt.Sprintf("SessionId:[%d] UserName:[%s] Domain:[%s]", s.LogonId, userName, domain))
 	return err
 }
 func (s *SaveSessionInfo) logonInfoV2(r io.Reader) (err error) {
@@ -822,7 +822,7 @@ func (s *SaveSessionInfo) logonInfoV2(r io.Reader) (err error) {
 	domain := core.UnicodeDecode(b)
 	b, _ = core.ReadBytes(int(cbUserName), r)
 	userName := core.UnicodeDecode(b)
-	slog.Info(fmt.Sprintf("SessionId:[%d] UserName:[ %s] Domain:[ %s]", s.LogonId, userName, domain))
+	slog.Debug(fmt.Sprintf("SessionId:[%d] UserName:[ %s] Domain:[ %s]", s.LogonId, userName, domain))
 
 	return err
 }
@@ -833,7 +833,7 @@ func (s *SaveSessionInfo) logonPlainNotify(r io.Reader) (err error) {
 func (s *SaveSessionInfo) logonInfoExtended(r io.Reader) (err error) {
 	s.Length, err = core.ReadUint16LE(r)
 	s.FieldsPresent, err = core.ReadUInt32LE(r)
-	//slog.Info("FieldsPresent:", s.FieldsPresent)
+	//slog.Debug("FieldsPresent:", s.FieldsPresent)
 	// auto reconnect cookie
 	if s.FieldsPresent&LOGON_EX_AUTORECONNECTCOOKIE != 0 {
 		core.ReadUInt32LE(r)
@@ -1074,7 +1074,7 @@ func decodeSurfaceBitsCmd(r io.Reader) (*BitmapData, error) {
 		return nil, fmt.Errorf("failed to read bitmap data: %v", err)
 	}
 
-	slog.Info("decodeSurfaceBitsCmd",
+	slog.Debug("decodeSurfaceBitsCmd",
 		"dest", fmt.Sprintf("(%d,%d)-(%d,%d)", destLeft, destTop, destRight, destBottom),
 		"size", fmt.Sprintf("%dx%d", width, height),
 		"bpp", bpp, "codecID", codecID, "flags", flags, "dataLen", bitmapDataLength)
@@ -1514,7 +1514,7 @@ func readPDU(r io.Reader) (*PDU, error) {
 		slog.Debug("readPDU:PDUTYPE_DEACTIVATEALLPDU")
 		d, err = readDeactiveAllPDU(r)
 	case PDUTYPE_SERVER_REDIR_PKT:
-		slog.Info("readPDU:PDUTYPE_SERVER_REDIR_PKT")
+		slog.Debug("readPDU:PDUTYPE_SERVER_REDIR_PKT")
 		d, err = readServerRedirectionPDU(r)
 	default:
 		slog.Error(fmt.Sprintf("PDU invalid pdu type: 0x%02x", pdu.ShareCtrlHeader.PDUType))

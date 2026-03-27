@@ -153,19 +153,19 @@ func uiRdp(hostPort, domain, user, password string, width, height int, keyboardT
 	}
 
 	g.OnError(func(e error) {
-		slog.Info("on error", "err", e)
+		slog.Debug("on error", "err", e)
 	}).OnClose(func() {
-		slog.Info("on close")
+		slog.Debug("on close")
 	}).OnSucces(func() {
-		slog.Info("on success")
+		slog.Debug("on success")
 	}).OnReady(func() {
-		slog.Info("on ready")
+		slog.Debug("on ready")
 	}).OnPointerHide(func() {
-		slog.Info("on pointer_hide")
+		slog.Debug("on pointer_hide")
 	}).OnPointerCached(func(idx uint16) {
-		slog.Info("on pointer_cached", "idx", idx)
+		slog.Debug("on pointer_cached", "idx", idx)
 	}).OnPointerUpdate(func(idx uint16, bpp uint16, x uint16, y uint16, width uint16, height uint16, mask []byte, data []byte) {
-		slog.Info("on pointer_update", "idx", idx)
+		slog.Debug("on pointer_update", "idx", idx)
 	}).OnBitmap(func(bs []grdp.Bitmap) {
 		// Bitmap.Data for compressed bitmaps is borrowed from an internal
 		// pool and only valid for the duration of this callback.  Copy the
@@ -232,7 +232,7 @@ func appMain(driver gxui.Driver) {
 		otoCtx = ctx
 		otoPlayer = otoCtx.NewPlayer(audioStr)
 		otoPlayer.Play()
-		slog.Info("Audio output initialized")
+		slog.Debug("Audio output initialized")
 	}
 
 	theme := light.CreateTheme(driver)
@@ -325,7 +325,7 @@ func appMain(driver gxui.Driver) {
 			resizeTimer.Stop()
 		}
 		resizeTimer = time.AfterFunc(500*time.Millisecond, func() {
-			slog.Info("Window resized, reconnecting", "width", w, "height", h)
+			slog.Debug("Window resized, reconnecting", "width", w, "height", h)
 			if err := rdpClient.Reconnect(w, h); err != nil {
 				slog.Error("Reconnect failed", "err", err)
 				return
