@@ -110,20 +110,20 @@ func (c *RailClient) Process(s []byte) {
 	msgType, _ := core.ReadUint16LE(r)
 	length, _ := core.ReadUint16LE(r)
 
-	slog.Info(fmt.Sprintf("rail: type=0x%x length=%d, all=%d", msgType, length, r.Len()))
+	slog.Debug(fmt.Sprintf("rail: type=0x%x length=%d, all=%d", msgType, length, r.Len()))
 
 	b, _ := core.ReadBytes(int(length), r)
-	slog.Info("b:", hex.EncodeToString(b))
+	slog.Debug("b:", hex.EncodeToString(b))
 
 	switch msgType {
 	case TS_RAIL_ORDER_HANDSHAKE:
-		slog.Info("TS_RAIL_ORDER_HANDSHAKE")
+		slog.Debug("TS_RAIL_ORDER_HANDSHAKE")
 		c.processOrderHandshake(b)
 	case TS_RAIL_ORDER_SYSPARAM:
-		slog.Info("TS_RAIL_ORDER_SYSPARAM")
+		slog.Debug("TS_RAIL_ORDER_SYSPARAM")
 		c.processOrderSysparam(b)
 	case TS_RAIL_ORDER_EXEC_RESULT:
-		slog.Info("TS_RAIL_ORDER_EXEC_RESULT")
+		slog.Debug("TS_RAIL_ORDER_EXEC_RESULT")
 		c.processExecResult(b)
 
 	default:
@@ -134,7 +134,7 @@ func (c *RailClient) Process(s []byte) {
 func (c *RailClient) processOrderHandshake(b []byte) {
 	r := bytes.NewReader(b)
 	buildNumber, _ := core.ReadUInt32LE(r)
-	slog.Info("buildNumber:", buildNumber)
+	slog.Debug("buildNumber:", buildNumber)
 
 	//send client info
 	c.sendClientStatus()
@@ -159,7 +159,7 @@ const (
 )
 
 func (c *RailClient) sendClientStatus() {
-	slog.Info("Send client Status")
+	slog.Debug("Send client Status")
 	var flags uint32 = TS_RAIL_CLIENTSTATUS_ALLOWLOCALMOVESIZE
 
 	//if (settings->AutoReconnectionEnabled)
@@ -251,7 +251,7 @@ type RailSysparamOrder struct {
 }
 
 func (c *RailClient) sendClientSystemparam() {
-	slog.Info("Send client Systemparam")
+	slog.Debug("Send client Systemparam")
 
 	var sp RailSysparamOrder
 	sp.params = 0
@@ -389,7 +389,7 @@ type RailExecOrder struct {
 }
 
 func (c *RailClient) sendClientExecute() {
-	slog.Info("Send Client Execute")
+	slog.Debug("Send Client Execute")
 	var exec RailExecOrder
 	//exec.flags = TS_RAIL_EXEC_FLAG_EXPAND_ARGUMENTS
 	exec.RemoteApplicationProgram = c.RemoteApplicationProgram
@@ -419,7 +419,7 @@ func (c *RailClient) processOrderSysparam(b []byte) {
 	r := bytes.NewReader(b)
 	systemParam, _ := core.ReadUInt32LE(r)
 	body, _ := core.ReadUInt8(r)
-	slog.Info(fmt.Sprintf("systemParam:0x%x, body:%d", systemParam, body))
+	slog.Debug(fmt.Sprintf("systemParam:0x%x, body:%d", systemParam, body))
 }
 
 const (
@@ -447,6 +447,6 @@ func (c *RailClient) processExecResult(b []byte) {
 	core.ReadUint16LE(r)
 	exeOrFileLength, _ := core.ReadUint16LE(r)
 	exeOrFile, _ := core.ReadBytes(r.Len(), r)
-	slog.Info("flags:", flags, "execResult:", execResult, "rawResult:", rawResult)
-	slog.Info("length:", exeOrFileLength, "file:", core.UnicodeDecode(exeOrFile))
+	slog.Debug("flags:", flags, "execResult:", execResult, "rawResult:", rawResult)
+	slog.Debug("length:", exeOrFileLength, "file:", core.UnicodeDecode(exeOrFile))
 }

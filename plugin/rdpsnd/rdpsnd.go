@@ -207,7 +207,7 @@ func (h *Handler) ProcessData(data []byte) {
 	case SNDC_WAVE2:
 		h.processWave2(body)
 	case SNDC_CLOSE:
-		slog.Info("rdpsnd: server closed audio channel")
+		slog.Debug("rdpsnd: server closed audio channel")
 	case SNDC_SETVOLUME, SNDC_QUALITYMODE:
 		// ignored
 	default:
@@ -228,7 +228,7 @@ func (h *Handler) processServerFormats(body []byte) {
 	wNumberOfFormats := binary.LittleEndian.Uint16(body[14:])
 	wVersion := binary.LittleEndian.Uint16(body[17:])
 
-	slog.Info("rdpsnd: Server Formats", "version", wVersion, "numFormats", wNumberOfFormats)
+	slog.Debug("rdpsnd: Server Formats", "version", wVersion, "numFormats", wNumberOfFormats)
 
 	offset := 20
 	h.serverFormats = nil
@@ -289,7 +289,7 @@ func (h *Handler) sendClientFormats(serverVersion uint16) {
 	pdu.Write(body)
 
 	h.send(pdu.Bytes())
-	slog.Info("rdpsnd: sent Client Formats", "version", version, "numFormats", len(h.clientFormatIndices))
+	slog.Debug("rdpsnd: sent Client Formats", "version", version, "numFormats", len(h.clientFormatIndices))
 }
 
 // --- Training (MS-RDPEA 2.2.2.3) ---

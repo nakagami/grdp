@@ -142,7 +142,7 @@ func (h *CliprdrHandler) sendClipCaps() {
 // --- Monitor Ready (MS-RDPECLIP 2.2.2.2) ----------------------------------
 
 func (h *CliprdrHandler) processMonitorReady() {
-	slog.Info("cliprdr: server Monitor Ready")
+	slog.Debug("cliprdr: server Monitor Ready")
 	h.sendClipCaps()
 	h.sendFormatList()
 }

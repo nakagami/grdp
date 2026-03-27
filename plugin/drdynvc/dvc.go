@@ -151,10 +151,10 @@ func (c *DvcClient) Process(s []byte) {
 
 	switch hdr.cmd {
 	case DYNVC_CAPABILITIES:
-		slog.Info("DYNVC_CAPABILITIES")
+		slog.Debug("DYNVC_CAPABILITIES")
 		c.processCapsPdu(hdr, b)
 	case DYNVC_CREATE_REQ:
-		slog.Info("DYNVC_CREATE_REQ")
+		slog.Debug("DYNVC_CREATE_REQ")
 		c.processCreateReq(hdr, b)
 	case DYNVC_DATA_FIRST:
 		c.processDataFirst(hdr, b)
@@ -163,7 +163,7 @@ func (c *DvcClient) Process(s []byte) {
 	case DYNVC_CLOSE:
 		c.processClose(hdr, b)
 	case DYNVC_SOFT_SYNC_REQUEST:
-		slog.Info("DYNVC_SOFT_SYNC_REQUEST")
+		slog.Debug("DYNVC_SOFT_SYNC_REQUEST")
 		c.processSoftSyncRequest(hdr, b)
 	default:
 		slog.Warn(fmt.Sprintf("dvc: unhandled cmd 0x%x", hdr.cmd))
@@ -187,7 +187,7 @@ func (c *DvcClient) processCreateReq(hdr *DvcHeader, s []byte) {
 	channelId := readDvcId(r, hdr.cbChId)
 	nameBytes, _ := core.ReadBytes(r.Len(), r)
 	channelName := strings.TrimRight(string(nameBytes), "\x00")
-	slog.Info(fmt.Sprintf("Server requests channelId=%d, name=%s", channelId, channelName))
+	slog.Debug(fmt.Sprintf("Server requests channelId=%d, name=%s", channelId, channelName))
 
 	// Associate handler if registered
 	var handler DvcChannelHandler
@@ -208,7 +208,7 @@ func (c *DvcClient) processCreateReq(hdr *DvcHeader, s []byte) {
 				c.SendDvcData(chId, data)
 			})
 		}
-		slog.Info(fmt.Sprintf("dvc: handler registered for channel %s (id=%d)", channelName, channelId))
+		slog.Debug(fmt.Sprintf("dvc: handler registered for channel %s (id=%d)", channelName, channelId))
 	}
 
 	// Send creation response (MS-RDPEDYC 2.2.2.2)
@@ -222,7 +222,7 @@ func (c *DvcClient) processCreateReq(hdr *DvcHeader, s []byte) {
 		// Reject: no handler registered — prevents server from using
 		// unsupported features (e.g. Video Optimized Remoting).
 		core.WriteUInt32LE(0xC0000001, b) // STATUS_UNSUCCESSFUL
-		slog.Info(fmt.Sprintf("dvc: rejected channel %s (id=%d) — no handler", channelName, channelId))
+		slog.Debug(fmt.Sprintf("dvc: rejected channel %s (id=%d) — no handler", channelName, channelId))
 	}
 	c.Send(b.Bytes())
 
@@ -317,7 +317,7 @@ func (c *DvcClient) processCapsPdu(hdr *DvcHeader, s []byte) {
 	r := bytes.NewReader(s)
 	core.ReadUInt8(r)
 	ver, _ := core.ReadUint16LE(r)
-	slog.Info(fmt.Sprintf("Server supports dvc=%d", ver))
+	slog.Debug(fmt.Sprintf("Server supports dvc=%d", ver))
 
 	// Respond with the server's version (up to 3).
 	// Version 3 is required for some servers to activate RDPGFX.
@@ -342,7 +342,7 @@ func (c *DvcClient) processSoftSyncRequest(hdr *DvcHeader, s []byte) {
 	length, _ := core.ReadUInt32LE(r) // Length
 	flags, _ := core.ReadUint16LE(r)  // Flags
 	numTunnels, _ := core.ReadUint16LE(r)
-	slog.Info("DYNVC_SOFT_SYNC_REQUEST", "length", length, "flags", flags, "numTunnels", numTunnels)
+	slog.Debug("DYNVC_SOFT_SYNC_REQUEST", "length", length, "flags", flags, "numTunnels", numTunnels)
 
 	// Send SOFT_SYNC_RESPONSE: header + pad + length(4)
 	b := &bytes.Buffer{}

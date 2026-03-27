@@ -66,43 +66,43 @@ func (c *CliprdrClient) Process(s []byte) {
 
 	switch msgType {
 	case CB_CLIP_CAPS:
-		slog.Info("CB_CLIP_CAPS")
+		slog.Debug("CB_CLIP_CAPS")
 		c.processClipCaps(b)
 
 	case CB_MONITOR_READY:
-		slog.Info("CB_MONITOR_READY")
+		slog.Debug("CB_MONITOR_READY")
 		c.processMonitorReady(b)
 
 	case CB_FORMAT_LIST:
-		slog.Info("CB_FORMAT_LIST")
+		slog.Debug("CB_FORMAT_LIST")
 		c.processFormatList(b)
 
 	case CB_FORMAT_LIST_RESPONSE:
-		slog.Info("CB_FORMAT_LIST_RESPONSE")
+		slog.Debug("CB_FORMAT_LIST_RESPONSE")
 		c.processFormatListResponse(flag, b)
 
 	case CB_FORMAT_DATA_REQUEST:
-		slog.Info("CB_FORMAT_DATA_REQUEST")
+		slog.Debug("CB_FORMAT_DATA_REQUEST")
 		c.processFormatDataRequest(b)
 
 	case CB_FORMAT_DATA_RESPONSE:
-		slog.Info("CB_FORMAT_DATA_RESPONSE")
+		slog.Debug("CB_FORMAT_DATA_RESPONSE")
 		c.processFormatDataResponse(flag, b)
 
 	case CB_FILECONTENTS_REQUEST:
-		slog.Info("CB_FILECONTENTS_REQUEST")
+		slog.Debug("CB_FILECONTENTS_REQUEST")
 		c.processFileContentsRequest(b)
 
 	case CB_FILECONTENTS_RESPONSE:
-		slog.Info("CB_FILECONTENTS_RESPONSE")
+		slog.Debug("CB_FILECONTENTS_RESPONSE")
 		c.processFileContentsResponse(flag, b)
 
 	case CB_LOCK_CLIPDATA:
-		slog.Info("CB_LOCK_CLIPDATA")
+		slog.Debug("CB_LOCK_CLIPDATA")
 		c.processLockClipData(b)
 
 	case CB_UNLOCK_CLIPDATA:
-		slog.Info("CB_UNLOCK_CLIPDATA")
+		slog.Debug("CB_UNLOCK_CLIPDATA")
 		c.processUnlockClipData(b)
 
 	default:
@@ -123,11 +123,11 @@ func (c *CliprdrClient) processClipCaps(b []byte) {
 	c.fileClipNoFilePaths = cp.CapabilitySets[0].GeneralFlags&CB_FILECLIP_NO_FILE_PATHS != 0
 	c.canLockClipData = cp.CapabilitySets[0].GeneralFlags&CB_CAN_LOCK_CLIPDATA != 0
 	c.hasHugeFileSupport = cp.CapabilitySets[0].GeneralFlags&CB_HUGE_FILE_SUPPORT_ENABLED != 0
-	slog.Info("UseLongFormatNames:", c.useLongFormatNames)
-	slog.Info("StreamFileClipEnabled:", c.streamFileClipEnabled)
-	slog.Info("FileClipNoFilePaths:", c.fileClipNoFilePaths)
-	slog.Info("CanLockClipData:", c.canLockClipData)
-	slog.Info("HasHugeFileSupport:", c.hasHugeFileSupport)
+	slog.Debug("UseLongFormatNames:", c.useLongFormatNames)
+	slog.Debug("StreamFileClipEnabled:", c.streamFileClipEnabled)
+	slog.Debug("FileClipNoFilePaths:", c.fileClipNoFilePaths)
+	slog.Debug("CanLockClipData:", c.canLockClipData)
+	slog.Debug("HasHugeFileSupport:", c.hasHugeFileSupport)
 }
 
 func (c *CliprdrClient) processMonitorReady(b []byte) {
@@ -148,7 +148,7 @@ func (c *CliprdrClient) processFormatList(b []byte) {
 		}
 	})
 	fl, hasFile := c.readForamtList(b)
-	slog.Info("numFormats:", fl.NumFormats)
+	slog.Debug("numFormats:", fl.NumFormats)
 
 	if hasFile {
 		c.SendCliprdrMessage()
@@ -198,7 +198,7 @@ func (c *CliprdrClient) processFormatDataRequest(b []byte) {
 		core.WriteUInt32LE(uint32(len(fs)), buff)
 		c.Files = c.Files[:0]
 		for _, v := range fs {
-			slog.Info("Name:", v)
+			slog.Debug("Name:", v)
 			f, _ := getFilesDescriptor(v)
 			buff.Write(f.serialize())
 			for i := 0; i < 8; i++ {
@@ -284,7 +284,7 @@ func (c *CliprdrClient) processUnlockClipData(b []byte) {
 }
 
 func (c *CliprdrClient) sendClientCapabilitiesPDU() {
-	slog.Info("Send Client Clipboard Capabilities PDU")
+	slog.Debug("Send Client Clipboard Capabilities PDU")
 	var cs CliprdrGeneralCapabilitySet
 	cs.CapabilitySetLength = 12
 	cs.CapabilitySetType = CB_CAPSTYPE_GENERAL
@@ -311,7 +311,7 @@ func (c *CliprdrClient) sendClientCapabilitiesPDU() {
 }
 
 func (c *CliprdrClient) sendTemporaryDirectoryPDU() {
-	slog.Info("Send Temporary Directory PDU")
+	slog.Debug("Send Temporary Directory PDU")
 	var t CliprdrTempDirectory
 	header := &CliprdrPDUHeader{CB_TEMP_DIRECTORY, 0, 260}
 	t.SzTempDir = core.UnicodeEncode(os.TempDir())
@@ -322,13 +322,13 @@ func (c *CliprdrClient) sendTemporaryDirectoryPDU() {
 	c.Send(buff.Bytes())
 }
 func (c *CliprdrClient) sendFormatListPDU() {
-	slog.Info("Send Format List PDU")
+	slog.Debug("Send Format List PDU")
 	var f CliprdrFormatList
 
 	f.Formats = GetFormatList(c.hwnd)
 	f.NumFormats = uint32(len(f.Formats))
 
-	slog.Info("NumFormats:", f.NumFormats)
+	slog.Debug("NumFormats:", f.NumFormats)
 	slog.Debug("Formats:", f.Formats)
 
 	b := &bytes.Buffer{}
@@ -372,10 +372,10 @@ func (c *CliprdrClient) readForamtList(b []byte) (*CliprdrFormatList, bool) {
 		if strings.EqualFold(name, CFSTR_FILEDESCRIPTORW) {
 			hasFile = true
 		}
-		slog.Infof("Foramt:%d Name:<%s>", foramtId, name)
+		slog.Debugf("Foramt:%d Name:<%s>", foramtId, name)
 		if name != "" {
 			localId := RegisterClipboardFormat(name)
-			slog.Info("local:", localId, "remote:", foramtId)
+			slog.Debug("local:", localId, "remote:", foramtId)
 			c.formatIdMap[localId] = foramtId
 		} else {
 			c.formatIdMap[foramtId] = foramtId
@@ -389,7 +389,7 @@ func (c *CliprdrClient) readForamtList(b []byte) (*CliprdrFormatList, bool) {
 }
 
 func (c *CliprdrClient) sendFormatListResponse(flags uint16) {
-	slog.Info("Send Format List Response")
+	slog.Debug("Send Format List Response")
 	header := NewCliprdrPDUHeader(CB_FORMAT_LIST_RESPONSE, flags, 0)
 	buff := &bytes.Buffer{}
 	buff.Write(header.serialize())
@@ -397,7 +397,7 @@ func (c *CliprdrClient) sendFormatListResponse(flags uint16) {
 }
 
 func (c *CliprdrClient) sendFormatDataRequest(id uint32) {
-	slog.Info("Send Format Data Request")
+	slog.Debug("Send Format Data Request")
 	var r CliprdrFormatDataRequest
 	r.RequestedFormatId = id
 	header := NewCliprdrPDUHeader(CB_FORMAT_DATA_REQUEST, 0, 4)
@@ -409,7 +409,7 @@ func (c *CliprdrClient) sendFormatDataRequest(id uint32) {
 	c.Send(buff.Bytes())
 }
 func (c *CliprdrClient) sendFormatDataResponse(b []byte) {
-	slog.Info("Send Format Data Response")
+	slog.Debug("Send Format Data Response")
 	var resp CliprdrFormatDataResponse
 	resp.RequestedFormatData = b
 
@@ -423,7 +423,7 @@ func (c *CliprdrClient) sendFormatDataResponse(b []byte) {
 }
 
 func (c *CliprdrClient) sendFormatContentsRequest(r CliprdrFileContentsRequest) uint32 {
-	slog.Info("Send Format Contents Request")
+	slog.Debug("Send Format Contents Request")
 	slog.Debug(fmt.Sprintf("Format Contents Request:%+v", r))
 	header := NewCliprdrPDUHeader(CB_FILECONTENTS_REQUEST, 0, 28)
 
@@ -442,7 +442,7 @@ func (c *CliprdrClient) sendFormatContentsRequest(r CliprdrFileContentsRequest) 
 	return uint32(buff.Len())
 }
 func (c *CliprdrClient) sendFormatContentsResponse(streamId uint32, b []byte) {
-	slog.Info("Send Format Contents Response")
+	slog.Debug("Send Format Contents Response")
 	var r CliprdrFileContentsResponse
 	r.StreamId = streamId
 	r.RequestedData = b
@@ -458,7 +458,7 @@ func (c *CliprdrClient) sendFormatContentsResponse(streamId uint32, b []byte) {
 }
 
 func (c *CliprdrClient) sendLockClipData() {
-	slog.Info("Send Lock Clip Data")
+	slog.Debug("Send Lock Clip Data")
 	var r CliprdrCtrlClipboardData
 	header := NewCliprdrPDUHeader(CB_LOCK_CLIPDATA, 0, 4)
 
@@ -470,7 +470,7 @@ func (c *CliprdrClient) sendLockClipData() {
 }
 
 func (c *CliprdrClient) sendUnlockClipData() {
-	slog.Info("Send Unlock Clip Data")
+	slog.Debug("Send Unlock Clip Data")
 	var r CliprdrCtrlClipboardData
 	header := NewCliprdrPDUHeader(CB_UNLOCK_CLIPDATA, 0, 4)
 

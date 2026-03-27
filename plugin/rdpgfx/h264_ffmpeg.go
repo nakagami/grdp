@@ -107,7 +107,7 @@ func newH264Decoder() h264Decoder {
 				d.useHW = true
 				d.hwPixFmt = hwPixFmt
 				name := C.av_hwdevice_get_type_name(hwType)
-				slog.Info("H.264: hardware acceleration enabled", "type", C.GoString(name))
+				slog.Debug("H.264: hardware acceleration enabled", "type", C.GoString(name))
 			}
 			C.av_buffer_unref(&devCtx)
 			if d.useHW {
@@ -118,7 +118,7 @@ func newH264Decoder() h264Decoder {
 	}
 
 	if !d.useHW {
-		slog.Info("H.264: using software decoding")
+		slog.Debug("H.264: using software decoding")
 	}
 
 	if C.avcodec_open2(codecCtx, codec, nil) < 0 {
