@@ -155,21 +155,21 @@ func (*FastPathOrdersPDU) FastPathUpdateType() uint8 {
 
 func (f *FastPathOrdersPDU) Unpack(r io.Reader) error {
 	f.NumberOrders, _ = core.ReadUint16LE(r)
-	//slog.Info("NumberOrders:", f.NumberOrders)
+	//slog.Debug("NumberOrders:", f.NumberOrders)
 	for i := 0; i < int(f.NumberOrders); i++ {
 		var o OrderPdu
 		o.ControlFlags, _ = core.ReadUInt8(r)
 		if o.ControlFlags&TS_STANDARD == 0 {
-			//slog.Info("Altsec order")
+			//slog.Debug("Altsec order")
 			o.processAltsecOrder(r)
 			o.Type = ORDER_ALTSEC
 			//return errors.New("Not support")
 		} else if o.ControlFlags&TS_SECONDARY != 0 {
-			//slog.Info("Secondary order")
+			//slog.Debug("Secondary order")
 			o.processSecondaryOrder(r)
 			o.Type = ORDER_SECONDARY
 		} else {
-			//slog.Info("Primary order")
+			//slog.Debug("Primary order")
 			o.processPrimaryOrder(r)
 			o.Type = ORDER_PRIMARY
 		}
@@ -183,7 +183,7 @@ func (f *FastPathOrdersPDU) Unpack(r io.Reader) error {
 }
 func (o *OrderPdu) processAltsecOrder(r io.Reader) error {
 	orderType := o.ControlFlags >> 2
-	//slog.Info("Altsec:", orderType)
+	//slog.Debug("Altsec:", orderType)
 	switch orderType {
 	case ORDER_TYPE_SWITCH_SURFACE:
 	case ORDER_TYPE_CREATE_OFFSCREEN_BITMAP:
@@ -210,7 +210,7 @@ func (o *OrderPdu) processSecondaryOrder(r io.Reader) error {
 	flags, _ := core.ReadUint16LE(r)
 	orderType, _ := core.ReadUInt8(r)
 
-	slog.Info("processSecondaryOrder", "SecondaryOrderType", SecondaryOrderType(orderType))
+	slog.Debug("processSecondaryOrder", "SecondaryOrderType", SecondaryOrderType(orderType))
 
 	b, _ := core.ReadBytes(int(length)+13-6, r)
 	r0 := bytes.NewReader(b)
@@ -311,13 +311,13 @@ func (o *OrderPdu) processPrimaryOrder(r io.Reader) error {
 		if o.ControlFlags&TS_ZERO_BOUNDS_DELTAS == 0 {
 			bounds.updateBounds(r)
 		}
-		//slog.Info("updateBounds")
+		//slog.Debug("updateBounds")
 		o.Primary.Bounds = bounds
 	}
 
 	delta := o.ControlFlags&TS_DELTA_COORDINATES != 0
 
-	//slog.Info(fmt.Sprintf("present=%d,delta=%v", present, delta))
+	//slog.Debug(fmt.Sprintf("present=%d,delta=%v", present, delta))
 
 	var p PrimaryOrder
 	switch orderType {
@@ -413,7 +413,7 @@ func (d *Dstblt) Type() int {
 	return ORDER_TYPE_DSTBLT
 }
 func (d *Dstblt) Unpack(r io.Reader, present uint32, delta bool) error {
-	slog.Info("Dstblt Order")
+	slog.Debug("Dstblt Order")
 	if present&0x01 != 0 {
 		readOrderCoord(r, &d.x, delta)
 	}
@@ -447,7 +447,7 @@ func (d *Patblt) Type() int {
 	return ORDER_TYPE_PATBLT
 }
 func (d *Patblt) Unpack(r io.Reader, present uint32, delta bool) error {
-	slog.Info("Patblt Order")
+	slog.Debug("Patblt Order")
 	if present&0x01 != 0 {
 		readOrderCoord(r, &d.x, delta)
 	}
@@ -526,7 +526,7 @@ func (d *Scrblt) Type() int {
 var d Scrblt
 
 func (d1 *Scrblt) Unpack(r io.Reader, present uint32, delta bool) error {
-	slog.Info("Scrblt Order")
+	slog.Debug("Scrblt Order")
 	if present&0x0001 != 0 {
 		readOrderCoord(r, &d.X, delta)
 	}
@@ -567,7 +567,7 @@ func (d *LineTo) Type() int {
 	return ORDER_TYPE_LINETO
 }
 func (d *LineTo) Unpack(r io.Reader, present uint32, delta bool) error {
-	slog.Info("LineTo Order")
+	slog.Debug("LineTo Order")
 	if present&0x0001 != 0 {
 		d.Mixmode, _ = core.ReadUint16LE(r)
 	}
@@ -629,7 +629,7 @@ func (d *OpaqueRect) Type() int {
 	return ORDER_TYPE_OPAQUERECT
 }
 func (d *OpaqueRect) Unpack(r io.Reader, present uint32, delta bool) error {
-	slog.Info("OpaqueRect Order")
+	slog.Debug("OpaqueRect Order")
 	if present&0x0001 != 0 {
 		readOrderCoord(r, &d.X, delta)
 	}

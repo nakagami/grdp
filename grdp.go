@@ -216,7 +216,7 @@ func bpp(BitsPerPixel uint16) (pixel int) {
 }
 
 func (g *RdpClient) Login(domain string, user string, password string) error {
-	slog.Info("Login", "Host", g.hostPort, "domain", domain, "user", user)
+	slog.Debug("Login", "Host", g.hostPort, "domain", domain, "user", user)
 
 	g.domain = domain
 	g.user = user
@@ -383,14 +383,14 @@ func (g *RdpClient) doLogin(routingToken []byte) error {
 			return fmt.Errorf("[connection err] %v", r.err)
 		}
 		if r.retry {
-			slog.Info("Server requires GFX, retrying with GFX flag")
+			slog.Debug("Server requires GFX, retrying with GFX flag")
 			g.tpkt.Close()
 			g.eventReady = false
 			time.Sleep(2 * time.Second)
 			return g.doLogin(nil)
 		}
 		if r.redirect != nil {
-			slog.Info("Server redirect", "loadBalanceInfo", string(r.redirect.LoadBalanceInfo))
+			slog.Debug("Server redirect", "loadBalanceInfo", string(r.redirect.LoadBalanceInfo))
 			g.tpkt.Close()
 			g.eventReady = false
 			return g.doLogin(r.redirect.LoadBalanceInfo)
@@ -406,7 +406,7 @@ func (g *RdpClient) doLogin(routingToken []byte) error {
 // handleRedirect handles a Server Redirection PDU that arrives after
 // "ready" (e.g. GNOME Remote Desktop). Runs asynchronously.
 func (g *RdpClient) handleRedirect(redir *pdu.ServerRedirectionPDU) {
-	slog.Info("Async server redirect", "loadBalanceInfo", string(redir.LoadBalanceInfo))
+	slog.Debug("Async server redirect", "loadBalanceInfo", string(redir.LoadBalanceInfo))
 	g.redirecting = true
 	g.tpkt.Close()
 	g.eventReady = false
@@ -670,7 +670,7 @@ func (g *RdpClient) Reconnect(width, height int) error {
 		return fmt.Errorf("client is closed")
 	}
 
-	slog.Info("Reconnect", "width", width, "height", height)
+	slog.Debug("Reconnect", "width", width, "height", height)
 	g.closeLocked()
 	g.width = width
 	g.height = height
@@ -681,7 +681,7 @@ func (g *RdpClient) Reconnect(width, height int) error {
 		// Exponential backoff: 1s, 2s, 4s — gives the server time to
 		// tear down the previous session before we reconnect.
 		delay := time.Duration(1<<uint(attempt-1)) * time.Second
-		slog.Info("Reconnect: waiting before attempt", "attempt", attempt, "delay", delay)
+		slog.Debug("Reconnect: waiting before attempt", "attempt", attempt, "delay", delay)
 		time.Sleep(delay)
 
 		err := g.Login(g.domain, g.user, g.password)
@@ -695,7 +695,7 @@ func (g *RdpClient) Reconnect(width, height int) error {
 		}
 
 		g.reregisterCallbacks()
-		slog.Info("Reconnect: succeeded", "attempt", attempt)
+		slog.Debug("Reconnect: succeeded", "attempt", attempt)
 		return nil
 	}
 

@@ -93,7 +93,7 @@ func (t *TPKT) recvChallenge(data []byte) error {
 	slog.Debug("recvChallenge", "data", hex.EncodeToString(data))
 	tsreq, err := nla.DecodeDERTRequest(data)
 	if err != nil {
-		slog.Info("DecodeDERTRequest", "err", err)
+		slog.Debug("DecodeDERTRequest", "err", err)
 		return err
 	}
 	slog.Debug("recvChallenge", "tsreq", tsreq)
@@ -128,7 +128,7 @@ func (t *TPKT) recvPubKeyInc(data []byte) error {
 	slog.Debug("recvPubKeyInc", "data", hex.EncodeToString(data), "len", len(data))
 	tsreq, err := nla.DecodeDERTRequest(data)
 	if err != nil {
-		slog.Info("DecodeDERTRequest", "err", err)
+		slog.Debug("DecodeDERTRequest", "err", err)
 		return err
 	}
 	slog.Debug("PubKeyAuth", "key", hex.EncodeToString(tsreq.PubKeyAuth))
@@ -141,7 +141,7 @@ func (t *TPKT) recvPubKeyInc(data []byte) error {
 	req := nla.EncodeDERTRequest(nil, authInfo, nil)
 	_, err = t.Conn.Write(req)
 	if err != nil {
-		slog.Info("send AuthenticateMessage", "err", err)
+		slog.Debug("send AuthenticateMessage", "err", err)
 		return err
 	}
 

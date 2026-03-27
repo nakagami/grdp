@@ -283,7 +283,7 @@ func (x *X224) recvConnectionConfirm(s []byte) {
 			slog.Error(negErr.Error())
 			//only use Standard RDP Security mechanisms
 			if message.ProtocolNeg.Result == 2 {
-				slog.Info("Only use Standard RDP Security mechanisms, Reconnect with Standard RDP")
+				slog.Debug("Only use Standard RDP Security mechanisms, Reconnect with Standard RDP")
 			}
 			x.Emit("error", negErr)
 			x.Close()
@@ -291,7 +291,7 @@ func (x *X224) recvConnectionConfirm(s []byte) {
 		}
 
 		if message.ProtocolNeg.Type == TYPE_RDP_NEG_RSP {
-			slog.Info("TYPE_RDP_NEG_RSP")
+			slog.Debug("TYPE_RDP_NEG_RSP")
 			x.selectedProtocol = message.ProtocolNeg.Result
 		}
 	} else {
@@ -308,13 +308,13 @@ func (x *X224) recvConnectionConfirm(s []byte) {
 	x.transport.On("data", x.recvData)
 
 	if x.selectedProtocol == PROTOCOL_RDP {
-		slog.Info("*** RDP security selected ***")
+		slog.Debug("*** RDP security selected ***")
 		x.Emit("connect", x.selectedProtocol)
 		return
 	}
 
 	if x.selectedProtocol == PROTOCOL_SSL {
-		slog.Info("*** SSL security selected ***")
+		slog.Debug("*** SSL security selected ***")
 		err := x.transport.(*tpkt.TPKT).StartTLS()
 		if err != nil {
 			slog.Error("start tls failed:", "err", err)
@@ -326,7 +326,7 @@ func (x *X224) recvConnectionConfirm(s []byte) {
 	}
 
 	if x.selectedProtocol == PROTOCOL_HYBRID {
-		slog.Info("*** NLA Security selected ***")
+		slog.Debug("*** NLA Security selected ***")
 		err := x.transport.(*tpkt.TPKT).StartNLA()
 		if err != nil {
 			slog.Error("start NLA failed:", "err", err)

@@ -185,7 +185,7 @@ func (c *Client) recvDemandActivePDU(s []byte) {
 			}
 			return
 		}
-		slog.Info("ignore message during connection sequence", "type", pdu.ShareCtrlHeader.PDUType)
+		slog.Debug("ignore message during connection sequence", "type", pdu.ShareCtrlHeader.PDUType)
 		c.transport.Once("data", c.recvDemandActivePDU)
 		return
 	}
@@ -296,7 +296,7 @@ func (c *Client) recvServerSynchronizePDU(s []byte) {
 		} else {
 			slog.Error("recvServerSynchronizePDU ignore message", "type", pdu.ShareCtrlHeader.PDUType)
 		}
-		slog.Info(fmt.Sprintf("%+v", dataPdu))
+		slog.Debug(fmt.Sprintf("%+v", dataPdu))
 		c.transport.Once("data", c.recvServerSynchronizePDU)
 		return
 	}
@@ -378,7 +378,7 @@ func (c *Client) recvServerFontMapPDU(s []byte) {
 	c.transport.On("data", c.recvPDU)
 
 	// Tell the server we're ready to receive display updates (MS-RDPBCGR 2.2.11.3.1)
-	slog.Info("Sending SuppressOutput (ALLOW_DISPLAY_UPDATES)")
+	slog.Debug("Sending SuppressOutput (ALLOW_DISPLAY_UPDATES)")
 	c.sendDataPDU(&SuppressOutputPDU{
 		AllowDisplayUpdates: 1,
 		Right:               c.clientCoreData.DesktopWidth - 1,
@@ -447,7 +447,7 @@ func (c *Client) RecvFastPath(secFlag byte, s []byte) {
 			"fragmentation", fragmentation,
 			"size", size, "len", r.Len())
 		if compressionFlags&RDP_MPPC_COMPRESSED != 0 {
-			slog.Info("RDP_MPPC_COMPRESSED")
+			slog.Debug("RDP_MPPC_COMPRESSED")
 		}
 		if fragmentation != FASTPATH_FRAGMENT_SINGLE {
 			if fragmentation == FASTPATH_FRAGMENT_FIRST {

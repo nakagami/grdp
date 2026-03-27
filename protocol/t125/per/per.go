@@ -158,7 +158,7 @@ func ReadInteger(r io.Reader) uint32 {
 		ret, _ := core.ReadUInt32BE(r)
 		return ret
 	default:
-		slog.Info("ReadInteger")
+		slog.Debug("ReadInteger")
 	}
 	return 0
 }
