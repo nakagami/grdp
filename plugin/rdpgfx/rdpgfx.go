@@ -193,14 +193,14 @@ func (g *GfxHandler) sendCapsAdvertise() {
 		core.WriteUInt32LE(capFlagSmallCache, p)
 
 		g.sendPdu(cmdidCapsAdvertise, p.Bytes())
-		slog.Info("RDPGFX: sent CAPS_ADVERTISE (v10+v8.0, AVC enabled)")
+		slog.Debug("RDPGFX: sent CAPS_ADVERTISE (v10+v8.0, AVC enabled)")
 	} else {
 		core.WriteUInt16LE(1, p) // capsSetCount
 		core.WriteUInt32LE(capVersion8, p)
 		core.WriteUInt32LE(4, p) // capsDataLength
 		core.WriteUInt32LE(capFlagThinClient|capFlagSmallCache|capFlagAVCDisabled, p)
 		g.sendPdu(cmdidCapsAdvertise, p.Bytes())
-		slog.Info("RDPGFX: sent CAPS_ADVERTISE (v8.0, AVC disabled)")
+		slog.Debug("RDPGFX: sent CAPS_ADVERTISE (v8.0, AVC disabled)")
 	}
 }
 
@@ -345,7 +345,7 @@ func (g *GfxHandler) decodeLoop() {
 			go g.decodeLoop()
 		}
 	}()
-	slog.Info("RDPGFX: decodeLoop started")
+	slog.Debug("RDPGFX: decodeLoop started")
 	for data := range g.decodeCh {
 		g.decodePDUs(data)
 	}
@@ -466,7 +466,7 @@ func (g *GfxHandler) sendPduAsync(cmdId uint16, payload []byte) {
 
 func (g *GfxHandler) onCapsConfirm(data []byte) {
 	if len(data) < 12 {
-		slog.Info("RDPGFX: CAPS_CONFIRM received (short)")
+		slog.Debug("RDPGFX: CAPS_CONFIRM received (short)")
 		return
 	}
 	r := bytes.NewReader(data)
@@ -476,7 +476,7 @@ func (g *GfxHandler) onCapsConfirm(data []byte) {
 	if dataLen >= 4 {
 		flags, _ = core.ReadUInt32LE(r)
 	}
-	slog.Info(fmt.Sprintf("RDPGFX: CAPS_CONFIRM version=0x%08X flags=0x%08X", version, flags))
+	slog.Debug(fmt.Sprintf("RDPGFX: CAPS_CONFIRM version=0x%08X flags=0x%08X", version, flags))
 }
 
 func (g *GfxHandler) onResetGraphics(data []byte) {
@@ -486,7 +486,7 @@ func (g *GfxHandler) onResetGraphics(data []byte) {
 	r := bytes.NewReader(data)
 	w, _ := core.ReadUInt32LE(r)
 	h, _ := core.ReadUInt32LE(r)
-	slog.Info(fmt.Sprintf("RDPGFX: RESET_GRAPHICS %dx%d", w, h))
+	slog.Debug(fmt.Sprintf("RDPGFX: RESET_GRAPHICS %dx%d", w, h))
 	g.surfaces = make(map[uint16]*surface)
 	g.clearCtx = newClearCodecCtx()
 	g.framesDecoded.Store(0)
@@ -505,7 +505,7 @@ func (g *GfxHandler) onCreateSurface(data []byte) {
 	w, _ := core.ReadUint16LE(r)
 	h, _ := core.ReadUint16LE(r)
 	f, _ := core.ReadUInt8(r)
-	slog.Info(fmt.Sprintf("RDPGFX: CREATE_SURFACE id=%d %dx%d", id, w, h))
+	slog.Debug(fmt.Sprintf("RDPGFX: CREATE_SURFACE id=%d %dx%d", id, w, h))
 	g.surfaces[id] = &surface{
 		width: w, height: h, format: f,
 		data: make([]byte, int(w)*int(h)*4),
@@ -529,7 +529,7 @@ func (g *GfxHandler) onMapSurfaceToOutput(data []byte) {
 	core.ReadUint16LE(r) // reserved
 	ox, _ := core.ReadUInt32LE(r)
 	oy, _ := core.ReadUInt32LE(r)
-	slog.Info(fmt.Sprintf("RDPGFX: MAP_SURFACE id=%d → (%d,%d)", id, ox, oy))
+	slog.Debug(fmt.Sprintf("RDPGFX: MAP_SURFACE id=%d → (%d,%d)", id, ox, oy))
 	if s, ok := g.surfaces[id]; ok {
 		s.outputX = ox
 		s.outputY = oy
@@ -571,7 +571,7 @@ func (g *GfxHandler) onWireToSurface1Decode(data []byte, skipHeavy bool) {
 	bmpLen, _ := core.ReadUInt32LE(r)
 	bmpData, _ := core.ReadBytes(int(bmpLen), r)
 
-	slog.Info(fmt.Sprintf("RDPGFX: WTS1 surfId=%d codecId=0x%04X %dx%d bmpLen=%d", surfId, codecId, right-left, bottom-top, bmpLen))
+	slog.Debug(fmt.Sprintf("RDPGFX: WTS1 surfId=%d codecId=0x%04X %dx%d bmpLen=%d", surfId, codecId, right-left, bottom-top, bmpLen))
 
 	w := int(right - left)
 	h := int(bottom - top)
@@ -662,7 +662,7 @@ func (g *GfxHandler) onWireToSurface2Decode(data []byte, skipHeavy bool) {
 	w := int(s.width)
 	h := int(s.height)
 
-	slog.Info(fmt.Sprintf("RDPGFX: WTS2 surfId=%d codecId=0x%04X %dx%d bmpLen=%d", surfId, codecId, w, h, bmpLen))
+	slog.Debug(fmt.Sprintf("RDPGFX: WTS2 surfId=%d codecId=0x%04X %dx%d bmpLen=%d", surfId, codecId, w, h, bmpLen))
 
 	var decoded []byte
 	switch codecId {
