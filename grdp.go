@@ -33,9 +33,9 @@ type stubChannel struct {
 	sender core.ChannelSender
 }
 
-func (s *stubChannel) GetType() (string, uint32) { return s.name, s.option }
+func (s *stubChannel) GetType() (string, uint32)   { return s.name, s.option }
 func (s *stubChannel) Sender(f core.ChannelSender) { s.sender = f }
-func (s *stubChannel) Process(data []byte)          {}
+func (s *stubChannel) Process(data []byte)         {}
 
 type RdpClient struct {
 	hostPort        string // ip:port
