@@ -45,6 +45,13 @@ const (
 	TSSNDCAPS_PITCH  = 0x00000004
 )
 
+// Quality mode values (MS-RDPEA 2.2.2.9)
+const (
+	DYNAMIC_QUALITY = 0x0000
+	MEDIUM_QUALITY  = 0x0002
+	HIGH_QUALITY    = 0x0001
+)
+
 // Audio format tags
 const (
 	WAVE_FORMAT_PCM   = 0x0001
@@ -290,6 +297,24 @@ func (h *Handler) sendClientFormats(serverVersion uint16) {
 
 	h.send(pdu.Bytes())
 	slog.Debug("rdpsnd: sent Client Formats", "version", version, "numFormats", len(h.clientFormatIndices))
+
+	// FreeRDP sends a Quality Mode PDU immediately after Client Formats.
+	// Without it, Windows waits (up to ~10 seconds) before sending Training.
+	h.sendQualityMode()
+}
+
+// --- Quality Mode (MS-RDPEA 2.2.2.9) ---
+
+func (h *Handler) sendQualityMode() {
+	pdu := &bytes.Buffer{}
+	pdu.WriteByte(SNDC_QUALITYMODE)
+	pdu.WriteByte(0) // bPad
+	binary.Write(pdu, binary.LittleEndian, uint16(4))           // bodySize
+	binary.Write(pdu, binary.LittleEndian, uint16(DYNAMIC_QUALITY)) // wQualityMode
+	binary.Write(pdu, binary.LittleEndian, uint16(0))           // Reserved
+
+	h.send(pdu.Bytes())
+	slog.Debug("rdpsnd: sent QualityMode")
 }
 
 // --- Training (MS-RDPEA 2.2.2.3) ---

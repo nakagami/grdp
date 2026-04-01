@@ -45,7 +45,6 @@ type rfxRect struct {
 // provided surface buffer. Returns the bounding rectangles of decoded regions.
 func (d *rfxProgressiveDecoder) Decode(data []byte, surfData []byte, width, height int) []rfxRect {
 	var rects []rfxRect
-	var quants []rfxQuant
 
 	offset := 0
 	for offset+6 <= len(data) {
@@ -62,15 +61,9 @@ func (d *rfxProgressiveDecoder) Decode(data []byte, surfData []byte, width, heig
 		case progWBTSync, progWBTFrameBegin, progWBTFrameEnd, progWBTContext:
 		// Infrastructure blocks — no action needed.
 		case progWBTRegion:
-			var regionRects []rfxRect
-			regionRects, quants = d.parseRegion(blockData)
+			// Tiles are embedded inside the region block; parseRegion decodes them.
+			regionRects, _ := d.parseRegion(blockData, surfData, width, height)
 			rects = append(rects, regionRects...)
-		case progWBTTileSimple:
-			d.decodeTileSimple(blockData, quants, surfData, width, height)
-		case progWBTTileFirst:
-			d.decodeTileFirst(blockData, quants, surfData, width, height)
-		case progWBTTileUpgrade:
-		// Progressive upgrade — skip for now (first pass is sufficient)
 		default:
 			slog.Debug(fmt.Sprintf("RFX: unknown progressive block 0x%04X", blockType))
 		}
@@ -81,8 +74,11 @@ func (d *rfxProgressiveDecoder) Decode(data []byte, surfData []byte, width, heig
 	return rects
 }
 
-// parseRegion extracts rects and quant tables from a PROGRESSIVE_WBT_REGION block.
-func (d *rfxProgressiveDecoder) parseRegion(data []byte) ([]rfxRect, []rfxQuant) {
+// parseRegion extracts rects and quant tables from a PROGRESSIVE_WBT_REGION block,
+// and decodes the tile sub-blocks embedded within it onto the surface.
+// Per MS-RDPEGFX 2.2.4, tile blocks (TILE_SIMPLE/TILE_FIRST) are sub-blocks
+// inside the REGION block, not top-level stream blocks.
+func (d *rfxProgressiveDecoder) parseRegion(data []byte, surfData []byte, outW, outH int) ([]rfxRect, []rfxQuant) {
 	if len(data) < 12 {
 		return nil, nil
 	}
@@ -121,8 +117,29 @@ func (d *rfxProgressiveDecoder) parseRegion(data []byte) ([]rfxRect, []rfxQuant)
 		offset += 5
 	}
 
-	// Skip progressive quant values (16 bytes each)
-	_ = numProgQuant
+	// Skip progressive quant values (RFX_PROGRESSIVE_CODEC_QUANT, 16 bytes each)
+	offset += int(numProgQuant) * 16
+
+	// Decode tile sub-blocks embedded within this region block.
+	for offset+6 <= len(data) {
+		tileType := binary.LittleEndian.Uint16(data[offset:])
+		tileLen := binary.LittleEndian.Uint32(data[offset+2:])
+		if tileLen < 6 || offset+int(tileLen) > len(data) {
+			break
+		}
+		tileData := data[offset+6 : offset+int(tileLen)]
+		switch tileType {
+		case progWBTTileSimple:
+			d.decodeTileSimple(tileData, quants, surfData, outW, outH)
+		case progWBTTileFirst:
+			d.decodeTileFirst(tileData, quants, surfData, outW, outH)
+		case progWBTTileUpgrade:
+			// Progressive upgrade pass — first pass is sufficient for display.
+		default:
+			slog.Debug(fmt.Sprintf("RFX: unknown progressive tile type 0x%04X", tileType))
+		}
+		offset += int(tileLen)
+	}
 
 	return rects, quants
 }
