@@ -211,19 +211,14 @@ func (c *DvcClient) processCreateReq(hdr *DvcHeader, s []byte) {
 		slog.Debug(fmt.Sprintf("dvc: handler registered for channel %s (id=%d)", channelName, channelId))
 	}
 
-	// Send creation response (MS-RDPEDYC 2.2.2.2)
+	// Send success response (Sp SHOULD be 0 per MS-RDPEDYC 2.2.2.2).
+	// Always accept: some Windows servers stop sending data on static
+	// virtual channels (e.g. cliprdr) when DVC creation requests are
+	// rejected, even for unrelated channels.
 	rspHdr := &DvcHeader{cmd: DYNVC_CREATE_REQ, sp: 0, cbChId: hdr.cbChId}
 	b := &bytes.Buffer{}
 	b.Write(rspHdr.serialize(channelId))
-	if handler != nil {
-		// Success: CreationStatus = 0
-		core.WriteUInt32LE(0, b)
-	} else {
-		// Reject: no handler registered — prevents server from using
-		// unsupported features (e.g. Video Optimized Remoting).
-		core.WriteUInt32LE(0xC0000001, b) // STATUS_UNSUCCESSFUL
-		slog.Debug(fmt.Sprintf("dvc: rejected channel %s (id=%d) — no handler", channelName, channelId))
-	}
+	core.WriteUInt32LE(0, b)
 	c.Send(b.Bytes())
 
 	// Notify handler that channel is ready (CREATE_RSP has been sent)
