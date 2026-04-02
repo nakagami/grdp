@@ -61,8 +61,10 @@ const (
 )
 
 // RDPSND version
+// gnome-remote-desktop (grd-rdp-dvc-audio-playback.c) requires
+// clientVersion >= 8 (CHANNEL_VERSION_WIN_8). FreeRDP WIN_7=6, WIN_8=8.
 const (
-	RDPSND_VERSION_MAJOR = 0x06
+	RDPSND_VERSION_MAJOR = 0x08
 )
 
 // AudioFormat represents a WAVEFORMATEX structure.
