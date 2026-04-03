@@ -414,6 +414,19 @@ func (c *Client) recvPDU(s []byte) {
 				} else if up.UpdateType == FASTPATH_UPDATETYPE_ORDERS {
 					c.Emit("orders", p.(*FastPathOrdersPDU).OrderPdus)
 				}
+			} else if d.Header.PDUType2 == PDUTYPE2_POINTER {
+				pp := d.Data.(*PointerDataPDU)
+				if pp.Pdata != nil {
+					switch pp.MessageType {
+					case TS_PTRUPDATE_TYPE_CACHED:
+						c.Emit("pointer_cached", pp.Pdata.(*FastPathUpdateCachedPDU).CacheIdx)
+					case TS_PTRUPDATE_TYPE_POINTER:
+						c.Emit("pointer_update", pp.Pdata.(*FastPathUpdatePointerPDU))
+					}
+				}
+				if pp.MessageType == TS_PTRUPDATE_TYPE_SYSTEM {
+					c.Emit("pointer_hide")
+				}
 			}
 		}
 	}

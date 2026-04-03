@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"reflect"
+	"time"
 
 	//	"github.com/nakagami/grdp/plugin/cliprdr"
 	"github.com/nakagami/grdp/plugin/drdynvc"
@@ -260,9 +261,12 @@ type MCSClient struct {
 	serverNetworkData  *gcc.ServerNetworkData
 	serverSecurityData *gcc.ServerSecurityData
 
-	channelsConnected  int
-	userId             uint16
-	nbChannelRequested int
+	channelsConnected    int
+	userId               uint16
+	nbChannelRequested   int
+	messageChannelId     uint16 // from SC_MCS_MSGCHANNEL; 0 = not negotiated
+	messageChannelJoined bool
+	bwStartTime          time.Time // timestamp of last RDP_BW_START for timeDelta calculation
 }
 
 func NewMCSClient(t core.Transport, kbdLayout uint32, keyboardType uint32, keyboardSubType uint32) *MCSClient {
@@ -317,6 +321,7 @@ func (c *MCSClient) connect(selectedProtocol uint32) {
 	userDataBuff.Write(c.clientCoreData.Pack())
 	userDataBuff.Write(c.clientNetworkData.Pack())
 	userDataBuff.Write(c.clientSecurityData.Pack())
+	userDataBuff.Write(gcc.PackClientMsgChannelData())
 
 	slog.Debug("userData", "data", hex.EncodeToString(userDataBuff.Bytes()), "len", len(userDataBuff.Bytes()))
 	ccReq := gcc.MakeConferenceCreateRequest(userDataBuff.Bytes())
@@ -358,11 +363,12 @@ func (c *MCSClient) recvConnectResponse(s []byte) {
 		case *gcc.ServerNetworkData:
 			c.serverNetworkData = v.(*gcc.ServerNetworkData)
 
+		case *gcc.ServerMsgChannelData:
+			c.messageChannelId = v.(*gcc.ServerMsgChannelData).MCSChannelId
+			slog.Debug("SC_MCS_MSGCHANNEL", "messageChannelId", c.messageChannelId)
+
 		default:
-			err := errors.New(fmt.Sprintf("unhandle server gcc block %v", reflect.TypeOf(v)))
-			slog.Error("recvConnectResponse", "err", err)
-			c.Emit("error", err)
-			return
+			slog.Warn("recvConnectResponse: unhandled server gcc block", "type", reflect.TypeOf(v))
 		}
 	}
 	c.sendErectDomainRequest()
@@ -420,7 +426,15 @@ func (c *MCSClient) recvAttachUserConfirm(s []byte) {
 
 func (c *MCSClient) connectChannels() {
 	slog.Debug("connectChannels", "channelsConnected", c.channelsConnected, "channels", c.channels)
-	if c.channelsConnected == len(c.channels) {
+	if c.channelsConnected >= len(c.channels) {
+		// Join the message channel (for connect-time auto-detection) before SVCs.
+		if c.messageChannelId != 0 && !c.messageChannelJoined {
+			c.messageChannelJoined = true
+			c.sendChannelJoinRequest(c.messageChannelId)
+			c.transport.Once("data", c.recvChannelJoinConfirm)
+			return
+		}
+
 		if c.nbChannelRequested < int(c.serverNetworkData.ChannelCount) {
 			//static virtual channel
 			chanId := c.serverNetworkData.ChannelIdArray[c.nbChannelRequested]
@@ -494,6 +508,11 @@ func (c *MCSClient) recvData(s []byte) {
 		}
 	}
 	if !found {
+		if c.messageChannelId != 0 && channelId == c.messageChannelId {
+			data, _ := core.ReadBytes(int(size), r)
+			c.handleAutoDetect(data)
+			return
+		}
 		slog.Error("mcs receive data for an unconnected layer")
 		return
 	}
@@ -546,6 +565,93 @@ func (c *MCSClient) recvChannelJoinConfirm(s []byte) {
 	}
 	c.channelsConnected++
 	c.connectChannels()
+}
+
+// Connect-time auto-detection constants (MS-RDPBCGR 2.2.14).
+const (
+	secAutoDetectReq = uint16(0x1000)
+	secAutoDetectRsp = uint16(0x2000)
+
+	rdpRttRequestConnecttime = uint16(0x1001)
+	rdpBwStartConnecttime    = uint16(0x1014)
+	rdpBwPayload             = uint16(0x0002)
+	rdpBwStopConnecttime     = uint16(0x002B)
+	rdpRttRequest            = uint16(0x0001) // continuous RTT request
+	rdpBwStart               = uint16(0x0014) // continuous BW start (no response)
+	rdpBwStop                = uint16(0x0429) // continuous BW stop
+
+	typeIDAutodetectResponse = uint8(0x01)
+	rdpRttResponseType       = uint16(0x0000)
+	rdpBwResultsConnecttime  = uint16(0x0003)
+	rdpBwResults             = uint16(0x000B) // continuous BW results
+)
+
+// handleAutoDetect processes a connect-time auto-detect request from the server
+// on the message channel. It responds to RTT and BW measurement requests so
+// that gnome-remote-desktop proceeds to open the audio DVC channels.
+func (c *MCSClient) handleAutoDetect(data []byte) {
+	r := bytes.NewReader(data)
+	secFlag, _ := core.ReadUint16LE(r)
+	core.ReadUint16LE(r) // secFlagHi
+
+	if secFlag&secAutoDetectReq == 0 {
+		return
+	}
+
+	headerLength, _ := core.ReadUInt8(r)
+	core.ReadUInt8(r) // headerTypeId
+	seqNum, _ := core.ReadUint16LE(r)
+	reqType, _ := core.ReadUint16LE(r)
+
+	slog.Debug("AutoDetect request", "requestType", fmt.Sprintf("0x%04x", reqType),
+		"sequenceNumber", seqNum, "headerLength", headerLength)
+
+	switch reqType {
+	case rdpRttRequestConnecttime, rdpRttRequest:
+		c.sendAutoDetectResponse(seqNum, rdpRttResponseType, 0)
+	case rdpBwStartConnecttime, rdpBwStart:
+		c.bwStartTime = time.Now()
+	case rdpBwStopConnecttime:
+		elapsed := uint32(time.Since(c.bwStartTime).Milliseconds())
+		if elapsed == 0 {
+			elapsed = 1
+		}
+		c.sendAutoDetectResponse(seqNum, rdpBwResultsConnecttime, elapsed)
+	case rdpBwStop:
+		elapsed := uint32(time.Since(c.bwStartTime).Milliseconds())
+		if elapsed == 0 {
+			elapsed = 1
+		}
+		c.sendAutoDetectResponse(seqNum, rdpBwResults, elapsed)
+	// rdpBwPayload requires no response
+	}
+}
+
+// sendAutoDetectResponse sends an auto-detect response on the message channel.
+// timeDelta is 0 for RTT responses (no BW fields); non-zero for BW responses
+// (timeDelta in milliseconds since the corresponding BW_START was received).
+func (c *MCSClient) sendAutoDetectResponse(sequenceNumber uint16, responseType uint16, timeDelta uint32) {
+	includeBW := responseType == rdpBwResultsConnecttime || responseType == rdpBwResults
+	headerLength := uint8(6)
+	if includeBW {
+		headerLength = 14
+	}
+
+	payload := &bytes.Buffer{}
+	core.WriteUInt16LE(secAutoDetectRsp, payload)
+	core.WriteUInt16LE(0, payload)
+	core.WriteUInt8(headerLength, payload)
+	core.WriteUInt8(typeIDAutodetectResponse, payload)
+	core.WriteUInt16LE(sequenceNumber, payload)
+	core.WriteUInt16LE(responseType, payload)
+	if includeBW {
+		core.WriteUInt32LE(timeDelta, payload) // timeDelta in milliseconds
+		core.WriteUInt32LE(0, payload)         // byteCount (no BW_PAYLOAD was sent)
+	}
+
+	slog.Debug("AutoDetect response", "responseType", fmt.Sprintf("0x%04x", responseType),
+		"sequenceNumber", sequenceNumber, "timeDelta", timeDelta)
+	c.transport.Write(c.Pack(payload.Bytes(), c.messageChannelId))
 }
 
 func (c *MCSClient) Pack(data []byte, channelId uint16) []byte {

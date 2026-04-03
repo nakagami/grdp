@@ -58,26 +58,37 @@ type dvcReassembly struct {
 }
 
 type DvcClient struct {
-	w                  core.ChannelSender
-	channels           map[string]ChannelClient
-	handlers           map[string]DvcChannelHandler // channelName → handler
-	channelById        map[uint32]*dvcChannelInfo   // channelId → info
-	reassembly         map[uint32]*dvcReassembly    // channelId → reassembly state
-	negotiatedVersion  uint16
+	w                 core.ChannelSender
+	channels          map[string]ChannelClient
+	handlers          map[string]DvcChannelHandler // channelName → handler
+	rejectedChannels  map[string]bool              // channelName → explicitly rejected
+	channelById       map[uint32]*dvcChannelInfo   // channelId → info
+	reassembly        map[uint32]*dvcReassembly    // channelId → reassembly state
+	negotiatedVersion uint16
 }
 
 func NewDvcClient() *DvcClient {
 	return &DvcClient{
-		channels:    make(map[string]ChannelClient, 100),
-		handlers:    make(map[string]DvcChannelHandler),
-		channelById: make(map[uint32]*dvcChannelInfo),
-		reassembly:  make(map[uint32]*dvcReassembly),
+		channels:         make(map[string]ChannelClient, 100),
+		handlers:         make(map[string]DvcChannelHandler),
+		rejectedChannels: make(map[string]bool),
+		channelById:      make(map[uint32]*dvcChannelInfo),
+		reassembly:       make(map[uint32]*dvcReassembly),
 	}
 }
 
 // RegisterHandler registers a handler for a named DVC channel.
 func (c *DvcClient) RegisterHandler(name string, handler DvcChannelHandler) {
 	c.handlers[name] = handler
+}
+
+// RegisterRejectedChannel marks a DVC channel to be explicitly rejected
+// (non-zero CreationStatus) so the server does not use it.
+// Use this to steer servers toward a fallback channel; for example,
+// rejecting AUDIO_PLAYBACK_LOSSY_DVC forces gnome-remote-desktop to
+// fall back to lossless AUDIO_PLAYBACK_DVC (PCM).
+func (c *DvcClient) RegisterRejectedChannel(name string) {
+	c.rejectedChannels[name] = true
 }
 
 func (c *DvcClient) LoadAddin(f core.ChannelSender) {
@@ -209,6 +220,18 @@ func (c *DvcClient) processCreateReq(hdr *DvcHeader, s []byte) {
 			})
 		}
 		slog.Debug(fmt.Sprintf("dvc: handler registered for channel %s (id=%d)", channelName, channelId))
+	}
+
+	// If explicitly rejected, send a non-zero CreationStatus so the server
+	// does not use this channel (e.g. AUDIO_PLAYBACK_LOSSY_DVC → fallback to PCM).
+	if c.rejectedChannels[channelName] {
+		slog.Debug(fmt.Sprintf("dvc: rejecting channel %s (id=%d)", channelName, channelId))
+		rspHdr := &DvcHeader{cmd: DYNVC_CREATE_REQ, sp: 0, cbChId: hdr.cbChId}
+		b := &bytes.Buffer{}
+		b.Write(rspHdr.serialize(channelId))
+		core.WriteUInt32LE(0x80004005, b) // E_FAIL
+		c.Send(b.Bytes())
+		return
 	}
 
 	// Send success response (Sp SHOULD be 0 per MS-RDPEDYC 2.2.2.2).
