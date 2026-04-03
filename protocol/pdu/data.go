@@ -49,6 +49,15 @@ const (
 	PDUTYPE2_FRAME_ACKNOWLEDGE           = 0x38
 )
 
+// Slow-Path Pointer Update types (MS-RDPBCGR 2.2.9.1.1.4)
+const (
+	TS_PTRUPDATE_TYPE_SYSTEM   = 0x0001
+	TS_PTRUPDATE_TYPE_POSITION = 0x0003
+	TS_PTRUPDATE_TYPE_COLOR    = 0x0006
+	TS_PTRUPDATE_TYPE_CACHED   = 0x0007
+	TS_PTRUPDATE_TYPE_POINTER  = 0x0008
+)
+
 func (p PduType2) String() string {
 	switch p {
 	case PDUTYPE2_UPDATE:
@@ -544,6 +553,9 @@ func readDataPDU(r io.Reader) (*DataPDU, error) {
 	case PDUTYPE2_SAVE_SESSION_INFO:
 		d = &SaveSessionInfo{}
 
+	case PDUTYPE2_POINTER:
+		d = &PointerDataPDU{}
+
 	default:
 		err = errors.New(fmt.Sprintf("Unknown data pdu type2 0x%02x", header.PDUType2))
 		slog.Error("readDataPDU", "err", err)
@@ -600,6 +612,52 @@ func (d *UpdateDataPDU) Unpack(r io.Reader) (err error) {
 
 	d.Udata = p
 
+	return nil
+}
+
+// PointerDataPDU handles slow-path pointer updates (MS-RDPBCGR 2.2.9.1.1.4)
+type PointerDataPDU struct {
+	MessageType uint16
+	Pad2Octets  uint16
+	Pdata       UpdateData
+}
+
+func (*PointerDataPDU) Type2() uint8 {
+	return PDUTYPE2_POINTER
+}
+
+func (d *PointerDataPDU) Unpack(r io.Reader) error {
+	var err error
+	d.MessageType, err = core.ReadUint16LE(r)
+	if err != nil {
+		return err
+	}
+	d.Pad2Octets, err = core.ReadUint16LE(r)
+	if err != nil {
+		return err
+	}
+	slog.Debug(fmt.Sprintf("PointerDataPDU messageType 0x%04x", d.MessageType))
+	var p UpdateData
+	switch d.MessageType {
+	case TS_PTRUPDATE_TYPE_CACHED:
+		p = &FastPathUpdateCachedPDU{}
+	case TS_PTRUPDATE_TYPE_POINTER:
+		p = &FastPathUpdatePointerPDU{}
+	case TS_PTRUPDATE_TYPE_SYSTEM, TS_PTRUPDATE_TYPE_POSITION, TS_PTRUPDATE_TYPE_COLOR:
+		// not yet parsed; remaining data is discarded by the caller
+	default:
+		slog.Debug(fmt.Sprintf("PointerDataPDU: unhandled messageType 0x%04x", d.MessageType))
+	}
+	if p != nil {
+		if err = p.Unpack(r); err != nil {
+			return err
+		}
+	}
+	d.Pdata = p
+	return nil
+}
+
+func (d *PointerDataPDU) Serialize() []byte {
 	return nil
 }
 

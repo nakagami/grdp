@@ -28,15 +28,17 @@ type Message uint16
 
 const (
 	//server -> client
-	SC_CORE     Message = 0x0C01
-	SC_SECURITY         = 0x0C02
-	SC_NET              = 0x0C03
+	SC_CORE           Message = 0x0C01
+	SC_SECURITY               = 0x0C02
+	SC_NET                    = 0x0C03
+	SC_MCS_MSGCHANNEL         = 0x0C04 // TS_UD_SC_MCS_MSGCHANNEL
 	//client -> server
-	CS_CORE     = 0xC001
-	CS_SECURITY = 0xC002
-	CS_NET      = 0xC003
-	CS_CLUSTER  = 0xC004
-	CS_MONITOR  = 0xC005
+	CS_CORE           = 0xC001
+	CS_SECURITY       = 0xC002
+	CS_NET            = 0xC003
+	CS_CLUSTER        = 0xC004
+	CS_MONITOR        = 0xC005
+	CS_MCS_MSGCHANNEL = 0xC006 // TS_UD_CS_MCS_MSGCHANNEL
 )
 
 /**
@@ -264,7 +266,7 @@ func NewClientCoreData(kbdLayout uint32, keyboardType uint32, keyboardSubType ui
 		RNS_UD_SAS_DEL, KeyboardLayout(kbdLayout), 22621, ClientName, keyboardType,
 		keyboardSubType, 12, [64]byte{}, RNS_UD_COLOR_8BPP, 1, 0, HIGH_COLOR_24BPP,
 		RNS_UD_15BPP_SUPPORT | RNS_UD_16BPP_SUPPORT | RNS_UD_24BPP_SUPPORT | RNS_UD_32BPP_SUPPORT,
-		RNS_UD_CS_SUPPORT_ERRINFO_PDU | RNS_UD_CS_WANT_32BPP_SESSION | RNS_UD_CS_VALID_CONNECTION_TYPE,
+		RNS_UD_CS_SUPPORT_ERRINFO_PDU | RNS_UD_CS_WANT_32BPP_SESSION | RNS_UD_CS_VALID_CONNECTION_TYPE | RNS_UD_CS_SUPPORT_NETCHAR_AUTODETECT,
 		[64]byte{}, uint8(CONNECTION_TYPE_LAN), 0, 0}
 }
 
@@ -564,6 +566,33 @@ func (s *ServerSecurityData) Unpack(r io.Reader) error {
 	return nil
 }
 
+// ServerMsgChannelData holds the message channel ID allocated by the server
+// (TS_UD_SC_MCS_MSGCHANNEL). Used for connect-time network auto-detection.
+type ServerMsgChannelData struct {
+	MCSChannelId uint16
+}
+
+func (d *ServerMsgChannelData) ScType() Message {
+	return SC_MCS_MSGCHANNEL
+}
+
+func (d *ServerMsgChannelData) Unpack(r io.Reader) error {
+	var err error
+	d.MCSChannelId, err = core.ReadUint16LE(r)
+	return err
+}
+
+// PackClientMsgChannelData serialises the TS_UD_CS_MCS_MSGCHANNEL block.
+// Advertising this block requests that the server allocate a dedicated message
+// channel for connect-time network auto-detection (RTT/BW measurements).
+func PackClientMsgChannelData() []byte {
+	buff := &bytes.Buffer{}
+	core.WriteUInt16LE(CS_MCS_MSGCHANNEL, buff) // type 0xC006
+	core.WriteUInt16LE(0x08, buff)              // length = 8
+	core.WriteUInt32LE(0, buff)                 // flags = 0
+	return buff.Bytes()
+}
+
 func MakeConferenceCreateRequest(userData []byte) []byte {
 	buff := &bytes.Buffer{}
 	per.WriteChoice(0, buff)                        // 00
@@ -621,8 +650,10 @@ func ReadConferenceCreateResponse(data []byte) []interface{} {
 			d = &ServerSecurityData{}
 		case SC_NET:
 			d = &ServerNetworkData{}
+		case SC_MCS_MSGCHANNEL:
+			d = &ServerMsgChannelData{}
 		default:
-			slog.Error("ReadConferenceCreateResponse", "type", t)
+			slog.Debug("ReadConferenceCreateResponse: ignoring unknown block", "type", t)
 			continue
 		}
 

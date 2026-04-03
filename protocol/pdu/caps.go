@@ -771,6 +771,12 @@ func readCapability(r io.Reader) (Capability, error) {
 		c = &OffscreenBitmapCacheCapability{}
 	case CAPSTYPE_VIRTUALCHANNEL:
 		c = &VirtualChannelCapability{}
+		// VCChunkSize is optional (MS-RDPBCGR 2.2.7.1.10); pad if absent
+		if len(capBytes) < 8 {
+			padded := make([]byte, 8)
+			copy(padded, capBytes)
+			capReader.Reset(padded)
+		}
 	case CAPSTYPE_SOUND:
 		c = &SoundCapability{}
 	case CAPSTYPE_CONTROL:
