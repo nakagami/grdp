@@ -71,6 +71,7 @@ type RdpClient struct {
 	onPointerCachedFn func(uint16)
 	onPointerUpdateFn func(uint16, uint16, uint16, uint16, uint16, uint16, []byte, []byte)
 	onAudioFn         func(rdpsnd.AudioFormat, []byte)
+	onAudioResetFn    func()
 
 	// clipboard callbacks and handler
 	onClipboardFn  func(text string) // remote → local
@@ -255,6 +256,11 @@ func (g *RdpClient) doLogin(routingToken []byte) error {
 	rdpsndHandler := rdpsnd.NewHandler(func(format rdpsnd.AudioFormat, data []byte) {
 		if g.onAudioFn != nil {
 			g.onAudioFn(format, data)
+		}
+	})
+	rdpsndHandler.SetAudioResetCallback(func() {
+		if g.onAudioResetFn != nil {
+			g.onAudioResetFn()
 		}
 	})
 	g.channels.Register(rdpsndHandler)
@@ -546,6 +552,15 @@ func (g *RdpClient) OnAudio(f func(rdpsnd.AudioFormat, []byte)) *RdpClient {
 	return g
 }
 
+// OnAudioReset registers a callback that is called when the server closes the
+// audio channel (e.g. media seek or stream restart). The application should
+// flush its audio playback buffer so that stale audio does not keep playing.
+// Must be called before Login.
+func (g *RdpClient) OnAudioReset(f func()) *RdpClient {
+	g.onAudioResetFn = f
+	return g
+}
+
 // OnClipboard registers callbacks for bidirectional clipboard sharing.
 //
 //   - onRemote is called with the text when the RDP server's clipboard
@@ -728,6 +743,9 @@ func (g *RdpClient) reregisterCallbacks() {
 	}
 	if g.onPointerUpdateFn != nil {
 		g.OnPointerUpdate(g.onPointerUpdateFn)
+	}
+	if g.onAudioResetFn != nil {
+		g.OnAudioReset(g.onAudioResetFn)
 	}
 }
 
