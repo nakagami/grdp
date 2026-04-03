@@ -76,14 +76,6 @@ func (s *audioStream) Read(p []byte) (int, error) {
 
 	n, err := s.buf.Read(p)
 
-	if s.wasUnderrun {
-		applyFade(p[:n], true) // fade-in to avoid click
-		s.wasUnderrun = false
-	}
-	if s.buf.Len() == 0 {
-		applyFade(p[:n], false) // fade-out before silence
-	}
-
 	return n, err
 }
 
@@ -99,39 +91,6 @@ func (s *audioStream) Reset() {
 	s.mu.Lock()
 	s.buf.Reset()
 	s.mu.Unlock()
-}
-
-// applyFade applies a short linear fade to 16-bit stereo PCM data.
-// fadeIn=true ramps the first fadeFrames from 0→1; fadeIn=false ramps
-// the last fadeFrames from 1→0.
-func applyFade(data []byte, fadeIn bool) {
-	const frameSize = 4 // 2 bytes × 2 channels
-	totalFrames := len(data) / frameSize
-	n := totalFrames
-	if n > fadeFrames {
-		n = fadeFrames
-	}
-	if n <= 0 {
-		return
-	}
-	for i := 0; i < n; i++ {
-		var off int
-		var num int
-		if fadeIn {
-			off = i * frameSize
-			num = i
-		} else {
-			off = (totalFrames - n + i) * frameSize
-			num = n - 1 - i
-		}
-		for ch := 0; ch < 2; ch++ {
-			soff := off + ch*2
-			sample := int16(uint16(data[soff]) | uint16(data[soff+1])<<8)
-			sample = int16(int(sample) * num / n)
-			data[soff] = byte(uint16(sample))
-			data[soff+1] = byte(uint16(sample) >> 8)
-		}
-	}
 }
 
 // --- System clipboard helpers (golang.design/x/clipboard) ------------------
