@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os"
 	"reflect"
-	"sync"
 )
 
 // Default number of maximum listeners for an event.
@@ -23,8 +22,6 @@ type RecoveryListener func(interface{}, interface{}, error)
 
 // Emitter ...
 type Emitter struct {
-	// Mutex to prevent race conditions within the Emitter.
-	*sync.Mutex
 	// Map of event to a slice of listener function's reflect Values.
 	events map[interface{}][]reflect.Value
 	// Optional RecoveryListener to call when a panic occurs.
@@ -43,9 +40,6 @@ type Emitter struct {
 // AddListener panics. If a RecoveryListener has been set then it is called
 // recovering from the panic.
 func (emitter *Emitter) AddListener(event, listener interface{}) *Emitter {
-	emitter.Lock()
-	defer emitter.Unlock()
-
 	fn := reflect.ValueOf(listener)
 
 	if reflect.Func != fn.Kind() {
@@ -76,9 +70,6 @@ func (emitter *Emitter) On(event, listener interface{}) *Emitter {
 // have a Kind of Func then RemoveListener panics. If a RecoveryListener has
 // been set then it is called after recovering from the panic.
 func (emitter *Emitter) RemoveListener(event, listener interface{}) *Emitter {
-	emitter.Lock()
-	defer emitter.Unlock()
-
 	fn := reflect.ValueOf(listener)
 
 	if reflect.Func != fn.Kind() {
@@ -127,9 +118,6 @@ func (emitter *Emitter) Off(event, listener interface{}) *Emitter {
 // does not have a Kind of Func then Once panics. If a RecoveryListener
 // has been set then it is called after recovering from the panic.
 func (emitter *Emitter) Once(event, listener interface{}) *Emitter {
-	emitter.Lock()
-	defer emitter.Unlock()
-
 	fn := reflect.ValueOf(listener)
 
 	if reflect.Func != fn.Kind() {
@@ -161,34 +149,16 @@ func (emitter *Emitter) Emit(event interface{}, arguments ...interface{}) *Emitt
 		ok        bool
 	)
 
-	// Lock the mutex when reading from the Emitter's
-	// events map.
-	emitter.Lock()
-
-	if listeners, ok = emitter.events[event]; !ok {
-		// If the Emitter does not include the event in its
-		// event map, it has no listeners to Call yet.
-		emitter.Unlock()
-		goto ONCES
+	if listeners, ok = emitter.events[event]; ok {
+		emitter.callListeners(listeners, event, arguments...)
 	}
 
-	// Unlock the mutex immediately following the read
-	// instead of deferring so that listeners registered
-	// with Once can aquire the mutex for removal.
-	emitter.Unlock()
-	emitter.callListeners(listeners, event, arguments...)
-
-ONCES:
 	// execute onces
-	emitter.Lock()
-	if listeners, ok = emitter.onces[event]; !ok {
-		emitter.Unlock()
-		return emitter
+	if listeners, ok = emitter.onces[event]; ok {
+		emitter.callListeners(listeners, event, arguments...)
+		// clear executed listeners
+		emitter.onces[event] = emitter.onces[event][len(listeners):]
 	}
-	emitter.Unlock()
-	emitter.callListeners(listeners, event, arguments...)
-	// clear executed listeners
-	emitter.onces[event] = emitter.onces[event][len(listeners):]
 	return emitter
 }
 
@@ -234,20 +204,15 @@ func (emitter *Emitter) RecoverWith(listener RecoveryListener) *Emitter {
 // event can have a maximum number of 10 listeners which is
 // useful for finding memory leaks.
 func (emitter *Emitter) SetMaxListeners(max int) *Emitter {
-	emitter.Lock()
-	defer emitter.Unlock()
-
 	emitter.maxListeners = max
 	return emitter
 }
 
 // GetListenerCount gets count of listeners for a given event.
 func (emitter *Emitter) GetListenerCount(event interface{}) (count int) {
-	emitter.Lock()
 	if listeners, ok := emitter.events[event]; ok {
 		count = len(listeners)
 	}
-	emitter.Unlock()
 	return
 }
 
@@ -256,7 +221,6 @@ func (emitter *Emitter) GetListenerCount(event interface{}) (count int) {
 // constant and initializing its events map.
 func NewEmitter() (emitter *Emitter) {
 	emitter = new(Emitter)
-	emitter.Mutex = new(sync.Mutex)
 	emitter.events = make(map[interface{}][]reflect.Value)
 	emitter.maxListeners = DefaultMaxListeners
 	emitter.onces = make(map[interface{}][]reflect.Value)

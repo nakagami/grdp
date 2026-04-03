@@ -54,7 +54,6 @@ type RdpClient struct {
 	redirecting     bool      // true during async redirect reconnection
 	decompressPool  sync.Pool // pools []uint8 buffers for bitmap decompression
 	flipLinePool    sync.Pool // pools line-sized []uint8 buffers for bitmap vertical flip
-	reconnectMu     sync.Mutex
 	closed          bool
 
 	// credentials stored for reconnection
@@ -669,15 +668,12 @@ func (g *RdpClient) MouseDown(button int, x, y int) {
 }
 
 func (g *RdpClient) Reconnect(width, height int) error {
-	g.reconnectMu.Lock()
-	defer g.reconnectMu.Unlock()
-
 	if g.closed {
 		return fmt.Errorf("client is closed")
 	}
 
 	slog.Debug("Reconnect", "width", width, "height", height)
-	g.closeLocked()
+	g.closeTransport()
 	g.width = width
 	g.height = height
 	g.eventReady = false
@@ -694,7 +690,7 @@ func (g *RdpClient) Reconnect(width, height int) error {
 		if err != nil {
 			slog.Warn("Reconnect: login failed", "attempt", attempt, "err", err)
 			if attempt < maxRetries {
-				g.closeLocked()
+				g.closeTransport()
 				continue
 			}
 			return fmt.Errorf("[reconnect err] %v", err)
@@ -735,17 +731,15 @@ func (g *RdpClient) reregisterCallbacks() {
 	}
 }
 
-// closeLocked closes the underlying transport. Caller must hold reconnectMu.
-func (g *RdpClient) closeLocked() {
+// closeTransport closes the underlying transport.
+func (g *RdpClient) closeTransport() {
 	if g.tpkt != nil {
 		g.tpkt.Close()
 	}
 }
 
 func (g *RdpClient) Close() {
-	g.reconnectMu.Lock()
-	defer g.reconnectMu.Unlock()
 	slog.Debug("Close()")
 	g.closed = true
-	g.closeLocked()
+	g.closeTransport()
 }
