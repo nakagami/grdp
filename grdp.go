@@ -54,7 +54,6 @@ type RdpClient struct {
 	redirecting     bool      // true during async redirect reconnection
 	decompressPool  sync.Pool // pools []uint8 buffers for bitmap decompression
 	flipLinePool    sync.Pool // pools line-sized []uint8 buffers for bitmap vertical flip
-	reconnectMu     sync.Mutex
 	closed          bool
 
 	// credentials stored for reconnection
@@ -72,6 +71,7 @@ type RdpClient struct {
 	onPointerCachedFn func(uint16)
 	onPointerUpdateFn func(uint16, uint16, uint16, uint16, uint16, uint16, []byte, []byte)
 	onAudioFn         func(rdpsnd.AudioFormat, []byte)
+	onAudioResetFn    func()
 
 	// clipboard callbacks and handler
 	onClipboardFn  func(text string) // remote → local
@@ -256,6 +256,11 @@ func (g *RdpClient) doLogin(routingToken []byte) error {
 	rdpsndHandler := rdpsnd.NewHandler(func(format rdpsnd.AudioFormat, data []byte) {
 		if g.onAudioFn != nil {
 			g.onAudioFn(format, data)
+		}
+	})
+	rdpsndHandler.SetAudioResetCallback(func() {
+		if g.onAudioResetFn != nil {
+			g.onAudioResetFn()
 		}
 	})
 	g.channels.Register(rdpsndHandler)
@@ -547,6 +552,15 @@ func (g *RdpClient) OnAudio(f func(rdpsnd.AudioFormat, []byte)) *RdpClient {
 	return g
 }
 
+// OnAudioReset registers a callback that is called when the server closes the
+// audio channel (e.g. media seek or stream restart). The application should
+// flush its audio playback buffer so that stale audio does not keep playing.
+// Must be called before Login.
+func (g *RdpClient) OnAudioReset(f func()) *RdpClient {
+	g.onAudioResetFn = f
+	return g
+}
+
 // OnClipboard registers callbacks for bidirectional clipboard sharing.
 //
 //   - onRemote is called with the text when the RDP server's clipboard
@@ -669,15 +683,12 @@ func (g *RdpClient) MouseDown(button int, x, y int) {
 }
 
 func (g *RdpClient) Reconnect(width, height int) error {
-	g.reconnectMu.Lock()
-	defer g.reconnectMu.Unlock()
-
 	if g.closed {
 		return fmt.Errorf("client is closed")
 	}
 
 	slog.Debug("Reconnect", "width", width, "height", height)
-	g.closeLocked()
+	g.closeTransport()
 	g.width = width
 	g.height = height
 	g.eventReady = false
@@ -694,7 +705,7 @@ func (g *RdpClient) Reconnect(width, height int) error {
 		if err != nil {
 			slog.Warn("Reconnect: login failed", "attempt", attempt, "err", err)
 			if attempt < maxRetries {
-				g.closeLocked()
+				g.closeTransport()
 				continue
 			}
 			return fmt.Errorf("[reconnect err] %v", err)
@@ -733,19 +744,20 @@ func (g *RdpClient) reregisterCallbacks() {
 	if g.onPointerUpdateFn != nil {
 		g.OnPointerUpdate(g.onPointerUpdateFn)
 	}
+	if g.onAudioResetFn != nil {
+		g.OnAudioReset(g.onAudioResetFn)
+	}
 }
 
-// closeLocked closes the underlying transport. Caller must hold reconnectMu.
-func (g *RdpClient) closeLocked() {
+// closeTransport closes the underlying transport.
+func (g *RdpClient) closeTransport() {
 	if g.tpkt != nil {
 		g.tpkt.Close()
 	}
 }
 
 func (g *RdpClient) Close() {
-	g.reconnectMu.Lock()
-	defer g.reconnectMu.Unlock()
 	slog.Debug("Close()")
 	g.closed = true
-	g.closeLocked()
+	g.closeTransport()
 }

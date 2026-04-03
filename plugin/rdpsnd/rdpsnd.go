@@ -152,6 +152,11 @@ type Handler struct {
 
 	// Application callback: called with the active AudioFormat and PCM data
 	onAudio func(AudioFormat, []byte)
+
+	// onAudioReset is called when the server closes the audio channel
+	// (SNDC_CLOSE). The application should flush its audio playback buffer
+	// so that stale audio from before a seek does not keep playing.
+	onAudioReset func()
 }
 
 // NewHandler creates a new RDPSND handler.
@@ -161,6 +166,13 @@ func NewHandler(onAudio func(AudioFormat, []byte)) *Handler {
 		activeFormatIndex: -1,
 		onAudio:           onAudio,
 	}
+}
+
+// SetAudioResetCallback sets a function that is called when the server
+// closes the audio channel (e.g. on media seek). The application should
+// flush its audio playback buffer in this callback.
+func (h *Handler) SetAudioResetCallback(f func()) {
+	h.onAudioReset = f
 }
 
 // --- plugin.ChannelTransport interface ---
@@ -217,6 +229,9 @@ func (h *Handler) ProcessData(data []byte) {
 		h.processWave2(body)
 	case SNDC_CLOSE:
 		slog.Debug("rdpsnd: server closed audio channel")
+		if h.onAudioReset != nil {
+			h.onAudioReset()
+		}
 	case SNDC_SETVOLUME, SNDC_QUALITYMODE:
 		// ignored
 	default:

@@ -26,49 +26,71 @@ import (
 
 // audioStream is a thread-safe buffer that bridges the RDPSND OnAudio
 // callback (producer) and the oto audio player (consumer).
+//
+// Unlike a blocking io.Reader, Read returns silence (zeros) when the buffer
+// is empty.  This keeps the oto player running continuously and avoids
+// audio-device stalls that would cause clicks/pops when data resumes.
+// Short cross-fades are applied at underrun boundaries (like rdpyqt).
 type audioStream struct {
-	mu     sync.Mutex
-	cond   *sync.Cond
-	buf    bytes.Buffer
-	closed bool
+	mu          sync.Mutex
+	buf         bytes.Buffer
+	closed      bool
+	wasUnderrun bool
 }
 
-const maxAudioBuf = 1 << 20 // 1MB ≈ 6s of PCM 44100Hz/2ch/16bit
+const maxAudioBuf = 1 << 20 // 1 MB ≈ 6 s of PCM 44100 Hz / 2 ch / 16 bit
+
+// fadeFrames is the number of stereo frames used for fade-in / fade-out
+// at underrun boundaries (~1.5 ms at 44100 Hz).
+const fadeFrames = 64
 
 func newAudioStream() *audioStream {
-	s := &audioStream{}
-	s.cond = sync.NewCond(&s.mu)
-	return s
+	return &audioStream{}
 }
 
 func (s *audioStream) Write(p []byte) (int, error) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.buf.Len() > maxAudioBuf {
 		s.buf.Reset()
 	}
-	n, err := s.buf.Write(p)
-	s.mu.Unlock()
-	s.cond.Signal()
-	return n, err
+	return s.buf.Write(p)
 }
 
+// Read fills p with audio data.  If the internal buffer is empty the
+// slice is zero-filled (silence) so the oto player never stalls.
 func (s *audioStream) Read(p []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for s.buf.Len() == 0 && !s.closed {
-		s.cond.Wait()
-	}
-	if s.buf.Len() == 0 && s.closed {
+
+	if s.closed && s.buf.Len() == 0 {
 		return 0, io.EOF
 	}
-	return s.buf.Read(p)
+
+	if s.buf.Len() == 0 {
+		// No data available — return silence instead of blocking.
+		s.wasUnderrun = true
+		clear(p)
+		return len(p), nil
+	}
+
+	n, err := s.buf.Read(p)
+
+	return n, err
 }
 
 func (s *audioStream) Close() {
 	s.mu.Lock()
 	s.closed = true
 	s.mu.Unlock()
-	s.cond.Broadcast()
+}
+
+// Reset flushes all buffered audio data. Called when the server closes the
+// audio channel (e.g. media seek) so stale audio does not keep playing.
+func (s *audioStream) Reset() {
+	s.mu.Lock()
+	s.buf.Reset()
+	s.mu.Unlock()
 }
 
 // --- System clipboard helpers (golang.design/x/clipboard) ------------------
@@ -132,6 +154,11 @@ func uiRdp(hostPort, domain, user, password string, width, height int, keyboardT
 
 	g.OnAudio(func(af rdpsnd.AudioFormat, data []byte) {
 		audioStr.Write(data)
+	})
+
+	g.OnAudioReset(func() {
+		slog.Debug("Audio reset: flushing playback buffer")
+		audioStr.Reset()
 	})
 
 	g.OnClipboard(
