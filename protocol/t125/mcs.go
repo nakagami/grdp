@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"reflect"
+	"time"
 
 	//	"github.com/nakagami/grdp/plugin/cliprdr"
 	"github.com/nakagami/grdp/plugin/drdynvc"
@@ -265,6 +266,7 @@ type MCSClient struct {
 	nbChannelRequested   int
 	messageChannelId     uint16 // from SC_MCS_MSGCHANNEL; 0 = not negotiated
 	messageChannelJoined bool
+	bwStartTime          time.Time // timestamp of last RDP_BW_START for timeDelta calculation
 }
 
 func NewMCSClient(t core.Transport, kbdLayout uint32, keyboardType uint32, keyboardSubType uint32) *MCSClient {
@@ -606,16 +608,30 @@ func (c *MCSClient) handleAutoDetect(data []byte) {
 
 	switch reqType {
 	case rdpRttRequestConnecttime, rdpRttRequest:
-		c.sendAutoDetectResponse(seqNum, rdpRttResponseType, false)
+		c.sendAutoDetectResponse(seqNum, rdpRttResponseType, 0)
+	case rdpBwStartConnecttime, rdpBwStart:
+		c.bwStartTime = time.Now()
 	case rdpBwStopConnecttime:
-		c.sendAutoDetectResponse(seqNum, rdpBwResultsConnecttime, true)
+		elapsed := uint32(time.Since(c.bwStartTime).Milliseconds())
+		if elapsed == 0 {
+			elapsed = 1
+		}
+		c.sendAutoDetectResponse(seqNum, rdpBwResultsConnecttime, elapsed)
 	case rdpBwStop:
-		c.sendAutoDetectResponse(seqNum, rdpBwResults, true)
-	// rdpBwStartConnecttime, rdpBwStart, rdpBwPayload require no response
+		elapsed := uint32(time.Since(c.bwStartTime).Milliseconds())
+		if elapsed == 0 {
+			elapsed = 1
+		}
+		c.sendAutoDetectResponse(seqNum, rdpBwResults, elapsed)
+	// rdpBwPayload requires no response
 	}
 }
 
-func (c *MCSClient) sendAutoDetectResponse(sequenceNumber uint16, responseType uint16, includeBW bool) {
+// sendAutoDetectResponse sends an auto-detect response on the message channel.
+// timeDelta is 0 for RTT responses (no BW fields); non-zero for BW responses
+// (timeDelta in milliseconds since the corresponding BW_START was received).
+func (c *MCSClient) sendAutoDetectResponse(sequenceNumber uint16, responseType uint16, timeDelta uint32) {
+	includeBW := responseType == rdpBwResultsConnecttime || responseType == rdpBwResults
 	headerLength := uint8(6)
 	if includeBW {
 		headerLength = 14
@@ -629,12 +645,12 @@ func (c *MCSClient) sendAutoDetectResponse(sequenceNumber uint16, responseType u
 	core.WriteUInt16LE(sequenceNumber, payload)
 	core.WriteUInt16LE(responseType, payload)
 	if includeBW {
-		core.WriteUInt32LE(0, payload) // timeDelta
-		core.WriteUInt32LE(0, payload) // byteCount
+		core.WriteUInt32LE(timeDelta, payload) // timeDelta in milliseconds
+		core.WriteUInt32LE(0, payload)         // byteCount (no BW_PAYLOAD was sent)
 	}
 
 	slog.Debug("AutoDetect response", "responseType", fmt.Sprintf("0x%04x", responseType),
-		"sequenceNumber", sequenceNumber)
+		"sequenceNumber", sequenceNumber, "timeDelta", timeDelta)
 	c.transport.Write(c.Pack(payload.Bytes(), c.messageChannelId))
 }
 
