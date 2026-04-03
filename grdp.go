@@ -306,11 +306,16 @@ func (g *RdpClient) doLogin(routingToken []byte) error {
 	})
 	dvcClient.RegisterHandler(rdpgfx.ChannelName, gfxHandler)
 
-	// Register DVC audio handler for lossless PCM (AUDIO_PLAYBACK_DVC).
-	// Explicitly reject the lossy variant (AUDIO_PLAYBACK_LOSSY_DVC) so that
-	// gnome-remote-desktop falls back to lossless PCM instead of Opus/AAC.
+	// Register DVC audio handlers for both the lossless and lossy variants.
+	// gnome-remote-desktop requests AUDIO_PLAYBACK_LOSSY_DVC first; if it is
+	// rejected, gnome-remote-desktop triggers its SVC fallback path which also
+	// sets prevent_dvc_initialization=true, silently blocking AUDIO_PLAYBACK_DVC
+	// as well — leaving the client with no audio at all.
+	// By accepting both channels with the same rdpsnd handler, format negotiation
+	// (which only advertises PCM) ensures PCM is used regardless of which channel
+	// gnome-remote-desktop chooses.
 	dvcClient.RegisterHandler("AUDIO_PLAYBACK_DVC", rdpsnd.NewDvcAdapter(rdpsndHandler))
-	dvcClient.RegisterRejectedChannel("AUDIO_PLAYBACK_LOSSY_DVC")
+	dvcClient.RegisterHandler("AUDIO_PLAYBACK_LOSSY_DVC", rdpsnd.NewDvcAdapter(rdpsndHandler))
 
 	g.sec.SetUser(g.user)
 	g.sec.SetPwd(g.password)
