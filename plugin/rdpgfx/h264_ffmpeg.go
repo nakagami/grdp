@@ -155,6 +155,12 @@ const hwInitTimeout = 60
 // swStallThreshold is the equivalent threshold for the software decoder.
 const swStallThreshold = 30
 
+// keyframeWaitLimit is the maximum number of non-IDR packets we drop while
+// waiting for a keyframe after a decoder reset.  If the server never sends a
+// new IDR within this many packets we give up waiting and feed P-frames to the
+// SW decoder anyway; FFmpeg's error-concealment keeps the session alive.
+const keyframeWaitLimit = 150
+
 type ffmpegDecoder struct {
 	codecCtx  *C.AVCodecContext
 	packet    *C.AVPacket
@@ -168,6 +174,7 @@ type ffmpegDecoder struct {
 	lastFmt   C.enum_AVPixelFormat
 	stallCount    int    // consecutive Decode() calls that returned nil
 	needsKeyFrame bool   // drop packets until an IDR/SPS is received
+	keyframeWaitCount int // P-frames dropped so far while needsKeyFrame=true
 	hwReady       bool   // HW decoder has produced at least one frame
 	hwSentCount   int    // packets sent to HW decoder (for init timeout)
 	swFrameCount  int    // frames decoded by SW decoder (for diagnostics)
@@ -248,6 +255,10 @@ func newH264Decoder() h264Decoder {
 	return d
 }
 
+func (d *ffmpegDecoder) NeedsKeyframe() bool {
+	return d.needsKeyFrame
+}
+
 func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 	if len(h264Data) == 0 {
 		return nil, nil
@@ -257,13 +268,26 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 	// Priming with a cached IDR does NOT work: P-frames mid-GOP expect a DPB
 	// containing several preceding reference frames that we no longer have.
 	// Feeding only the cached IDR causes the SW decoder to output zero-filled
-	// frames (all Y=U=V=0) which render as solid green.  The only correct
-	// recovery is to wait for the server to begin a new GOP.
+	// frames (all Y=U=V=0) which render as solid green.  The correct recovery
+	// is to wait for the server to begin a new GOP, but if the server never
+	// sends one we fall back to SW error-concealment after keyframeWaitLimit
+	// packets so the session does not hang indefinitely.
 	if d.needsKeyFrame {
 		if !h264ContainsKeyFrame(h264Data) {
-			return nil, nil // drop P-frames until server sends a new IDR
+			d.keyframeWaitCount++
+			if d.keyframeWaitCount >= keyframeWaitLimit {
+				slog.Warn("H.264: no IDR received, proceeding without keyframe",
+					"waited", d.keyframeWaitCount)
+				d.needsKeyFrame = false
+				d.keyframeWaitCount = 0
+				// fall through and attempt SW error-concealment decode
+			} else {
+				return nil, nil // drop P-frames while waiting
+			}
+		} else {
+			d.needsKeyFrame = false
+			d.keyframeWaitCount = 0
 		}
-		d.needsKeyFrame = false
 	}
 
 	// If the decoder has been stalled for too long (e.g. VideoToolbox
@@ -307,6 +331,7 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 		C.avcodec_flush_buffers(d.codecCtx)
 		d.stallCount = 0
 		d.needsKeyFrame = true
+		d.keyframeWaitCount = 0
 		return nil, nil
 	}
 
@@ -502,6 +527,7 @@ func (d *ffmpegDecoder) reinitSoftware() {
 	d.lastFmt = C.AV_PIX_FMT_NONE
 	d.stallCount = 0
 	d.needsKeyFrame = true
+	d.keyframeWaitCount = 0
 	d.hwReady = false
 	d.hwSentCount = 0
 	d.swFrameCount = 0

@@ -138,6 +138,11 @@ type GfxHandler struct {
 	// each one to the server.  The server tracks outstanding frames
 	// individually, so skipping ACKs causes it to stop sending.
 	ackCh chan []byte
+	// onKeyframeNeeded is called once when the H.264 decoder switches to
+	// software and needs a fresh IDR from the server.  The caller should
+	// send a refresh request (e.g. RefreshRectPDU) to trigger a new GOP.
+	onKeyframeNeeded   func()
+	keyframeRequested  bool
 }
 
 // NewGfxHandler creates a new RDPGFX handler.
@@ -162,6 +167,14 @@ func NewGfxHandler(onBitmap func([]BitmapUpdate)) *GfxHandler {
 // SetSendFunc sets the function used to send RDPGFX responses via DVC.
 func (g *GfxHandler) SetSendFunc(fn func([]byte)) {
 	g.sendFn = fn
+}
+
+// SetKeyframeNeededCallback registers a function that is called once when the
+// H.264 decoder resets to software mode and needs a fresh keyframe (IDR) from
+// the server.  The callback should send a screen-refresh request so the server
+// starts a new GOP and decoding can resume promptly.
+func (g *GfxHandler) SetKeyframeNeededCallback(fn func()) {
+	g.onKeyframeNeeded = fn
 }
 
 // OnChannelCreated is called after the DVC CREATE_RSP has been sent.
