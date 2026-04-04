@@ -40,6 +40,93 @@ static int grdp_frame_to_bgra(struct SwsContext *sws,
         0, src->height,
         dst_data, dst_linesize);
 }
+
+// Map deprecated YUVJ pixel formats to their non-J equivalents.
+// YUVJ formats are full-range YUV; the modern way is to use the plain YUV
+// format and communicate the range via sws_setColorspaceDetails.
+static enum AVPixelFormat grdp_yuvj_to_yuv(enum AVPixelFormat fmt) {
+    switch (fmt) {
+    case AV_PIX_FMT_YUVJ420P: return AV_PIX_FMT_YUV420P;
+    case AV_PIX_FMT_YUVJ422P: return AV_PIX_FMT_YUV422P;
+    case AV_PIX_FMT_YUVJ444P: return AV_PIX_FMT_YUV444P;
+    case AV_PIX_FMT_YUVJ440P: return AV_PIX_FMT_YUV440P;
+    default: return fmt;
+    }
+}
+
+// Return 1 if fmt is a full-range (YUVJ) format, 0 otherwise.
+static int grdp_is_full_range_fmt(enum AVPixelFormat fmt) {
+    return (fmt == AV_PIX_FMT_YUVJ420P ||
+            fmt == AV_PIX_FMT_YUVJ422P ||
+            fmt == AV_PIX_FMT_YUVJ444P ||
+            fmt == AV_PIX_FMT_YUVJ440P) ? 1 : 0;
+}
+
+// grdp_yuv420p_to_bgra converts a planar YUV420P/YUVJ420P frame to packed
+// BGRA in-place using BT.601 coefficients.  This bypasses swscale entirely
+// so that the broken ARM64 colorspace-matrix fallback path is never taken.
+// full_range: 0 = limited (video) range [16-235 / 16-240],
+//             1 = full range [0-255].
+static void grdp_yuv420p_to_bgra(
+    const AVFrame *src, uint8_t *dst, int dst_stride, int full_range)
+{
+    int width  = src->width;
+    int height = src->height;
+    for (int row = 0; row < height; row++) {
+        const uint8_t *yrow = src->data[0] + row           * src->linesize[0];
+        const uint8_t *urow = src->data[1] + (row >> 1)    * src->linesize[1];
+        const uint8_t *vrow = src->data[2] + (row >> 1)    * src->linesize[2];
+        uint8_t *drow = dst + row * dst_stride;
+        for (int col = 0; col < width; col++) {
+            int u = (int)urow[col >> 1] - 128;
+            int v = (int)vrow[col >> 1] - 128;
+            int r, g, b;
+            if (full_range) {
+                int y = (int)yrow[col];
+                r = (256*y + 359*v           + 128) >> 8;
+                g = (256*y -  88*u - 183*v   + 128) >> 8;
+                b = (256*y + 454*u           + 128) >> 8;
+            } else {
+                int c = (int)yrow[col] - 16;
+                r = (298*c + 409*v           + 128) >> 8;
+                g = (298*c - 100*u - 208*v   + 128) >> 8;
+                b = (298*c + 516*u           + 128) >> 8;
+            }
+#define CLAMP8(x) ((x) < 0 ? 0 : (x) > 255 ? 255 : (uint8_t)(x))
+            drow[col*4    ] = CLAMP8(b);
+            drow[col*4 + 1] = CLAMP8(g);
+            drow[col*4 + 2] = CLAMP8(r);
+            drow[col*4 + 3] = 255;
+#undef CLAMP8
+        }
+    }
+}
+
+// grdp_sample_yuv samples the centre pixel of a planar YUV frame for
+// diagnostics.  Returns raw byte values (not offset-adjusted).
+static void grdp_sample_yuv(const AVFrame *f,
+    uint8_t *y_out, uint8_t *u_out, uint8_t *v_out)
+{
+    int cx = f->width  / 2;
+    int cy = f->height / 2;
+    *y_out = f->data[0][ cy      * f->linesize[0] +  cx     ];
+    *u_out = f->data[1][(cy / 2) * f->linesize[1] + (cx / 2)];
+    *v_out = f->data[2][(cy / 2) * f->linesize[2] + (cx / 2)];
+}
+
+static void grdp_sws_set_src_range(struct SwsContext *sws, int full_range) {
+    const int *inv_table, *table;
+    int src_range, dst_range, brightness, contrast, saturation;
+    if (sws_getColorspaceDetails(sws,
+            (int **)&inv_table, &src_range,
+            (int **)&table,     &dst_range,
+            &brightness, &contrast, &saturation) >= 0) {
+        sws_setColorspaceDetails(sws,
+            inv_table, full_range,
+            table,     dst_range,
+            brightness, contrast, saturation);
+    }
+}
 */
 import "C"
 
@@ -50,10 +137,23 @@ import (
 	"unsafe"
 )
 
-// stallThreshold is the number of consecutive nil-frame results that
-// triggers a decoder flush/reset.  HW decoders (e.g. VideoToolbox) can
-// silently enter a stalled state; flushing recovers them.
-const stallThreshold = 60
+// hwStallThreshold is the number of consecutive nil-frame results *after the
+// hardware decoder has already produced at least one frame* that triggers a
+// fallback to software decoding.  Counted only once HW has proven it works,
+// so normal VT initialisation delay (a few frames of EAGAIN) does not count.
+// VideoToolbox may delay output by several frames due to B-frame reordering,
+// so this must be generous enough to avoid false positives.
+const hwStallThreshold = 20
+
+// hwInitTimeout is the maximum number of packets sent to the hardware decoder
+// before it has produced its first frame.  If VT never produces output within
+// this many input packets it is considered permanently broken and we switch to
+// software.  This covers streams that VT cannot decode at all (e.g. profiles
+// it does not support).
+const hwInitTimeout = 60
+
+// swStallThreshold is the equivalent threshold for the software decoder.
+const swStallThreshold = 30
 
 type ffmpegDecoder struct {
 	codecCtx  *C.AVCodecContext
@@ -66,7 +166,11 @@ type ffmpegDecoder struct {
 	lastW     C.int
 	lastH     C.int
 	lastFmt   C.enum_AVPixelFormat
-	stallCount int // consecutive Decode() calls that returned nil
+	stallCount    int    // consecutive Decode() calls that returned nil
+	needsKeyFrame bool   // drop packets until an IDR/SPS is received
+	hwReady       bool   // HW decoder has produced at least one frame
+	hwSentCount   int    // packets sent to HW decoder (for init timeout)
+	swFrameCount  int    // frames decoded by SW decoder (for diagnostics)
 }
 
 func newH264Decoder() h264Decoder {
@@ -149,10 +253,35 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 		return nil, nil
 	}
 
-	// If the decoder has been stalled for too long, flush it so it can
-	// recover (seen with VideoToolbox HW acceleration).
-	if d.stallCount >= stallThreshold {
-		slog.Debug("H.264: decoder stalled, flushing", "stallCount", d.stallCount)
+	// After a decoder reset we must resync with a fresh IDR from the server.
+	// Priming with a cached IDR does NOT work: P-frames mid-GOP expect a DPB
+	// containing several preceding reference frames that we no longer have.
+	// Feeding only the cached IDR causes the SW decoder to output zero-filled
+	// frames (all Y=U=V=0) which render as solid green.  The only correct
+	// recovery is to wait for the server to begin a new GOP.
+	if d.needsKeyFrame {
+		if !h264ContainsKeyFrame(h264Data) {
+			return nil, nil // drop P-frames until server sends a new IDR
+		}
+		d.needsKeyFrame = false
+	}
+
+	// If the decoder has been stalled for too long (e.g. VideoToolbox
+	// rejecting frames due to reference-frame count limits), try to recover.
+	threshold := swStallThreshold
+	if d.useHW {
+		threshold = hwStallThreshold
+	}
+	if d.stallCount >= threshold {
+		if d.useHW {
+			// HW decoder is persistently broken; fall back to software.
+			slog.Warn("H.264: HW decoder stalled, switching to software decoding",
+				"stallCount", d.stallCount)
+			d.reinitSoftware()
+			// needsKeyFrame is now true; drop this packet and wait for IDR.
+			return nil, nil
+		}
+		slog.Debug("H.264: SW decoder stalled, flushing", "stallCount", d.stallCount)
 		C.avcodec_flush_buffers(d.codecCtx)
 		d.stallCount = 0
 	}
@@ -163,9 +292,22 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 	d.packet.data = (*C.uint8_t)(cData)
 	d.packet.size = C.int(len(h264Data))
 
+	// Count packets sent to HW decoder (for init timeout tracking).
+	if d.useHW {
+		d.hwSentCount++
+	}
+
 	ret := C.avcodec_send_packet(d.codecCtx, d.packet)
 	if ret < 0 {
-		return nil, fmt.Errorf("avcodec_send_packet: error %d", int(ret))
+		// The hardware decoder (e.g. VideoToolbox) may have entered a broken
+		// state due to bad input data.  Flush the codec to recover so that
+		// subsequent packets can be decoded normally, then drop this frame.
+		slog.Debug("H.264: avcodec_send_packet failed, flushing decoder to recover",
+			"err", int(ret))
+		C.avcodec_flush_buffers(d.codecCtx)
+		d.stallCount = 0
+		d.needsKeyFrame = true
+		return nil, nil
 	}
 
 	// Receive decoded frame(s); keep the last one.
@@ -185,8 +327,30 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 
 	if result != nil {
 		d.stallCount = 0
+		if d.useHW {
+			if !d.hwReady {
+				slog.Debug("H.264: HW decoder produced first frame",
+					"hwSentCount", d.hwSentCount)
+			}
+			d.hwReady = true // HW has proven it can produce frames
+		}
 	} else {
-		d.stallCount++
+		// Only count stalls once HW has produced at least one frame.
+		// Before that, EAGAIN is normal initialisation behaviour.
+		// However, if HW never produces a frame within hwInitTimeout packets,
+		// treat that as a permanent failure too.
+		if !d.useHW || d.hwReady {
+			d.stallCount++
+			if d.useHW {
+				slog.Debug("H.264: HW stall tick", "stallCount", d.stallCount,
+					"threshold", hwStallThreshold, "hwSentCount", d.hwSentCount)
+			}
+		} else if d.hwSentCount >= hwInitTimeout {
+			slog.Warn("H.264: HW decoder failed to produce first frame, switching to software",
+				"hwSentCount", d.hwSentCount)
+			d.reinitSoftware()
+			return nil, nil
+		}
 	}
 	return result, nil
 }
@@ -207,26 +371,65 @@ func (d *ffmpegDecoder) convertFrame() (*h264Frame, error) {
 	h := srcFrame.height
 	srcFmt := C.enum_AVPixelFormat(srcFrame.format)
 
-	// Recreate swscale context when dimensions or format change.
+	outSize := int(w) * int(h) * 4
+	out := make([]byte, outSize)
+
+	// For planar YUV420P (both limited- and full-range variants), use our own
+	// BT.601 conversion instead of swscale.  On ARM64, swscale has no
+	// accelerated colorspace-conversion path for yuv420p→bgra and its
+	// non-accelerated fallback ignores sws_setColorspaceDetails, producing
+	// a strong green cast.  The hand-written C loop is guaranteed correct.
+	if srcFmt == C.AV_PIX_FMT_YUV420P || srcFmt == C.AV_PIX_FMT_YUVJ420P {
+		fullRange := C.int(0)
+		if srcFmt == C.AV_PIX_FMT_YUVJ420P || srcFrame.color_range == 2 {
+			fullRange = 1
+		}
+		// Log the centre-pixel YUV values for the first few SW frames so we
+		// can distinguish H.264 decode corruption from colour-conversion bugs.
+		if !d.useHW && d.swFrameCount < 3 {
+			var sy, su, sv C.uint8_t
+			C.grdp_sample_yuv(srcFrame, &sy, &su, &sv)
+			slog.Info("H.264: SW frame sample",
+				"frame", d.swFrameCount,
+				"fmt", int(srcFmt),
+				"fullRange", int(fullRange),
+				"Y", int(sy), "U", int(su), "V", int(sv),
+				"w", int(w), "h", int(h))
+			d.swFrameCount++
+		}
+		C.grdp_yuv420p_to_bgra(srcFrame,
+			(*C.uint8_t)(unsafe.Pointer(&out[0])), C.int(w*4), fullRange)
+		if srcFrame == d.swFrame {
+			C.av_frame_unref(d.swFrame)
+		}
+		return &h264Frame{Data: out, Width: int(w), Height: int(h)}, nil
+	}
+
+	// For other formats (e.g. NV12 from VideoToolbox HW transfer), use swscale.
+	swsFmt := C.grdp_yuvj_to_yuv(srcFmt)
+	fullRange := C.grdp_is_full_range_fmt(srcFmt)
+	if fullRange == 0 && srcFrame.color_range == 2 { // AVCOL_RANGE_JPEG
+		fullRange = 1
+	}
+
 	if w != d.lastW || h != d.lastH || srcFmt != d.lastFmt {
 		if d.swsCtx != nil {
 			C.sws_freeContext(d.swsCtx)
 		}
 		d.swsCtx = C.sws_getContext(
-			w, h, srcFmt,
+			w, h, swsFmt,
 			w, h, C.AV_PIX_FMT_BGRA,
 			C.SWS_BILINEAR, nil, nil, nil,
 		)
 		if d.swsCtx == nil {
 			return nil, fmt.Errorf("sws_getContext failed for %dx%d fmt=%d", w, h, srcFmt)
 		}
+		C.grdp_sws_set_src_range(d.swsCtx, fullRange)
 		d.lastW = w
 		d.lastH = h
 		d.lastFmt = srcFmt
 	}
 
-	outSize := int(w) * int(h) * 4
-	out := make([]byte, outSize)
 	C.grdp_frame_to_bgra(d.swsCtx, srcFrame,
 		(*C.uint8_t)(unsafe.Pointer(&out[0])), C.int(w*4))
 
@@ -239,6 +442,69 @@ func (d *ffmpegDecoder) convertFrame() (*h264Frame, error) {
 		Width:  int(w),
 		Height: int(h),
 	}, nil
+}
+
+// h264ContainsKeyFrame scans an Annex B H.264 bitstream and returns true if
+// it contains a SPS (type 7) or IDR slice (type 5) NAL unit.  Such a packet
+// carries all the parameter sets needed by a freshly-initialised decoder.
+func h264ContainsKeyFrame(data []byte) bool {
+	for i := 0; i < len(data)-3; i++ {
+		// Look for 3-byte or 4-byte Annex B start code.
+		var naluStart int
+		if data[i] == 0 && data[i+1] == 0 && data[i+2] == 1 {
+			naluStart = i + 3
+		} else if i+3 < len(data) && data[i] == 0 && data[i+1] == 0 &&
+			data[i+2] == 0 && data[i+3] == 1 {
+			naluStart = i + 4
+		} else {
+			continue
+		}
+		if naluStart >= len(data) {
+			break
+		}
+		naluType := data[naluStart] & 0x1F
+		if naluType == 5 || naluType == 7 { // IDR or SPS
+			return true
+		}
+	}
+	return false
+}
+
+// reinitSoftware tears down the HW-accelerated codec context and reopens
+// the H.264 decoder in pure software mode.  Called when the HW decoder
+// (e.g. VideoToolbox) is permanently broken for the current stream.
+func (d *ffmpegDecoder) reinitSoftware() {
+	if d.swsCtx != nil {
+		C.sws_freeContext(d.swsCtx)
+		d.swsCtx = nil
+	}
+	if d.codecCtx != nil {
+		C.avcodec_free_context(&d.codecCtx)
+	}
+
+	codec := C.avcodec_find_decoder(C.AV_CODEC_ID_H264)
+	if codec == nil {
+		return
+	}
+	d.codecCtx = C.avcodec_alloc_context3(codec)
+	if d.codecCtx == nil {
+		return
+	}
+	if C.avcodec_open2(d.codecCtx, codec, nil) < 0 {
+		C.avcodec_free_context(&d.codecCtx)
+		return
+	}
+
+	d.useHW = false
+	d.hwPixFmt = C.AV_PIX_FMT_NONE
+	d.lastW = 0
+	d.lastH = 0
+	d.lastFmt = C.AV_PIX_FMT_NONE
+	d.stallCount = 0
+	d.needsKeyFrame = true
+	d.hwReady = false
+	d.hwSentCount = 0
+	d.swFrameCount = 0
 }
 
 func (d *ffmpegDecoder) Close() {
