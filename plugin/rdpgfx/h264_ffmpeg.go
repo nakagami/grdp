@@ -172,12 +172,13 @@ type ffmpegDecoder struct {
 	lastW     C.int
 	lastH     C.int
 	lastFmt   C.enum_AVPixelFormat
-	stallCount    int    // consecutive Decode() calls that returned nil
-	needsKeyFrame bool   // drop packets until an IDR/SPS is received
-	keyframeWaitCount int // P-frames dropped so far while needsKeyFrame=true
-	hwReady       bool   // HW decoder has produced at least one frame
-	hwSentCount   int    // packets sent to HW decoder (for init timeout)
-	swFrameCount  int    // frames decoded by SW decoder (for diagnostics)
+	stallCount        int  // consecutive Decode() calls that returned nil
+	needsKeyFrame     bool // drop packets until an IDR/SPS is received
+	keyframeWaitCount int  // P-frames dropped so far while needsKeyFrame=true
+	hwReady           bool // HW decoder has produced at least one frame
+	hwSentCount       int  // packets sent to HW decoder (for init timeout)
+	hwErrorCount      int  // consecutive avcodec_send_packet hard errors on HW
+	swFrameCount      int  // frames decoded by SW decoder (for diagnostics)
 }
 
 func newH264Decoder() h264Decoder {
@@ -298,11 +299,17 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 	}
 	if d.stallCount >= threshold {
 		if d.useHW {
-			// HW decoder is persistently broken; fall back to software.
-			slog.Warn("H.264: HW decoder stalled, switching to software decoding",
+			// VideoToolbox is returning null frames — it is buffering frames
+			// while waiting for the reference chain to restart with a new IDR.
+			// Do NOT destroy the codec context here: the SPS/PPS state cached
+			// inside it is essential for decoding the server's next bare IDR
+			// (servers typically omit SPS/PPS from IDR frames after the first).
+			// Just reset the stall counter and return nil; the caller's
+			// keyframe-needed callback will request a refresh from the server,
+			// and VT will recover naturally on the next IDR without reinit.
+			slog.Debug("H.264: HW decoder stalled, resetting counter and requesting refresh",
 				"stallCount", d.stallCount)
-			d.reinitSoftware()
-			// needsKeyFrame is now true; drop this packet and wait for IDR.
+			d.stallCount = 0
 			return nil, nil
 		}
 		slog.Debug("H.264: SW decoder stalled, flushing", "stallCount", d.stallCount)
@@ -323,9 +330,21 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 
 	ret := C.avcodec_send_packet(d.codecCtx, d.packet)
 	if ret < 0 {
-		// The hardware decoder (e.g. VideoToolbox) may have entered a broken
-		// state due to bad input data.  Flush the codec to recover so that
-		// subsequent packets can be decoded normally, then drop this frame.
+		if d.useHW {
+			// VideoToolbox hard error (e.g. AVERROR_UNKNOWN): flush_buffers
+			// does not recover this state.  After a few consecutive failures
+			// fall back to software so the session stays alive.
+			d.hwErrorCount++
+			slog.Debug("H.264: HW avcodec_send_packet failed",
+				"err", int(ret), "hwErrorCount", d.hwErrorCount)
+			if d.hwErrorCount >= 5 {
+				slog.Warn("H.264: HW decoder hard error, switching to software",
+					"hwErrorCount", d.hwErrorCount)
+				d.reinitSoftware()
+			}
+			return nil, nil
+		}
+		// SW decoder: flush and wait for a new IDR.
 		slog.Debug("H.264: avcodec_send_packet failed, flushing decoder to recover",
 			"err", int(ret))
 		C.avcodec_flush_buffers(d.codecCtx)
@@ -334,6 +353,7 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 		d.keyframeWaitCount = 0
 		return nil, nil
 	}
+	d.hwErrorCount = 0
 
 	// Receive decoded frame(s); keep the last one.
 	var result *h264Frame
