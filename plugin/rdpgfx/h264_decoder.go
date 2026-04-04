@@ -11,6 +11,10 @@ type h264Decoder interface {
 	// Decode decodes H.264 NAL units and returns a decoded frame.
 	// Returns nil frame (no error) when the decoder needs more input data.
 	Decode(h264Data []byte) (*h264Frame, error)
+	// NeedsKeyframe reports whether the decoder is waiting for a keyframe
+	// (IDR) before it can produce output.  This happens after a decoder
+	// reset; the caller should request a refresh from the server.
+	NeedsKeyframe() bool
 	// Close releases all resources held by the decoder.
 	Close()
 }

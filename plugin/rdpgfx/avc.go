@@ -128,9 +128,11 @@ func (g *GfxHandler) decodeAVC420(data []byte, destW, destH int) []byte {
 		return nil
 	}
 	if frame == nil {
+		g.maybeRequestKeyframe()
 		slog.Debug("RDPGFX: H.264 decode returned nil frame (buffering?)")
 		return nil
 	}
+	g.keyframeRequested = false
 	slog.Debug("RDPGFX: AVC420 decoded", "frameW", frame.Width, "frameH", frame.Height, "destW", destW, "destH", destH, "regions", len(stream.regions), "h264Len", len(stream.h264Data))
 	return cropBGRA(frame.Data, frame.Width, frame.Height, destW, destH)
 }
@@ -161,11 +163,28 @@ func (g *GfxHandler) decodeAVC444(data []byte, destW, destH int) []byte {
 		return nil
 	}
 	if frame == nil {
+		g.maybeRequestKeyframe()
 		return nil
 	}
+	g.keyframeRequested = false
 	slog.Debug("RDPGFX: AVC444 decoded", "frameW", frame.Width, "frameH", frame.Height,
 		"destW", destW, "destH", destH, "h264Len", len(stream.h264Data))
 	return cropBGRA(frame.Data, frame.Width, frame.Height, destW, destH)
+}
+
+// maybeRequestKeyframe calls onKeyframeNeeded (if set) the first time the
+// H.264 decoder reports it is waiting for an IDR after a reset.  Subsequent
+// calls are ignored until a frame is successfully decoded (keyframeRequested
+// is reset to false in decodeAVC420/decodeAVC444 on success).
+func (g *GfxHandler) maybeRequestKeyframe() {
+	if g.keyframeRequested || g.onKeyframeNeeded == nil {
+		return
+	}
+	if !g.h264dec.NeedsKeyframe() {
+		return
+	}
+	g.keyframeRequested = true
+	go g.onKeyframeNeeded()
 }
 
 // cropBGRA crops or pads BGRA pixel data to the target dimensions.

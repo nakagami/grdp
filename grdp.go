@@ -309,6 +309,9 @@ func (g *RdpClient) doLogin(routingToken []byte) error {
 		}
 		g.onBitmapPaintFn(bs)
 	})
+	gfxHandler.SetKeyframeNeededCallback(func() {
+		g.pdu.SendRefreshRect(uint16(g.width), uint16(g.height))
+	})
 	dvcClient.RegisterHandler(rdpgfx.ChannelName, gfxHandler)
 
 	// Register DVC audio handlers for both the lossless and lossy variants.
