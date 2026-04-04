@@ -50,17 +50,23 @@ import (
 	"unsafe"
 )
 
+// stallThreshold is the number of consecutive nil-frame results that
+// triggers a decoder flush/reset.  HW decoders (e.g. VideoToolbox) can
+// silently enter a stalled state; flushing recovers them.
+const stallThreshold = 60
+
 type ffmpegDecoder struct {
-	codecCtx *C.AVCodecContext
-	packet   *C.AVPacket
-	frame    *C.AVFrame
-	swFrame  *C.AVFrame
-	swsCtx   *C.struct_SwsContext
-	useHW    bool
-	hwPixFmt C.enum_AVPixelFormat
-	lastW    C.int
-	lastH    C.int
-	lastFmt  C.enum_AVPixelFormat
+	codecCtx  *C.AVCodecContext
+	packet    *C.AVPacket
+	frame     *C.AVFrame
+	swFrame   *C.AVFrame
+	swsCtx    *C.struct_SwsContext
+	useHW     bool
+	hwPixFmt  C.enum_AVPixelFormat
+	lastW     C.int
+	lastH     C.int
+	lastFmt   C.enum_AVPixelFormat
+	stallCount int // consecutive Decode() calls that returned nil
 }
 
 func newH264Decoder() h264Decoder {
@@ -143,6 +149,14 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 		return nil, nil
 	}
 
+	// If the decoder has been stalled for too long, flush it so it can
+	// recover (seen with VideoToolbox HW acceleration).
+	if d.stallCount >= stallThreshold {
+		slog.Debug("H.264: decoder stalled, flushing", "stallCount", d.stallCount)
+		C.avcodec_flush_buffers(d.codecCtx)
+		d.stallCount = 0
+	}
+
 	cData := C.CBytes(h264Data)
 	defer C.free(cData)
 
@@ -169,6 +183,11 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 		result = f
 	}
 
+	if result != nil {
+		d.stallCount = 0
+	} else {
+		d.stallCount++
+	}
 	return result, nil
 }
 

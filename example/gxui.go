@@ -38,10 +38,13 @@ type audioStream struct {
 	wasUnderrun bool
 }
 
-const maxAudioBuf = 1 << 20 // 1 MB ≈ 6 s of PCM 44100 Hz / 2 ch / 16 bit
+// maxAudioBuf is the soft cap on the audioStream buffer (≈1 s of PCM
+// 44100 Hz / 2 ch / 16-bit).  When exceeded, incoming audio is dropped
+// rather than buffering ever-growing stale data.
+const maxAudioBuf = 176400
 
-// fadeFrames is the number of stereo frames used for fade-in / fade-out
-// at underrun boundaries (~1.5 ms at 44100 Hz).
+// fadeFrames is the number of stereo frames used for fade-in at underrun
+// boundaries (~1.5 ms at 44100 Hz).  Each stereo frame is 4 bytes (2 × int16).
 const fadeFrames = 64
 
 func newAudioStream() *audioStream {
@@ -51,14 +54,18 @@ func newAudioStream() *audioStream {
 func (s *audioStream) Write(p []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.buf.Len() > maxAudioBuf {
-		s.buf.Reset()
+	// Drop incoming data when the buffer is too full rather than
+	// accumulating a growing backlog that would delay playback.
+	if s.buf.Len() >= maxAudioBuf {
+		return len(p), nil
 	}
 	return s.buf.Write(p)
 }
 
 // Read fills p with audio data.  If the internal buffer is empty the
 // slice is zero-filled (silence) so the oto player never stalls.
+// A short fade-in is applied after an underrun so the transition from
+// silence to audio does not produce an audible click.
 func (s *audioStream) Read(p []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -76,7 +83,35 @@ func (s *audioStream) Read(p []byte) (int, error) {
 
 	n, err := s.buf.Read(p)
 
+	if s.wasUnderrun {
+		// Fade in the first fadeFrames stereo frames to mask the
+		// silence→audio click.
+		s.wasUnderrun = false
+		applyFadeIn(p[:n])
+	}
+
 	return n, err
+}
+
+// applyFadeIn applies a linear gain ramp from 0→1 over the first fadeFrames
+// stereo frames of PCM 16-bit little-endian data in buf.
+func applyFadeIn(buf []byte) {
+	const bytesPerFrame = 4 // 2 ch × 2 bytes
+	frames := len(buf) / bytesPerFrame
+	if frames > fadeFrames {
+		frames = fadeFrames
+	}
+	for i := 0; i < frames; i++ {
+		gain := float32(i) / float32(fadeFrames)
+		off := i * bytesPerFrame
+		for ch := 0; ch < 2; ch++ {
+			o := off + ch*2
+			v := int16(buf[o]) | int16(buf[o+1])<<8
+			v = int16(float32(v) * gain)
+			buf[o] = byte(v)
+			buf[o+1] = byte(v >> 8)
+		}
+	}
 }
 
 func (s *audioStream) Close() {
@@ -250,6 +285,11 @@ func appMain(driver gxui.Driver) {
 		SampleRate:   44100,
 		ChannelCount: 2,
 		Format:       oto.FormatSignedInt16LE,
+		// Use a 100 ms hardware buffer (down from the ~139 ms default).
+		// Together with the 47 ms player read-ahead this keeps total
+		// audio latency to ~147 ms, which is close enough to video
+		// latency (~50 ms decode+blit) to give acceptable A/V sync.
+		BufferSize: 100 * time.Millisecond,
 	}
 	ctx, readyCh, otoErr := oto.NewContext(otoOp)
 	if otoErr != nil {
@@ -258,6 +298,10 @@ func appMain(driver gxui.Driver) {
 		<-readyCh
 		otoCtx = ctx
 		otoPlayer = otoCtx.NewPlayer(audioStr)
+		// Reduce the read-ahead buffer from the default ~500 ms to ~47 ms
+		// so that audio latency matches video latency and A/V sync is tight.
+		// 8192 bytes = 8192 / (44100 * 2 * 2) ≈ 46 ms of PCM stereo 16-bit.
+		otoPlayer.SetBufferSize(8192)
 		otoPlayer.Play()
 		slog.Debug("Audio output initialized")
 	}
@@ -514,7 +558,7 @@ func transKey(in gxui.KeyboardKey) int {
 }
 
 func main() {
-	handler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})
-	slog.SetDefault(slog.New(handler))
+	// handler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})
+	// slog.SetDefault(slog.New(handler))
 	gl.StartDriver(appMain)
 }
