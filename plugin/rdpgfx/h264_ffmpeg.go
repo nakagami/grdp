@@ -159,7 +159,7 @@ const swStallThreshold = 30
 // recover (via counter reset + IDR resync) before permanently falling back to
 // software.  VideoToolbox sometimes stalls transiently; resetting the stall
 // counter is often enough to recover without abandoning HW acceleration.
-const hwMaxRecoveries = 3
+const hwMaxRecoveries = 10
 
 // keyframeWaitLimit is the maximum number of non-IDR packets we drop while
 // waiting for a keyframe after a decoder reset.  If the server never sends a
