@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/nakagami/grdp/core"
 	"github.com/nakagami/grdp/plugin"
@@ -141,8 +142,9 @@ type GfxHandler struct {
 	// onKeyframeNeeded is called once when the H.264 decoder switches to
 	// software and needs a fresh IDR from the server.  The caller should
 	// send a refresh request (e.g. RefreshRectPDU) to trigger a new GOP.
-	onKeyframeNeeded   func()
-	keyframeRequested  bool
+	onKeyframeNeeded    func()
+	keyframeRequested   bool
+	lastKeyframeRequest time.Time
 }
 
 // NewGfxHandler creates a new RDPGFX handler.

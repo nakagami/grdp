@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log/slog"
+	"time"
 )
 
 type avcRect struct {
@@ -173,17 +174,23 @@ func (g *GfxHandler) decodeAVC444(data []byte, destW, destH int) []byte {
 }
 
 // maybeRequestKeyframe calls onKeyframeNeeded (if set) the first time the
-// H.264 decoder reports it is waiting for an IDR after a reset.  Subsequent
-// calls are ignored until a frame is successfully decoded (keyframeRequested
-// is reset to false in decodeAVC420/decodeAVC444 on success).
+// H.264 decoder reports it is waiting for an IDR after a reset, and again
+// every 3 seconds while still waiting.  This handles the case where the first
+// refresh request goes unanswered (e.g. after an HW→SW decoder switch where
+// the server never retransmits an IDR in time).
 func (g *GfxHandler) maybeRequestKeyframe() {
-	if g.keyframeRequested || g.onKeyframeNeeded == nil {
+	if g.onKeyframeNeeded == nil {
 		return
 	}
 	if !g.h264dec.NeedsKeyframe() {
 		return
 	}
+	// Rate-limit: allow re-request if the previous one was more than 3 seconds ago.
+	if g.keyframeRequested && time.Since(g.lastKeyframeRequest) < 3*time.Second {
+		return
+	}
 	g.keyframeRequested = true
+	g.lastKeyframeRequest = time.Now()
 	go g.onKeyframeNeeded()
 }
 
