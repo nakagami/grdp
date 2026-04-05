@@ -155,6 +155,12 @@ const hwInitTimeout = 60
 // swStallThreshold is the equivalent threshold for the software decoder.
 const swStallThreshold = 30
 
+// hwMaxRecoveries is the number of times the HW decoder is given a chance to
+// recover (via counter reset + IDR resync) before permanently falling back to
+// software.  VideoToolbox sometimes stalls transiently; resetting the stall
+// counter is often enough to recover without abandoning HW acceleration.
+const hwMaxRecoveries = 3
+
 // keyframeWaitLimit is the maximum number of non-IDR packets we drop while
 // waiting for a keyframe after a decoder reset.  If the server never sends a
 // new IDR within this many packets we give up waiting and feed P-frames to the
@@ -178,6 +184,7 @@ type ffmpegDecoder struct {
 	hwReady           bool // HW decoder has produced at least one frame
 	hwSentCount       int  // packets sent to HW decoder (for init timeout)
 	hwErrorCount      int  // consecutive avcodec_send_packet hard errors on HW
+	hwRecoveries      int  // number of HW stall recovery attempts made
 	swFrameCount      int  // frames decoded by SW decoder (for diagnostics)
 }
 
@@ -299,17 +306,22 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 	}
 	if d.stallCount >= threshold {
 		if d.useHW {
-			// VideoToolbox is returning null frames — it is buffering frames
-			// while waiting for the reference chain to restart with a new IDR.
-			// Do NOT destroy the codec context here: the SPS/PPS state cached
-			// inside it is essential for decoding the server's next bare IDR
-			// (servers typically omit SPS/PPS from IDR frames after the first).
-			// Just reset the stall counter and return nil; the caller's
-			// keyframe-needed callback will request a refresh from the server,
-			// and VT will recover naturally on the next IDR without reinit.
-			slog.Debug("H.264: HW decoder stalled, resetting counter and requesting refresh",
-				"stallCount", d.stallCount)
-			d.stallCount = 0
+			// VideoToolbox is returning null frames — it may be stalled due to
+			// a stream parameter change.  Try to recover by resetting the stall
+			// counter (up to hwMaxRecoveries times) before falling back to SW.
+			if d.hwRecoveries < hwMaxRecoveries {
+				slog.Debug("H.264: HW decoder stalled, attempting recovery",
+					"stallCount", d.stallCount,
+					"attempt", d.hwRecoveries+1,
+					"maxAttempts", hwMaxRecoveries)
+				d.stallCount = 0
+				d.hwRecoveries++
+				return nil, nil
+			}
+			slog.Warn("H.264: HW decoder stalled, switching to software decoding",
+				"stallCount", d.stallCount,
+				"recoveryAttempts", d.hwRecoveries)
+			d.reinitSoftware()
 			return nil, nil
 		}
 		slog.Debug("H.264: SW decoder stalled, flushing", "stallCount", d.stallCount)
@@ -378,6 +390,7 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 					"hwSentCount", d.hwSentCount)
 			}
 			d.hwReady = true // HW has proven it can produce frames
+			d.hwRecoveries = 0 // successful decode, reset recovery counter
 		}
 	} else {
 		// Only count stalls once HW has produced at least one frame.
@@ -550,6 +563,7 @@ func (d *ffmpegDecoder) reinitSoftware() {
 	d.keyframeWaitCount = 0
 	d.hwReady = false
 	d.hwSentCount = 0
+	d.hwRecoveries = 0
 	d.swFrameCount = 0
 }
 
