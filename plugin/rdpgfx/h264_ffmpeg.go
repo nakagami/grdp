@@ -276,26 +276,26 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 	// Priming with a cached IDR does NOT work: P-frames mid-GOP expect a DPB
 	// containing several preceding reference frames that we no longer have.
 	// Feeding only the cached IDR causes the SW decoder to output zero-filled
-	// frames (all Y=U=V=0) which render as solid green.  The correct recovery
-	// is to wait for the server to begin a new GOP, but if the server never
-	// sends one we fall back to SW error-concealment after keyframeWaitLimit
-	// packets so the session does not hang indefinitely.
+	// frames (all Y=U=V=0) which render as solid green.  We wait for the
+	// server to begin a new GOP; maybeRequestKeyframe() re-requests an IDR
+	// every 3 s so the session recovers as soon as the server complies.
+	// We never feed non-IDR frames to a fresh decoder: doing so causes FFmpeg
+	// to emit [h264 @ ...] errors (sps_id out of range, non-existing PPS, …)
+	// directly to stderr, which is confusing because they do not originate
+	// from grdp code.  keyframeWaitCount is reset every keyframeWaitLimit
+	// packets so that the "still waiting" warning is repeated periodically.
 	if d.needsKeyFrame {
 		if !h264ContainsKeyFrame(h264Data) {
 			d.keyframeWaitCount++
 			if d.keyframeWaitCount >= keyframeWaitLimit {
-				slog.Warn("H.264: no IDR received, proceeding without keyframe",
+				slog.Warn("H.264: no IDR received yet, continuing to wait",
 					"waited", d.keyframeWaitCount)
-				d.needsKeyFrame = false
-				d.keyframeWaitCount = 0
-				// fall through and attempt SW error-concealment decode
-			} else {
-				return nil, nil // drop P-frames while waiting
+				d.keyframeWaitCount = 0 // reset so warning repeats periodically
 			}
-		} else {
-			d.needsKeyFrame = false
-			d.keyframeWaitCount = 0
+			return nil, nil // drop P-frames while waiting
 		}
+		d.needsKeyFrame = false
+		d.keyframeWaitCount = 0
 	}
 
 	// If the decoder has been stalled for too long (e.g. VideoToolbox
