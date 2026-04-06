@@ -7,9 +7,18 @@ package rdpgfx
 #include <libavcodec/avcodec.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/hwcontext.h>
+#include <libavutil/log.h>
 #include <libswscale/swscale.h>
 #include <stdlib.h>
 #include <stdint.h>
+
+// grdp_suppress_av_log sets FFmpeg's global log level to FATAL so that
+// decoder-level error messages (e.g. "sps_id out of range", "no frame!")
+// are not printed to stderr.  Those messages are expected and harmless
+// during H.264 stream recovery; grdp emits its own slog warnings instead.
+static void grdp_suppress_av_log(void) {
+    av_log_set_level(AV_LOG_FATAL);
+}
 
 // get_format callback that prefers the hardware pixel format stored in opaque.
 static enum AVPixelFormat grdp_get_hw_format(
@@ -134,8 +143,12 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime"
+	"sync"
 	"unsafe"
 )
+
+// avLogOnce ensures grdp_suppress_av_log is called only once per process.
+var avLogOnce sync.Once
 
 // hwStallThreshold is the number of consecutive nil-frame results *after the
 // hardware decoder has already produced at least one frame* that triggers a
@@ -189,6 +202,10 @@ type ffmpegDecoder struct {
 }
 
 func newH264Decoder() h264Decoder {
+	// Suppress FFmpeg stderr output (e.g. "[h264 @ ...] sps_id out of range").
+	// grdp emits its own slog messages for H.264 recovery events.
+	avLogOnce.Do(func() { C.grdp_suppress_av_log() })
+
 	codec := C.avcodec_find_decoder(C.AV_CODEC_ID_H264)
 	if codec == nil {
 		slog.Warn("H.264: codec not found in FFmpeg")
@@ -276,26 +293,30 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 	// Priming with a cached IDR does NOT work: P-frames mid-GOP expect a DPB
 	// containing several preceding reference frames that we no longer have.
 	// Feeding only the cached IDR causes the SW decoder to output zero-filled
-	// frames (all Y=U=V=0) which render as solid green.  We wait for the
-	// server to begin a new GOP; maybeRequestKeyframe() re-requests an IDR
-	// every 3 s so the session recovers as soon as the server complies.
-	// We never feed non-IDR frames to a fresh decoder: doing so causes FFmpeg
-	// to emit [h264 @ ...] errors (sps_id out of range, non-existing PPS, …)
-	// directly to stderr, which is confusing because they do not originate
-	// from grdp code.  keyframeWaitCount is reset every keyframeWaitLimit
-	// packets so that the "still waiting" warning is repeated periodically.
+	// frames (all Y=U=V=0) which render as solid green.  The correct recovery
+	// is to wait for the server to begin a new GOP.  maybeRequestKeyframe()
+	// calls SendRefreshRect every 3 s to prompt the server.
+	// If the server never sends an IDR within keyframeWaitLimit packets we
+	// fall back to SW error-concealment so the session does not hang.
+	// FFmpeg's "[h264 @ ...] sps_id out of range" errors are suppressed at
+	// the av_log level (AV_LOG_FATAL) set in newH264Decoder; grdp emits its
+	// own slog warning instead.
 	if d.needsKeyFrame {
 		if !h264ContainsKeyFrame(h264Data) {
 			d.keyframeWaitCount++
 			if d.keyframeWaitCount >= keyframeWaitLimit {
-				slog.Warn("H.264: no IDR received yet, continuing to wait",
+				slog.Warn("H.264: no IDR received, proceeding without keyframe",
 					"waited", d.keyframeWaitCount)
-				d.keyframeWaitCount = 0 // reset so warning repeats periodically
+				d.needsKeyFrame = false
+				d.keyframeWaitCount = 0
+				// fall through and attempt SW error-concealment decode
+			} else {
+				return nil, nil // drop P-frames while waiting
 			}
-			return nil, nil // drop P-frames while waiting
+		} else {
+			d.needsKeyFrame = false
+			d.keyframeWaitCount = 0
 		}
-		d.needsKeyFrame = false
-		d.keyframeWaitCount = 0
 	}
 
 	// If the decoder has been stalled for too long (e.g. VideoToolbox
