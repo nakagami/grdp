@@ -152,11 +152,13 @@ var avLogOnce sync.Once
 
 // hwStallThreshold is the number of consecutive nil-frame results *after the
 // hardware decoder has already produced at least one frame* that triggers a
-// fallback to software decoding.  Counted only once HW has proven it works,
-// so normal VT initialisation delay (a few frames of EAGAIN) does not count.
+// recovery attempt.  Counted only once HW has proven it works, so normal VT
+// initialisation delay (a few frames of EAGAIN) does not count.
 // VideoToolbox may delay output by several frames due to B-frame reordering,
-// so this must be generous enough to avoid false positives.
-const hwStallThreshold = 20
+// so this must be generous enough to avoid false positives on normal streams,
+// but not so large that stalls (e.g. from YouTube adaptive bitrate switches)
+// cause long video freezes before recovery is attempted.
+const hwStallThreshold = 10
 
 // hwInitTimeout is the maximum number of packets sent to the hardware decoder
 // before it has produced its first frame.  If VT never produces output within
@@ -169,10 +171,11 @@ const hwInitTimeout = 60
 const swStallThreshold = 30
 
 // hwMaxRecoveries is the number of times the HW decoder is given a chance to
-// recover (via counter reset + IDR resync) before permanently falling back to
-// software.  VideoToolbox sometimes stalls transiently; resetting the stall
-// counter is often enough to recover without abandoning HW acceleration.
-const hwMaxRecoveries = 10
+// recover (via avcodec_flush_buffers + IDR resync) before permanently falling
+// back to software.  Each attempt flushes the VT pipeline and waits for a
+// fresh IDR from the server, so 3 attempts gives the server ~9 seconds to
+// deliver a keyframe before we give up on hardware acceleration.
+const hwMaxRecoveries = 3
 
 // keyframeWaitLimit is the maximum number of non-IDR packets we drop while
 // waiting for a keyframe after a decoder reset.  If the server never sends a
@@ -328,13 +331,18 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 	if d.stallCount >= threshold {
 		if d.useHW {
 			// VideoToolbox is returning null frames — it may be stalled due to
-			// a stream parameter change.  Try to recover by resetting the stall
-			// counter (up to hwMaxRecoveries times) before falling back to SW.
+			// a stream parameter change (e.g. YouTube adaptive bitrate switch).
+			// Flush the VT pipeline and request a fresh IDR from the server so
+			// it begins a new GOP.  This is far more effective than simply
+			// resetting the stall counter, which just waits and hopes.
 			if d.hwRecoveries < hwMaxRecoveries {
-				slog.Debug("H.264: HW decoder stalled, attempting recovery",
+				slog.Debug("H.264: HW decoder stalled, flushing and requesting keyframe",
 					"stallCount", d.stallCount,
 					"attempt", d.hwRecoveries+1,
 					"maxAttempts", hwMaxRecoveries)
+				C.avcodec_flush_buffers(d.codecCtx)
+				d.needsKeyFrame = true
+				d.keyframeWaitCount = 0
 				d.stallCount = 0
 				d.hwRecoveries++
 				return nil, nil
