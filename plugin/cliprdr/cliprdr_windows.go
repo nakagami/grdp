@@ -38,7 +38,6 @@ const (
 const DVASPECT_CONTENT = 0x1
 
 const (
-	CF_TEXT         = 1
 	CF_BITMAP       = 2
 	CF_METAFILEPICT = 3
 	CF_SYLK         = 4
@@ -50,7 +49,6 @@ const (
 	CF_PENDATA      = 10
 	CF_RIFF         = 11
 	CF_WAVE         = 12
-	CF_UNICODETEXT  = 13
 	CF_ENHMETAFILE  = 14
 	CF_HDROP        = 15
 	CF_LOCALE       = 16
@@ -329,7 +327,7 @@ const (
 	FILE_ATTRIBUTE_READONLY            = 0x00000001
 	FILE_ATTRIBUTE_HIDDEN              = 0x00000002
 	FILE_ATTRIBUTE_SYSTEM              = 0x00000004
-	FILE_ATTRIBUTE_DIRECTORY           = 0x00000010
+	// FILE_ATTRIBUTE_DIRECTORY is defined in cliprdr_types.go (cross-platform)
 	FILE_ATTRIBUTE_ARCHIVE             = 0x00000020
 	FILE_ATTRIBUTE_DEVICE              = 0x00000040
 	FILE_ATTRIBUTE_NORMAL              = 0x00000080

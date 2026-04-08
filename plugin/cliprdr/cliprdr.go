@@ -4,7 +4,6 @@ package cliprdr
 
 import (
 	"bytes"
-	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"os"
@@ -41,11 +40,6 @@ func NewCliprdrClient() *CliprdrClient {
 	return c
 }
 
-func (c *CliprdrClient) Send(s []byte) (int, error) {
-	slog.Debug("len:", len(s), "data:", hex.EncodeToString(s))
-	name, _ := c.GetType()
-	return c.w.SendToChannel(name, s)
-}
 func (c *CliprdrClient) Sender(f core.ChannelSender) {
 	c.w = f
 }
@@ -54,7 +48,6 @@ func (c *CliprdrClient) GetType() (string, uint32) {
 }
 
 func (c *CliprdrClient) Process(s []byte) {
-	slog.Debug("recv:", hex.EncodeToString(s))
 	r := bytes.NewReader(s)
 
 	msgType, _ := core.ReadUint16LE(r)
@@ -131,16 +124,10 @@ func (c *CliprdrClient) processClipCaps(b []byte) {
 }
 
 func (c *CliprdrClient) processMonitorReady(b []byte) {
-	//Client Clipboard Capabilities PDU
 	c.sendClientCapabilitiesPDU()
-
-	//Temporary Directory PDU
-	//c.sendTemporaryDirectoryPDU()
-
-	//Format List PDU
 	c.sendFormatListPDU()
-
 }
+
 func (c *CliprdrClient) processFormatList(b []byte) {
 	c.withOpenClipboard(func() {
 		if !EmptyClipboard() {
@@ -235,15 +222,6 @@ func (c *CliprdrClient) processFileContentsRequest(b []byte) {
 		return
 	}
 	buff := &bytes.Buffer{}
-	/*o := OleGetClipboard()
-	var format_etc FORMATETC
-	var stg_medium STGMEDIUM
-	format_etc.CFormat = RegisterClipboardFormat(CFSTR_FILECONTENTS)
-	format_etc.Tymed = TYMED_ISTREAM
-	format_etc.Aspect = 1
-	format_etc.Index = req.Lindex
-	o.GetData(&format_etc, &stg_medium)
-	s, _ := stg_medium.Stream()*/
 	f := c.Files[req.Lindex]
 	if req.DwFlags == FILECONTENTS_SIZE {
 		core.WriteUInt32LE(f.FileSizeLow, buff)
@@ -292,65 +270,40 @@ func (c *CliprdrClient) sendClientCapabilitiesPDU() {
 	cs.GeneralFlags = CB_USE_LONG_FORMAT_NAMES |
 		CB_STREAM_FILECLIP_ENABLED |
 		CB_FILECLIP_NO_FILE_PATHS
-	var cc CliprdrCapabilitiesPDU
-	cc.CCapabilitiesSets = 1
-	cc.Pad1 = 0
-	cc.CapabilitySets = make([]CliprdrGeneralCapabilitySet, 0, 1)
-	cc.CapabilitySets = append(cc.CapabilitySets, cs)
-	header := NewCliprdrPDUHeader(CB_CLIP_CAPS, 0, 16)
-
-	buff := &bytes.Buffer{}
-	buff.Write(header.serialize())
-	core.WriteUInt16LE(cc.CCapabilitiesSets, buff)
-	core.WriteUInt16LE(cc.Pad1, buff)
-	for _, v := range cc.CapabilitySets {
-		struc.Pack(buff, v)
-	}
-
-	c.Send(buff.Bytes())
+	body := &bytes.Buffer{}
+	core.WriteUInt16LE(1, body) // cCapabilitiesSets
+	core.WriteUInt16LE(0, body) // pad
+	struc.Pack(body, cs)
+	sendClipPDU(c.w, CB_CLIP_CAPS, 0, body.Bytes())
 }
 
 func (c *CliprdrClient) sendTemporaryDirectoryPDU() {
 	slog.Debug("Send Temporary Directory PDU")
-	var t CliprdrTempDirectory
-	header := &CliprdrPDUHeader{CB_TEMP_DIRECTORY, 0, 260}
-	t.SzTempDir = core.UnicodeEncode(os.TempDir())
-
-	buff := &bytes.Buffer{}
-	core.WriteBytes(header.serialize(), buff)
-	core.WriteBytes(t.SzTempDir, buff)
-	c.Send(buff.Bytes())
+	body := make([]byte, 260)
+	copy(body, core.UnicodeEncode(os.TempDir()))
+	sendClipPDU(c.w, CB_TEMP_DIRECTORY, 0, body)
 }
+
 func (c *CliprdrClient) sendFormatListPDU() {
 	slog.Debug("Send Format List PDU")
-	var f CliprdrFormatList
+	formats := GetFormatList(c.hwnd)
+	slog.Debug("NumFormats:", len(formats))
+	slog.Debug("Formats:", formats)
 
-	f.Formats = GetFormatList(c.hwnd)
-	f.NumFormats = uint32(len(f.Formats))
-
-	slog.Debug("NumFormats:", f.NumFormats)
-	slog.Debug("Formats:", f.Formats)
-
-	b := &bytes.Buffer{}
-	for _, v := range f.Formats {
-		core.WriteUInt32LE(v.FormatId, b)
+	body := &bytes.Buffer{}
+	for _, v := range formats {
+		core.WriteUInt32LE(v.FormatId, body)
 		if v.FormatName == "" {
-			core.WriteUInt16LE(0, b)
+			core.WriteUInt16LE(0, body)
 		} else {
 			n := core.UnicodeEncode(v.FormatName)
-			core.WriteBytes(n, b)
-			b.Write([]byte{0, 0})
+			core.WriteBytes(n, body)
+			body.Write([]byte{0, 0})
 		}
 	}
-
-	header := NewCliprdrPDUHeader(CB_FORMAT_LIST, 0, uint32(b.Len()))
-
-	buff := &bytes.Buffer{}
-	buff.Write(header.serialize())
-	core.WriteBytes(b.Bytes(), buff)
-
-	c.Send(buff.Bytes())
+	sendClipPDU(c.w, CB_FORMAT_LIST, 0, body.Bytes())
 }
+
 func (c *CliprdrClient) readForamtList(b []byte) (*CliprdrFormatList, bool) {
 	r := bytes.NewReader(b)
 	fs := make([]CliprdrFormat, 0, 20)
@@ -372,7 +325,7 @@ func (c *CliprdrClient) readForamtList(b []byte) (*CliprdrFormatList, bool) {
 		if strings.EqualFold(name, CFSTR_FILEDESCRIPTORW) {
 			hasFile = true
 		}
-		slog.Debugf("Foramt:%d Name:<%s>", foramtId, name)
+		slog.Debug(fmt.Sprintf("Format:%d Name:<%s>", foramtId, name))
 		if name != "" {
 			localId := RegisterClipboardFormat(name)
 			slog.Debug("local:", localId, "remote:", foramtId)
@@ -390,93 +343,53 @@ func (c *CliprdrClient) readForamtList(b []byte) (*CliprdrFormatList, bool) {
 
 func (c *CliprdrClient) sendFormatListResponse(flags uint16) {
 	slog.Debug("Send Format List Response")
-	header := NewCliprdrPDUHeader(CB_FORMAT_LIST_RESPONSE, flags, 0)
-	buff := &bytes.Buffer{}
-	buff.Write(header.serialize())
-	c.Send(buff.Bytes())
+	sendClipPDU(c.w, CB_FORMAT_LIST_RESPONSE, flags, nil)
 }
 
 func (c *CliprdrClient) sendFormatDataRequest(id uint32) {
 	slog.Debug("Send Format Data Request")
-	var r CliprdrFormatDataRequest
-	r.RequestedFormatId = id
-	header := NewCliprdrPDUHeader(CB_FORMAT_DATA_REQUEST, 0, 4)
-
-	buff := &bytes.Buffer{}
-	buff.Write(header.serialize())
-	core.WriteUInt32LE(r.RequestedFormatId, buff)
-
-	c.Send(buff.Bytes())
+	body := &bytes.Buffer{}
+	core.WriteUInt32LE(id, body)
+	sendClipPDU(c.w, CB_FORMAT_DATA_REQUEST, 0, body.Bytes())
 }
+
 func (c *CliprdrClient) sendFormatDataResponse(b []byte) {
 	slog.Debug("Send Format Data Response")
-	var resp CliprdrFormatDataResponse
-	resp.RequestedFormatData = b
-
-	header := NewCliprdrPDUHeader(CB_FORMAT_DATA_RESPONSE, CB_RESPONSE_OK, uint32(len(resp.RequestedFormatData)))
-
-	buff := &bytes.Buffer{}
-	buff.Write(header.serialize())
-	buff.Write(resp.RequestedFormatData)
-
-	c.Send(buff.Bytes())
+	sendClipPDU(c.w, CB_FORMAT_DATA_RESPONSE, CB_RESPONSE_OK, b)
 }
 
-func (c *CliprdrClient) sendFormatContentsRequest(r CliprdrFileContentsRequest) uint32 {
+func (c *CliprdrClient) sendFormatContentsRequest(r CliprdrFileContentsRequest) {
 	slog.Debug("Send Format Contents Request")
 	slog.Debug(fmt.Sprintf("Format Contents Request:%+v", r))
-	header := NewCliprdrPDUHeader(CB_FILECONTENTS_REQUEST, 0, 28)
-
-	buff := &bytes.Buffer{}
-	buff.Write(header.serialize())
-	core.WriteUInt32LE(r.StreamId, buff)
-	core.WriteUInt32LE(uint32(r.Lindex), buff)
-	core.WriteUInt32LE(r.DwFlags, buff)
-	core.WriteUInt32LE(r.NPositionLow, buff)
-	core.WriteUInt32LE(r.NPositionHigh, buff)
-	core.WriteUInt32LE(r.CbRequested, buff)
-	core.WriteUInt32LE(r.ClipDataId, buff)
-
-	c.Send(buff.Bytes())
-
-	return uint32(buff.Len())
+	body := &bytes.Buffer{}
+	core.WriteUInt32LE(r.StreamId, body)
+	core.WriteUInt32LE(uint32(r.Lindex), body)
+	core.WriteUInt32LE(r.DwFlags, body)
+	core.WriteUInt32LE(r.NPositionLow, body)
+	core.WriteUInt32LE(r.NPositionHigh, body)
+	core.WriteUInt32LE(r.CbRequested, body)
+	core.WriteUInt32LE(r.ClipDataId, body)
+	sendClipPDU(c.w, CB_FILECONTENTS_REQUEST, 0, body.Bytes())
 }
+
 func (c *CliprdrClient) sendFormatContentsResponse(streamId uint32, b []byte) {
 	slog.Debug("Send Format Contents Response")
-	var r CliprdrFileContentsResponse
-	r.StreamId = streamId
-	r.RequestedData = b
-	r.CbRequested = uint32(len(b))
-	header := NewCliprdrPDUHeader(CB_FILECONTENTS_RESPONSE, CB_RESPONSE_OK, uint32(4+r.CbRequested))
-
-	buff := &bytes.Buffer{}
-	buff.Write(header.serialize())
-	core.WriteUInt32LE(r.StreamId, buff)
-	core.WriteBytes(r.RequestedData, buff)
-
-	c.Send(buff.Bytes())
+	body := &bytes.Buffer{}
+	core.WriteUInt32LE(streamId, body)
+	core.WriteBytes(b, body)
+	sendClipPDU(c.w, CB_FILECONTENTS_RESPONSE, CB_RESPONSE_OK, body.Bytes())
 }
 
 func (c *CliprdrClient) sendLockClipData() {
 	slog.Debug("Send Lock Clip Data")
-	var r CliprdrCtrlClipboardData
-	header := NewCliprdrPDUHeader(CB_LOCK_CLIPDATA, 0, 4)
-
-	buff := &bytes.Buffer{}
-	buff.Write(header.serialize())
-	core.WriteUInt32LE(r.ClipDataId, buff)
-
-	c.Send(buff.Bytes())
+	body := &bytes.Buffer{}
+	core.WriteUInt32LE(0, body) // ClipDataId
+	sendClipPDU(c.w, CB_LOCK_CLIPDATA, 0, body.Bytes())
 }
 
 func (c *CliprdrClient) sendUnlockClipData() {
 	slog.Debug("Send Unlock Clip Data")
-	var r CliprdrCtrlClipboardData
-	header := NewCliprdrPDUHeader(CB_UNLOCK_CLIPDATA, 0, 4)
-
-	buff := &bytes.Buffer{}
-	buff.Write(header.serialize())
-	core.WriteUInt32LE(r.ClipDataId, buff)
-
-	c.Send(buff.Bytes())
+	body := &bytes.Buffer{}
+	core.WriteUInt32LE(0, body) // ClipDataId
+	sendClipPDU(c.w, CB_UNLOCK_CLIPDATA, 0, body.Bytes())
 }

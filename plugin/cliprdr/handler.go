@@ -305,16 +305,7 @@ func (h *CliprdrHandler) sendPDU(msgType, msgFlags uint16, body []byte) {
 	if h.channelSender == nil {
 		return
 	}
-	// CLIPRDR_HEADER: msgType(2) + msgFlags(2) + dataLen(4)
-	hdr := &bytes.Buffer{}
-	binary.Write(hdr, binary.LittleEndian, msgType)
-	binary.Write(hdr, binary.LittleEndian, msgFlags)
-	binary.Write(hdr, binary.LittleEndian, uint32(len(body)))
-	if len(body) > 0 {
-		hdr.Write(body)
-	}
-
-	h.channelSender.SendToChannel(ChannelName, hdr.Bytes())
+	sendClipPDU(h.channelSender, msgType, msgFlags, body)
 }
 
 // --- UTF-16LE helpers ------------------------------------------------------

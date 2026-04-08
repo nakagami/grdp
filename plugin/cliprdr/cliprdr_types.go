@@ -300,3 +300,14 @@ func (resp *CliprdrFileContentsResponse) Unpack(b []byte) {
 	resp.CbRequested = uint32(r.Len())
 	resp.RequestedData, _ = core.ReadBytes(int(resp.CbRequested), r)
 }
+
+// sendClipPDU sends a CLIPRDR PDU with the standard 8-byte header
+// (msgType + msgFlags + dataLen) prepended to body.
+func sendClipPDU(sender core.ChannelSender, msgType, msgFlags uint16, body []byte) {
+	b := &bytes.Buffer{}
+	core.WriteUInt16LE(msgType, b)
+	core.WriteUInt16LE(msgFlags, b)
+	core.WriteUInt32LE(uint32(len(body)), b)
+	b.Write(body)
+	sender.SendToChannel(ChannelName, b.Bytes())
+}
