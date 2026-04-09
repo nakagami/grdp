@@ -193,19 +193,19 @@ func (g *GfxHandler) sendCapsAdvertise() {
 
 	if g.h264dec != nil {
 		// Advertise v10 (AVC444) and v8.0 (AVC420) capsets.
-		// Do NOT set capFlagThinClient — the flag causes the server
-		// to prefer RemoteFX over H.264 even when AVC is not disabled.
+		// capFlagThinClient tells servers to prefer simpler codecs (Planar)
+		// over ClearCodec, which we don't support.
 		core.WriteUInt16LE(2, p) // capsSetCount
 
 		// v10 capset — preferred; enables AVC444 + AVC420
 		core.WriteUInt32LE(capVersion10, p)
 		core.WriteUInt32LE(4, p) // capsDataLength
-		core.WriteUInt32LE(capFlagSmallCache, p)
+		core.WriteUInt32LE(capFlagThinClient|capFlagSmallCache, p)
 
 		// v8.0 capset — fallback; enables AVC420
 		core.WriteUInt32LE(capVersion8, p)
 		core.WriteUInt32LE(4, p) // capsDataLength
-		core.WriteUInt32LE(capFlagSmallCache, p)
+		core.WriteUInt32LE(capFlagThinClient|capFlagSmallCache, p)
 
 		g.sendPdu(cmdidCapsAdvertise, p.Bytes())
 		slog.Debug("RDPGFX: sent CAPS_ADVERTISE (v10+v8.0, AVC enabled)")
@@ -213,9 +213,13 @@ func (g *GfxHandler) sendCapsAdvertise() {
 		core.WriteUInt16LE(1, p) // capsSetCount
 		core.WriteUInt32LE(capVersion8, p)
 		core.WriteUInt32LE(4, p) // capsDataLength
+		// Use flags that intentionally cause servers to reject the RDPGFX
+		// channel, forcing fallback to surface bitmap commands (NSCodec /
+		// RemoteFX). We do not yet support ClearCodec (0x0008) or Planar
+		// (0x0009) which servers send over RDPGFX when it stays open.
 		core.WriteUInt32LE(capFlagThinClient|capFlagSmallCache|capFlagAVCDisabled, p)
 		g.sendPdu(cmdidCapsAdvertise, p.Bytes())
-		slog.Debug("RDPGFX: sent CAPS_ADVERTISE (v8.0, AVC disabled)")
+		slog.Debug("RDPGFX: sent CAPS_ADVERTISE (v8.0)")
 	}
 }
 

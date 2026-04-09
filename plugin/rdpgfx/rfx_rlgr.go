@@ -1,8 +1,10 @@
 package rdpgfx
 
-// RLGR1 (Run-Length Golomb-Rice Level 1) decoder for RFX codec.
+// RLGR1/RLGR3 (Run-Length Golomb-Rice) decoder for RFX codec.
 // Reference: MS-RDPRFX 3.1.8.1.7.3 RLGR1/RLGR3 Pseudocode
 // Matches FreeRDP's rfx_rlgr.c implementation.
+
+import "math/bits"
 
 const (
 	rlgrLSGR  = 3  // shift count to convert kp to k
@@ -191,6 +193,200 @@ func rlgr1Decode(data []byte, outputSize int, dst []int16) []int16 {
 					output[cnt] = mag
 					cnt++
 				}
+			}
+		}
+	}
+
+	return output
+}
+
+// rlgr3Decode decodes RLGR3-encoded data into signed 16-bit DWT coefficients.
+// RLGR3 differs from RLGR1 only in GR mode: it encodes/decodes TWO values
+// per GR code by encoding their sum then splitting.
+// Reference: MS-RDPRFX 3.1.8.1.7.3, FreeRDP rfx_rlgr.c
+func rlgr3Decode(data []byte, outputSize int, dst []int16) []int16 {
+	var output []int16
+	if cap(dst) >= outputSize {
+		output = dst[:outputSize]
+		for i := range output {
+			output[i] = 0
+		}
+	} else {
+		output = make([]int16, outputSize)
+	}
+	br := &rlgrBitReader{data: data, total: len(data) * 8}
+	cnt := 0
+
+	k := uint32(1)
+	kp := uint32(1 << rlgrLSGR)
+	kr := uint32(1)
+	krp := uint32(1 << rlgrLSGR)
+
+	for br.remaining() > 0 && cnt < outputSize {
+		if k > 0 {
+			// RL Mode — identical to RLGR1
+			vk := br.countLeadingBits(0)
+			if br.remaining() < 0 {
+				break
+			}
+
+			run := uint32(0)
+			for i := uint32(0); i < vk; i++ {
+				run += 1 << k
+				kp += rlgrUPGR
+				if kp > rlgrKPMax {
+					kp = rlgrKPMax
+				}
+				k = kp >> rlgrLSGR
+			}
+
+			if br.remaining() < int(k) {
+				break
+			}
+			if k > 0 {
+				run += br.readBits(int(k))
+			}
+
+			if br.remaining() < 1 {
+				break
+			}
+			sign := br.readBits(1)
+
+			vk2 := br.countLeadingBits(1)
+			if br.remaining() < 0 {
+				break
+			}
+
+			if br.remaining() < int(kr) {
+				break
+			}
+			code := uint32(0)
+			if kr > 0 {
+				code = br.readBits(int(kr))
+			}
+			code |= vk2 << kr
+
+			if vk2 == 0 {
+				if krp > 2 {
+					krp -= 2
+				} else {
+					krp = 0
+				}
+				kr = krp >> rlgrLSGR
+			} else if vk2 != 1 {
+				krp += vk2
+				if krp > rlgrKPMax {
+					krp = rlgrKPMax
+				}
+				kr = krp >> rlgrLSGR
+			}
+
+			if kp > rlgrDNGR {
+				kp -= rlgrDNGR
+			} else {
+				kp = 0
+			}
+			k = kp >> rlgrLSGR
+
+			mag := int16(code + 1)
+			if sign != 0 {
+				mag = -mag
+			}
+
+			for i := uint32(0); i < run && cnt < outputSize; i++ {
+				output[cnt] = 0
+				cnt++
+			}
+			if cnt < outputSize {
+				output[cnt] = mag
+				cnt++
+			}
+
+		} else {
+			// GR Mode — RLGR3 variant: decode TWO values from one GR code
+			vk := br.countLeadingBits(1)
+			if br.remaining() < 0 {
+				break
+			}
+
+			if br.remaining() < int(kr) {
+				break
+			}
+			code := uint32(0)
+			if kr > 0 {
+				code = br.readBits(int(kr))
+			}
+			code |= vk << kr
+
+			if vk == 0 {
+				if krp > 2 {
+					krp -= 2
+				} else {
+					krp = 0
+				}
+				kr = krp >> rlgrLSGR
+			} else if vk != 1 {
+				krp += vk
+				if krp > rlgrKPMax {
+					krp = rlgrKPMax
+				}
+				kr = krp >> rlgrLSGR
+			}
+
+			// RLGR3: code = val1 + val2 (sum of two 2*mag-sign encoded values)
+			// Read nIdx bits to split: nIdx = bit-length of code
+			nIdx := uint32(0)
+			if code != 0 {
+				nIdx = uint32(bits.Len(uint(code)))
+			}
+
+			if br.remaining() < int(nIdx) {
+				break
+			}
+			val1 := uint32(0)
+			if nIdx > 0 {
+				val1 = br.readBits(int(nIdx))
+			}
+			val2 := code - val1
+
+			// Update k/kp based on both values
+			if val1 != 0 && val2 != 0 {
+				if kp > 2*rlgrDQGR {
+					kp -= 2 * rlgrDQGR
+				} else {
+					kp = 0
+				}
+				k = kp >> rlgrLSGR
+			} else if val1 == 0 && val2 == 0 {
+				kp += 2 * rlgrUQGR
+				if kp > rlgrKPMax {
+					kp = rlgrKPMax
+				}
+				k = kp >> rlgrLSGR
+			}
+
+			// Decode val1 as 2*mag-sign
+			var mag1 int16
+			if val1&1 != 0 {
+				mag1 = -int16((val1 + 1) >> 1)
+			} else {
+				mag1 = int16(val1 >> 1)
+			}
+			if cnt < outputSize {
+				output[cnt] = mag1
+				cnt++
+			}
+
+			// Decode val2 as 2*mag-sign
+			var mag2 int16
+			if val2&1 != 0 {
+				mag2 = -int16((val2 + 1) >> 1)
+			} else {
+				mag2 = int16(val2 >> 1)
+			}
+			if cnt < outputSize {
+				output[cnt] = mag2
+				cnt++
 			}
 		}
 	}

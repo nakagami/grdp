@@ -242,6 +242,10 @@ func (g *RdpClient) doLogin(routingToken []byte) error {
 	g.pdu = pdu.NewClient(g.sec)
 	g.channels = plugin.NewChannels(g.sec)
 
+	// Wire RemoteFX surface decoder so the pdu layer can decode
+	// codecID=3 in surface bitmap commands without importing rdpgfx.
+	pdu.DecodeRemoteFX = rdpgfx.DecodeSurfaceRFX
+
 	g.mcs.SetClientDesktop(uint16(g.width), uint16(g.height))
 
 	// Register channels in order: rdpdr, rdpsnd, cliprdr, drdynvc
