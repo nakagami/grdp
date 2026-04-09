@@ -318,6 +318,15 @@ func (g *RdpClient) doLogin(routingToken []byte) error {
 	})
 	dvcClient.RegisterHandler(rdpgfx.ChannelName, gfxHandler)
 
+	// Reject Video Optimized Remoting (VOR) channels so the server keeps
+	// sending video through the RDPGFX pipeline which we do handle.
+	// Without this, the server detects video playback (e.g. YouTube) and
+	// switches to VOR channels that we don't implement, causing the video
+	// to freeze while audio continues.
+	dvcClient.RegisterRejectedChannel("Microsoft::Windows::RDS::Video::Control::v08.01")
+	dvcClient.RegisterRejectedChannel("Microsoft::Windows::RDS::Video::Data::v08.01")
+	dvcClient.RegisterRejectedChannel("Microsoft::Windows::RDS::Geometry::v08.01")
+
 	// Register DVC audio handlers for both the lossless and lossy variants.
 	// gnome-remote-desktop requests AUDIO_PLAYBACK_LOSSY_DVC first; if it is
 	// rejected, gnome-remote-desktop triggers its SVC fallback path which also
