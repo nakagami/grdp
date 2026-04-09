@@ -17,7 +17,6 @@ package rdpgfx
 
 import (
 	"encoding/binary"
-	"fmt"
 	"log/slog"
 	"runtime"
 	"sync"
@@ -57,8 +56,6 @@ func (d *rfxDecoder) Decode(data []byte, left, top int, surfData []byte, width, 
 		blockLen := int(binary.LittleEndian.Uint32(data[offset+2:]))
 
 		if blockLen < 6 || offset+blockLen > len(data) {
-			slog.Debug(fmt.Sprintf("RFX: invalid block type=0x%04X len=%d offset=%d dataLen=%d",
-				blockType, blockLen, offset, len(data)))
 			break
 		}
 
@@ -82,8 +79,6 @@ func (d *rfxDecoder) Decode(data []byte, left, top int, surfData []byte, width, 
 			rects = d.parseRegion(content, left, top)
 		case wbtExtension:
 			quants = d.decodeTileset(content, left, top, surfData, width, height)
-		default:
-			slog.Debug(fmt.Sprintf("RFX: unknown block 0x%04X len=%d", blockType, blockLen))
 		}
 
 		offset += blockLen
@@ -132,7 +127,7 @@ func (d *rfxDecoder) parseRegion(data []byte, left, top int) []rfxRect {
 	// Validate regionType
 	regionType := binary.LittleEndian.Uint16(data[off:])
 	if regionType != cbtRegion {
-		slog.Debug(fmt.Sprintf("RFX: unexpected regionType 0x%04X (expected CBT_REGION 0xCAC1)", regionType))
+		slog.Debug("RFX: unexpected regionType", "type", regionType)
 	}
 
 	return rects
@@ -151,16 +146,23 @@ func (d *rfxDecoder) decodeTileset(data []byte, left, top int, surfData []byte, 
 
 	subtype := binary.LittleEndian.Uint16(data[0:])
 	if subtype != cbtTileset {
-		slog.Debug(fmt.Sprintf("RFX: expected CBT_TILESET (0xCAC2), got 0x%04X", subtype))
 		return nil
 	}
 
-	// idx := binary.LittleEndian.Uint16(data[2:])
-	// properties := binary.LittleEndian.Uint16(data[4:])
+	properties := binary.LittleEndian.Uint16(data[4:])
 	numQuant := int(data[6])
 	// tileSize := data[7]
 	numTiles := int(binary.LittleEndian.Uint16(data[8:]))
 	// tilesDataSize := binary.LittleEndian.Uint32(data[10:])
+
+	// Extract RLGR entropy algorithm from TILESET properties.
+	// TILESET properties bit layout (MS-RDPRFX / FreeRDP):
+	//   bits 10-13: et (entropy type) - 0x01=RLGR1, 0x04=RLGR3
+	rlgrMode := 1
+	et := (properties >> 10) & 0x0F
+	if et == 0x04 {
+		rlgrMode = 3
+	}
 
 	off := 14
 
@@ -187,7 +189,6 @@ func (d *rfxDecoder) decodeTileset(data []byte, left, top int, surfData []byte, 
 		tileBlockLen := int(binary.LittleEndian.Uint32(data[off+2:]))
 
 		if tileBlockType != cbtTile {
-			slog.Debug(fmt.Sprintf("RFX: expected CBT_TILE (0xCAC3), got 0x%04X", tileBlockType))
 			break
 		}
 		if tileBlockLen < 19 || off+tileBlockLen > len(data) {
@@ -221,13 +222,13 @@ func (d *rfxDecoder) decodeTileset(data []byte, left, top int, surfData []byte, 
 					}
 				}()
 				for t := range ch {
-					d.decodeTile(t.content, quants, left, top, surfData, width, height)
+					d.decodeTile(t.content, quants, rlgrMode, left, top, surfData, width, height)
 				}
 			}()
 		}
 		wg.Wait()
 	} else if len(tiles) == 1 {
-		d.decodeTile(tiles[0].content, quants, left, top, surfData, width, height)
+		d.decodeTile(tiles[0].content, quants, rlgrMode, left, top, surfData, width, height)
 	}
 
 	return quants
@@ -237,7 +238,7 @@ func (d *rfxDecoder) decodeTileset(data []byte, left, top int, surfData []byte, 
 // Format: quantIdxY(1) + quantIdxCb(1) + quantIdxCr(1) + xIdx(2) + yIdx(2) +
 //
 //	YLen(2) + CbLen(2) + CrLen(2) + YData(YLen) + CbData(CbLen) + CrData(CrLen)
-func (d *rfxDecoder) decodeTile(data []byte, quants []rfxQuant, left, top int, output []byte, outW, outH int) {
+func (d *rfxDecoder) decodeTile(data []byte, quants []rfxQuant, rlgrMode int, left, top int, output []byte, outW, outH int) {
 	if len(data) < 13 {
 		return
 	}
@@ -262,9 +263,9 @@ func (d *rfxDecoder) decodeTile(data []byte, quants []rfxQuant, left, top int, o
 	qCb := rfxGetQuant(quants, quantIdxCb)
 	qCr := rfxGetQuant(quants, quantIdxCr)
 
-	yPixels := rfxDecodeComponent(yData, qY)
-	cbPixels := rfxDecodeComponent(cbData, qCb)
-	crPixels := rfxDecodeComponent(crData, qCr)
+	yPixels := rfxDecodeComponent(yData, qY, rlgrMode)
+	cbPixels := rfxDecodeComponent(cbData, qCb, rlgrMode)
+	crPixels := rfxDecodeComponent(crData, qCr, rlgrMode)
 
 	// Apply WTS1 left/top offset: tile pixel position on surface =
 	// left + xIdx*64, top + yIdx*64 (per FreeRDP/MS-RDPRFX).
@@ -273,4 +274,13 @@ func (d *rfxDecoder) decodeTile(data []byte, quants []rfxQuant, left, top int, o
 	coeffPool.Put(yPixels)
 	coeffPool.Put(cbPixels)
 	coeffPool.Put(crPixels)
+}
+
+// DecodeSurfaceRFX decodes non-progressive RemoteFX (MS-RDPRFX) encoded data
+// into a top-down BGRA pixel buffer suitable for surface bitmap commands.
+func DecodeSurfaceRFX(data []byte, width, height int) []byte {
+	output := make([]byte, width*height*4)
+	dec := newRfxDecoder()
+	dec.Decode(data, 0, 0, output, width, height)
+	return output
 }

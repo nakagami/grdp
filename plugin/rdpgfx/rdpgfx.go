@@ -213,9 +213,13 @@ func (g *GfxHandler) sendCapsAdvertise() {
 		core.WriteUInt16LE(1, p) // capsSetCount
 		core.WriteUInt32LE(capVersion8, p)
 		core.WriteUInt32LE(4, p) // capsDataLength
+		// Use flags that intentionally cause servers to reject the RDPGFX
+		// channel, forcing fallback to surface bitmap commands (NSCodec /
+		// RemoteFX). We do not yet support ClearCodec (0x0008) or Planar
+		// (0x0009) which servers send over RDPGFX when it stays open.
 		core.WriteUInt32LE(capFlagThinClient|capFlagSmallCache|capFlagAVCDisabled, p)
 		g.sendPdu(cmdidCapsAdvertise, p.Bytes())
-		slog.Debug("RDPGFX: sent CAPS_ADVERTISE (v8.0, AVC disabled)")
+		slog.Debug("RDPGFX: sent CAPS_ADVERTISE (v8.0)")
 	}
 }
 
