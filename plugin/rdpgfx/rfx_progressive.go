@@ -187,9 +187,9 @@ func (d *rfxProgressiveDecoder) decodeTileSimple(data []byte, quants []rfxQuant,
 	qCb := rfxGetQuant(quants, int(quantIdxCb))
 	qCr := rfxGetQuant(quants, int(quantIdxCr))
 
-	yPixels := rfxDecodeComponent(yData, qY)
-	cbPixels := rfxDecodeComponent(cbData, qCb)
-	crPixels := rfxDecodeComponent(crData, qCr)
+	yPixels := rfxDecodeComponent(yData, qY, 1)
+	cbPixels := rfxDecodeComponent(cbData, qCb, 1)
+	crPixels := rfxDecodeComponent(crData, qCr, 1)
 
 	rfxPlaceTile(yPixels, cbPixels, crPixels, int(xIdx), int(yIdx), output, outW, outH)
 
@@ -227,9 +227,9 @@ func (d *rfxProgressiveDecoder) decodeTileFirst(data []byte, quants []rfxQuant, 
 	qCb := rfxGetQuant(quants, int(quantIdxCb))
 	qCr := rfxGetQuant(quants, int(quantIdxCr))
 
-	yPixels := rfxDecodeComponent(yData, qY)
-	cbPixels := rfxDecodeComponent(cbData, qCb)
-	crPixels := rfxDecodeComponent(crData, qCr)
+	yPixels := rfxDecodeComponent(yData, qY, 1)
+	cbPixels := rfxDecodeComponent(cbData, qCb, 1)
+	crPixels := rfxDecodeComponent(crData, qCr, 1)
 
 	rfxPlaceTile(yPixels, cbPixels, crPixels, int(xIdx), int(yIdx), output, outW, outH)
 
@@ -253,7 +253,7 @@ func safeSlice(data []byte, offset, length int) []byte {
 }
 
 // rfxDecodeComponent decodes one color component (Y, Cb, or Cr) for a 64×64 tile.
-func rfxDecodeComponent(data []byte, quant rfxQuant) []int16 {
+func rfxDecodeComponent(data []byte, quant rfxQuant, rlgrMode int) []int16 {
 	const tilePixels = rfxTileSize * rfxTileSize // 4096
 
 	// Reuse a pooled coefficient buffer to avoid per-tile allocation.
@@ -266,8 +266,12 @@ func rfxDecodeComponent(data []byte, quant rfxQuant) []int16 {
 		return coeffs
 	}
 
-	// 1. RLGR1 entropy decode → 4096 coefficients
-	coeffs = rlgr1Decode(data, tilePixels, coeffs)
+	// 1. RLGR entropy decode → 4096 coefficients
+	if rlgrMode == 3 {
+		coeffs = rlgr3Decode(data, tilePixels, coeffs)
+	} else {
+		coeffs = rlgr1Decode(data, tilePixels, coeffs)
+	}
 
 	// 2. Differential decode LL3 (positions 4032..4095)
 	for i := 4033; i < 4096; i++ {

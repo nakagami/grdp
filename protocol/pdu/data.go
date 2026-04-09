@@ -11,6 +11,12 @@ import (
 	"github.com/nakagami/grdp/core"
 )
 
+// DecodeRemoteFX is a pluggable decoder for RemoteFX (MS-RDPRFX) surface codec
+// data. It is set at init time by the main client package to avoid a circular
+// import between protocol/pdu and plugin/rdpgfx.
+// The function receives raw RFX data and returns top-down BGRA pixels.
+var DecodeRemoteFX func(data []byte, width, height int) []byte
+
 const (
 	PDUTYPE_DEMANDACTIVEPDU  = 0x11
 	PDUTYPE_CONFIRMACTIVEPDU = 0x13
@@ -1145,6 +1151,14 @@ func decodeSurfaceBitsCmd(r io.Reader) (*BitmapData, error) {
 	case 1: // NSCodec
 		pixels = decodeNSCodec(bitmapData, int(width), int(height))
 		outBpp = 32 // NSCodec always decodes to BGRA (4 bytes/pixel)
+	case 3: // RemoteFX (MS-RDPRFX)
+		if DecodeRemoteFX != nil {
+			pixels = DecodeRemoteFX(bitmapData, int(width), int(height))
+			outBpp = 32
+		} else {
+			slog.Warn("RemoteFX surface codec not available", "codecID", codecID)
+			return nil, nil
+		}
 	default:
 		slog.Warn("Unsupported surface codec", "codecID", codecID)
 		return nil, nil // skip unsupported codecs
@@ -1154,15 +1168,18 @@ func decodeSurfaceBitsCmd(r io.Reader) (*BitmapData, error) {
 		return nil, nil
 	}
 
-	// Flip vertically: NSCodec decodes top-down, but the bitmap coordinate
-	// system expects bottom-up pixel data for correct rendering.
-	stride := int(width) * int(outBpp) / 8
-	h := int(height)
-	for y := 0; y < h/2; y++ {
-		top := y * stride
-		bot := (h - 1 - y) * stride
-		for i := 0; i < stride; i++ {
-			pixels[top+i], pixels[bot+i] = pixels[bot+i], pixels[top+i]
+	// Flip vertically for bottom-up codecs. NSCodec decodes top-down but the
+	// bitmap coordinate system expects bottom-up. RFX (codecID=3) is already
+	// in the correct top-down orientation and must NOT be flipped.
+	if codecID != 3 {
+		stride := int(width) * int(outBpp) / 8
+		h := int(height)
+		for y := 0; y < h/2; y++ {
+			top := y * stride
+			bot := (h - 1 - y) * stride
+			for i := 0; i < stride; i++ {
+				pixels[top+i], pixels[bot+i] = pixels[bot+i], pixels[top+i]
+			}
 		}
 	}
 
