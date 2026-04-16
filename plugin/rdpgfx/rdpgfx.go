@@ -71,9 +71,10 @@ const (
 	capVersion8        uint32 = 0x00080004
 	capVersion81       uint32 = 0x00080105
 	capVersion10       uint32 = 0x000A0002
-	capFlagThinClient  uint32 = 0x00000001
-	capFlagSmallCache  uint32 = 0x00000002
-	capFlagAVCDisabled uint32 = 0x00000020
+	capFlagThinClient    uint32 = 0x00000001
+	capFlagSmallCache    uint32 = 0x00000002
+	capFlagAVC420Enabled uint32 = 0x00000010 // v8.1: explicitly enable AVC420
+	capFlagAVCDisabled   uint32 = 0x00000020 // v10+: disable AVC
 )
 
 const headerSize = 8
@@ -192,23 +193,28 @@ func (g *GfxHandler) sendCapsAdvertise() {
 	p := &bytes.Buffer{}
 
 	if g.h264dec != nil {
-		// Advertise v10 (AVC444) and v8.0 (AVC420) capsets.
+		// Advertise v10, v8.1, and v8.0 capsets (FreeRDP approach).
 		// capFlagThinClient tells servers to prefer simpler codecs (Planar)
 		// over ClearCodec, which we don't support.
-		core.WriteUInt16LE(2, p) // capsSetCount
+		core.WriteUInt16LE(3, p) // capsSetCount
 
 		// v10 capset — preferred; enables AVC444 + AVC420
 		core.WriteUInt32LE(capVersion10, p)
 		core.WriteUInt32LE(4, p) // capsDataLength
 		core.WriteUInt32LE(capFlagThinClient|capFlagSmallCache, p)
 
-		// v8.0 capset — fallback; enables AVC420
+		// v8.1 capset — H.264/AVC420 via explicit flag
+		core.WriteUInt32LE(capVersion81, p)
+		core.WriteUInt32LE(4, p) // capsDataLength
+		core.WriteUInt32LE(capFlagThinClient|capFlagSmallCache|capFlagAVC420Enabled, p)
+
+		// v8.0 capset — baseline fallback (no AVC support)
 		core.WriteUInt32LE(capVersion8, p)
 		core.WriteUInt32LE(4, p) // capsDataLength
 		core.WriteUInt32LE(capFlagThinClient|capFlagSmallCache, p)
 
 		g.sendPdu(cmdidCapsAdvertise, p.Bytes())
-		slog.Debug("RDPGFX: sent CAPS_ADVERTISE (v10+v8.0, AVC enabled)")
+		slog.Debug("RDPGFX: sent CAPS_ADVERTISE (v10+v8.1+v8.0, AVC enabled)")
 	} else {
 		core.WriteUInt16LE(1, p) // capsSetCount
 		core.WriteUInt32LE(capVersion8, p)
