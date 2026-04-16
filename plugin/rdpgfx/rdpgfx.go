@@ -44,9 +44,10 @@ const (
 	cmdidCacheImportReply         uint16 = 0x0011
 	cmdidCapsAdvertise            uint16 = 0x0012
 	cmdidCapsConfirm              uint16 = 0x0013
-	cmdidMapSurfaceToScaledOutput uint16 = 0x0015
-	cmdidMapSurfaceToScaledWindow uint16 = 0x0016
-	cmdidMapSurfaceToWindow       uint16 = 0x0018
+	cmdidMapSurfaceToScaledOutput  uint16 = 0x0015
+	cmdidMapSurfaceToScaledWindow  uint16 = 0x0016
+	cmdidMapSurfaceToScaledOutputV2 uint16 = 0x0017 // v10.6+
+	cmdidMapSurfaceToWindow        uint16 = 0x0018
 )
 
 // Pixel Formats
@@ -68,9 +69,17 @@ const (
 
 // Capability versions and flags
 const (
-	capVersion8        uint32 = 0x00080004
-	capVersion81       uint32 = 0x00080105
-	capVersion10       uint32 = 0x000A0002
+	capVersion8          uint32 = 0x00080004
+	capVersion81         uint32 = 0x00080105
+	capVersion10         uint32 = 0x000A0002
+	capVersion101        uint32 = 0x000A0100
+	capVersion102        uint32 = 0x000A0200
+	capVersion103        uint32 = 0x000A0301
+	capVersion104        uint32 = 0x000A0400
+	capVersion105        uint32 = 0x000A0502
+	capVersion106        uint32 = 0x000A0600
+	capVersion1061       uint32 = 0x000A0601
+	capVersion107        uint32 = 0x000A0701
 	capFlagThinClient    uint32 = 0x00000001
 	capFlagSmallCache    uint32 = 0x00000002
 	capFlagAVC420Enabled uint32 = 0x00000010 // v8.1: explicitly enable AVC420
@@ -193,28 +202,70 @@ func (g *GfxHandler) sendCapsAdvertise() {
 	p := &bytes.Buffer{}
 
 	if g.h264dec != nil {
-		// Advertise v10, v8.1, and v8.0 capsets (FreeRDP approach).
-		// capFlagThinClient tells servers to prefer simpler codecs (Planar)
-		// over ClearCodec, which we don't support.
-		core.WriteUInt16LE(3, p) // capsSetCount
+		// Advertise capsets in ascending order (v8.0 → v10.7), matching
+		// rdpyqt / FreeRDP layout so servers pick the highest common version.
+		core.WriteUInt16LE(11, p) // capsSetCount
 
-		// v10 capset — preferred; enables AVC444 + AVC420
-		core.WriteUInt32LE(capVersion10, p)
-		core.WriteUInt32LE(4, p) // capsDataLength
-		core.WriteUInt32LE(capFlagThinClient|capFlagSmallCache, p)
-
-		// v8.1 capset — H.264/AVC420 via explicit flag
-		core.WriteUInt32LE(capVersion81, p)
-		core.WriteUInt32LE(4, p) // capsDataLength
-		core.WriteUInt32LE(capFlagThinClient|capFlagSmallCache|capFlagAVC420Enabled, p)
-
-		// v8.0 capset — baseline fallback (no AVC support)
+		// v8.0 — baseline fallback (no AVC)
 		core.WriteUInt32LE(capVersion8, p)
-		core.WriteUInt32LE(4, p) // capsDataLength
-		core.WriteUInt32LE(capFlagThinClient|capFlagSmallCache, p)
+		core.WriteUInt32LE(4, p)
+		core.WriteUInt32LE(capFlagThinClient, p)
+
+		// v8.1 — AVC420 via explicit flag
+		core.WriteUInt32LE(capVersion81, p)
+		core.WriteUInt32LE(4, p)
+		core.WriteUInt32LE(capFlagSmallCache|capFlagAVC420Enabled, p)
+
+		// v10.0
+		core.WriteUInt32LE(capVersion10, p)
+		core.WriteUInt32LE(4, p)
+		core.WriteUInt32LE(capFlagSmallCache, p)
+
+		// v10.1 — 16-byte capsData (12 zero bytes after flags)
+		core.WriteUInt32LE(capVersion101, p)
+		core.WriteUInt32LE(16, p)
+		core.WriteUInt32LE(0, p)
+		core.WriteUInt32LE(0, p)
+		core.WriteUInt32LE(0, p)
+		core.WriteUInt32LE(0, p)
+
+		// v10.2
+		core.WriteUInt32LE(capVersion102, p)
+		core.WriteUInt32LE(4, p)
+		core.WriteUInt32LE(capFlagSmallCache, p)
+
+		// v10.3
+		core.WriteUInt32LE(capVersion103, p)
+		core.WriteUInt32LE(4, p)
+		core.WriteUInt32LE(0, p)
+
+		// v10.4
+		core.WriteUInt32LE(capVersion104, p)
+		core.WriteUInt32LE(4, p)
+		core.WriteUInt32LE(capFlagSmallCache, p)
+
+		// v10.5
+		core.WriteUInt32LE(capVersion105, p)
+		core.WriteUInt32LE(4, p)
+		core.WriteUInt32LE(capFlagSmallCache, p)
+
+		// v10.6
+		core.WriteUInt32LE(capVersion106, p)
+		core.WriteUInt32LE(4, p)
+		core.WriteUInt32LE(capFlagSmallCache, p)
+
+		// v10.6.1
+		core.WriteUInt32LE(capVersion1061, p)
+		core.WriteUInt32LE(4, p)
+		core.WriteUInt32LE(capFlagSmallCache, p)
+
+		// v10.7
+		core.WriteUInt32LE(capVersion107, p)
+		core.WriteUInt32LE(4, p)
+		core.WriteUInt32LE(capFlagSmallCache, p)
 
 		g.sendPdu(cmdidCapsAdvertise, p.Bytes())
-		slog.Debug("RDPGFX: sent CAPS_ADVERTISE (v10+v8.1+v8.0, AVC enabled)")
+		slog.Debug("RDPGFX: sent CAPS_ADVERTISE (v10.7..v8.0, AVC enabled)")
 	} else {
 		core.WriteUInt16LE(1, p) // capsSetCount
 		core.WriteUInt32LE(capVersion8, p)
@@ -432,8 +483,10 @@ func (g *GfxHandler) dispatchDecode(cmdId uint16, data []byte, skipHeavy bool) {
 		g.onEvictCacheEntry(data)
 	case cmdidCacheImportOffer:
 		g.onCacheImportOffer()
-	case cmdidMapSurfaceToWindow, cmdidMapSurfaceToScaledOutput, cmdidMapSurfaceToScaledWindow:
-		// ignored
+	case cmdidMapSurfaceToWindow, cmdidMapSurfaceToScaledWindow:
+		// ignored — we don't support per-window mapping
+	case cmdidMapSurfaceToScaledOutput, cmdidMapSurfaceToScaledOutputV2:
+		g.onMapSurfaceToScaledOutput(data)
 	default:
 		slog.Debug(fmt.Sprintf("RDPGFX: unhandled cmd 0x%04X", cmdId))
 	}
@@ -555,6 +608,25 @@ func (g *GfxHandler) onMapSurfaceToOutput(data []byte) {
 	ox, _ := core.ReadUInt32LE(r)
 	oy, _ := core.ReadUInt32LE(r)
 	slog.Debug(fmt.Sprintf("RDPGFX: MAP_SURFACE id=%d → (%d,%d)", id, ox, oy))
+	if s, ok := g.surfaces[id]; ok {
+		s.outputX = ox
+		s.outputY = oy
+		s.mapped = true
+	}
+}
+
+func (g *GfxHandler) onMapSurfaceToScaledOutput(data []byte) {
+	if len(data) < 20 {
+		return
+	}
+	r := bytes.NewReader(data)
+	id, _ := core.ReadUint16LE(r)
+	core.ReadUint16LE(r) // reserved
+	ox, _ := core.ReadUInt32LE(r)
+	oy, _ := core.ReadUInt32LE(r)
+	core.ReadUInt32LE(r) // targetWidth
+	core.ReadUInt32LE(r) // targetHeight
+	slog.Debug(fmt.Sprintf("RDPGFX: MAP_SURFACE_SCALED id=%d → (%d,%d)", id, ox, oy))
 	if s, ok := g.surfaces[id]; ok {
 		s.outputX = ox
 		s.outputY = oy
