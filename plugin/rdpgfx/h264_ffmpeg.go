@@ -333,7 +333,7 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 		if !h264ContainsKeyFrame(h264Data) {
 			d.keyframeWaitCount++
 			if d.keyframeWaitCount >= keyframeWaitLimit {
-				slog.Warn("H.264: no IDR received, proceeding without keyframe",
+				slog.Debug("H.264: no IDR received, proceeding without keyframe",
 					"waited", d.keyframeWaitCount)
 				d.needsKeyFrame = false
 				d.keyframeWaitCount = 0
@@ -372,7 +372,7 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 			// recreate works.  Mirrors rdpyqt avc.py:_hard_reset escalation.
 			const hwStuckCycles = 2
 			if d.stallCycles >= hwStuckCycles {
-				slog.Warn("H.264: HW decoder stuck across multiple nudge cycles, hard reset",
+				slog.Debug("H.264: HW decoder stuck across multiple nudge cycles, hard reset",
 					"stallCycles", d.stallCycles)
 				d.stallCycles = 0
 				d.stallCount = 0
@@ -423,6 +423,25 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 	ret := C.avcodec_send_packet(d.codecCtx, d.packet)
 	if ret < 0 {
 		if d.useHW {
+			// After a hard reset the freshly-recreated decoder has no SPS/PPS
+			// until the server's next IDR is fed to it (with prependSPSNextIDR).
+			// avcodec_send_packet on intervening P-frames is *expected* to fail
+			// and must NOT trigger another hard reset — that would just repeat
+			// the cycle and end in an SW fallback.  Mirrors rdpyqt avc.py
+			// where decode() returning silently for non-IDR packets does not
+			// increment _hw_error_count.  We still ask the GfxHandler to nudge
+			// the server (via wantsServerRefresh) so an IDR arrives soon, and
+			// we bail out to SW only if no frame ever materialises within
+			// hwInitTimeout packets.
+			if !d.hwReady {
+				d.wantsServerRefresh = true
+				if d.hwSentCount >= hwInitTimeout {
+					slog.Warn("H.264: HW decoder failed to produce first frame after reset, switching to software",
+						"hwSentCount", d.hwSentCount)
+					d.reinitSoftware()
+				}
+				return nil, nil
+			}
 			// VideoToolbox hard error.  flush_buffers cannot recover this;
 			// only a full CodecContext recreate can (proven by rdpyqt's
 			// extensive macOS testing — see avc.py:214-260).  Try a hard
@@ -432,7 +451,7 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 				"err", int(ret), "hwErrorCount", d.hwErrorCount)
 			if d.hwErrorCount >= hwHardErrorThreshold {
 				if d.hwRecoveries < hwMaxRecoveries {
-					slog.Warn("H.264: HW decoder hard error, recreating context",
+					slog.Debug("H.264: HW decoder hard error, recreating context",
 						"hwErrorCount", d.hwErrorCount,
 						"attempt", d.hwRecoveries+1,
 						"maxAttempts", hwMaxRecoveries)
@@ -756,12 +775,24 @@ func (d *ffmpegDecoder) hardResetHW() {
 	d.lastH = 0
 	d.lastFmt = C.AV_PIX_FMT_NONE
 	d.stallCount = 0
-	d.needsKeyFrame = true
+	// Do NOT set needsKeyFrame=true here.  Dropping P-frames for
+	// keyframeWaitLimit (150) packets while the server may not send a
+	// fresh IDR for several seconds wastes the wait, and after the wait
+	// expires we feed P-frames to a fresh decoder that has no SPS/PPS,
+	// which fails 5x and triggers another hard reset → the cascade ends
+	// in an SW fallback that the user sees as a sudden visual quality
+	// drop.  rdpyqt does NOT drop packets after a hard reset; it just
+	// asks the server for a refresh and lets the decoder silently fail
+	// on intervening P-frames until the next IDR arrives (avc.py:140-260).
+	d.needsKeyFrame = false
 	d.keyframeWaitCount = 0
 	d.hwReady = false
 	d.hwSentCount = 0
 	d.hwErrorCount = 0
-	d.wantsServerRefresh = false
+	// Ask the GfxHandler to nudge the server for a fresh IDR.  Until that
+	// IDR arrives, send_packet on P-frames is expected to fail silently
+	// (handled in Decode where !d.hwReady suppresses the hard-reset cascade).
+	d.wantsServerRefresh = true
 	d.stallCycles = 0
 	d.prependSPSNextIDR = len(d.spsNAL) > 0 && len(d.ppsNAL) > 0
 	slog.Debug("H.264: HW decoder hard-reset complete",
