@@ -36,6 +36,7 @@ type audioStream struct {
 	buf         bytes.Buffer
 	closed      bool
 	wasUnderrun bool
+	primed      bool // true once initial prebuffer has filled
 }
 
 // maxAudioBuf is the soft cap on the audioStream buffer (≈1 s of PCM
@@ -43,9 +44,25 @@ type audioStream struct {
 // rather than buffering ever-growing stale data.
 const maxAudioBuf = 176400
 
-// fadeFrames is the number of stereo frames used for fade-in at underrun
-// boundaries (~1.5 ms at 44100 Hz).  Each stereo frame is 4 bytes (2 × int16).
+// prebufferBytes is the amount of PCM that must accumulate before Read
+// starts returning real audio.  Until then Read returns silence so the
+// oto player stays running but the actual audio is not yet drained,
+// giving incoming RDPSND chunks a chance to build up a healthy backlog.
+// 70560 B = 70560 / (44100 * 2 * 2) = 400 ms — close to rdpyqt's 500 ms
+// _AudioRingBuffer prebuffer (rdpsnd.py:124-212).
+const prebufferBytes = 70560
+
+// fadeFrames is the number of stereo frames used for fade-in/fade-out at
+// underrun boundaries (~1.5 ms at 44100 Hz).  Each stereo frame is 4 bytes
+// (2 × int16).
 const fadeFrames = 64
+
+// fadeOutThreshold is the buffered byte count at or below which we apply
+// a fade-out tail to the last fadeFrames returned, so the imminent
+// transition from audio→silence does not produce a click.  Mirrors
+// rdpyqt's _AudioRingBuffer crossfade behaviour.  ~10 ms worth of stereo
+// PCM (44100 * 2ch * 2bytes * 0.01 = 1764) is a comfortable trigger.
+const fadeOutThreshold = 1764
 
 func newAudioStream() *audioStream {
 	return &audioStream{}
@@ -59,13 +76,22 @@ func (s *audioStream) Write(p []byte) (int, error) {
 	if s.buf.Len() >= maxAudioBuf {
 		return len(p), nil
 	}
-	return s.buf.Write(p)
+	n, err := s.buf.Write(p)
+	// Once we have at least prebufferBytes queued, mark primed so Read
+	// starts draining real audio.  Until then Read keeps returning silence
+	// so the player has a healthy backlog before it begins consumption.
+	if !s.primed && s.buf.Len() >= prebufferBytes {
+		s.primed = true
+	}
+	return n, err
 }
 
-// Read fills p with audio data.  If the internal buffer is empty the
-// slice is zero-filled (silence) so the oto player never stalls.
-// A short fade-in is applied after an underrun so the transition from
-// silence to audio does not produce an audible click.
+// Read fills p with audio data.  If the internal buffer is empty (or not
+// yet primed) the slice is zero-filled (silence) so the oto player never
+// stalls.  A short fade-in is applied after an underrun so the transition
+// from silence to audio does not produce an audible click; conversely,
+// when the buffer is about to drain we apply a fade-out to the trailing
+// frames returned, so the next zero-filled Read does not click either.
 func (s *audioStream) Read(p []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -74,8 +100,8 @@ func (s *audioStream) Read(p []byte) (int, error) {
 		return 0, io.EOF
 	}
 
-	if s.buf.Len() == 0 {
-		// No data available — return silence instead of blocking.
+	if !s.primed || s.buf.Len() == 0 {
+		// Either still pre-buffering for the first time, or underrun.
 		s.wasUnderrun = true
 		clear(p)
 		return len(p), nil
@@ -88,6 +114,17 @@ func (s *audioStream) Read(p []byte) (int, error) {
 		// silence→audio click.
 		s.wasUnderrun = false
 		applyFadeIn(p[:n])
+	}
+
+	// If the buffer is now nearly empty, fade out the tail of this read
+	// so the upcoming silence transition is clickless.  This mirrors
+	// rdpyqt's _AudioRingBuffer crossfade-out behaviour.
+	if s.buf.Len() <= fadeOutThreshold {
+		applyFadeOut(p[:n])
+		// Force re-prime: wait for fresh data before resuming playback.
+		// Without re-priming the player would keep ping-ponging between
+		// 1-2 ms of audio and silence at every chunk boundary.
+		s.primed = false
 	}
 
 	return n, err
@@ -114,6 +151,30 @@ func applyFadeIn(buf []byte) {
 	}
 }
 
+// applyFadeOut applies a linear gain ramp from 1→0 over the LAST fadeFrames
+// stereo frames of PCM 16-bit little-endian data in buf.  Used right before
+// an expected underrun so the silence transition is clickless.
+func applyFadeOut(buf []byte) {
+	const bytesPerFrame = 4
+	totalFrames := len(buf) / bytesPerFrame
+	frames := fadeFrames
+	if totalFrames < frames {
+		frames = totalFrames
+	}
+	tailStart := (totalFrames - frames) * bytesPerFrame
+	for i := 0; i < frames; i++ {
+		gain := float32(frames-1-i) / float32(fadeFrames)
+		off := tailStart + i*bytesPerFrame
+		for ch := 0; ch < 2; ch++ {
+			o := off + ch*2
+			v := int16(buf[o]) | int16(buf[o+1])<<8
+			v = int16(float32(v) * gain)
+			buf[o] = byte(v)
+			buf[o+1] = byte(v >> 8)
+		}
+	}
+}
+
 func (s *audioStream) Close() {
 	s.mu.Lock()
 	s.closed = true
@@ -125,6 +186,8 @@ func (s *audioStream) Close() {
 func (s *audioStream) Reset() {
 	s.mu.Lock()
 	s.buf.Reset()
+	s.primed = false
+	s.wasUnderrun = true
 	s.mu.Unlock()
 }
 
@@ -285,11 +348,11 @@ func appMain(driver gxui.Driver) {
 		SampleRate:   44100,
 		ChannelCount: 2,
 		Format:       oto.FormatSignedInt16LE,
-		// Use a 100 ms hardware buffer (down from the ~139 ms default).
-		// Together with the 47 ms player read-ahead this keeps total
-		// audio latency to ~147 ms, which is close enough to video
-		// latency (~50 ms decode+blit) to give acceptable A/V sync.
-		BufferSize: 100 * time.Millisecond,
+		// 300 ms hardware buffer.  Together with the prebuffer (400 ms)
+		// and the larger player read-ahead this is enough headroom to
+		// absorb the typical 32 KB / ~187 ms RDPSND chunk cadence without
+		// underruns.  Lip-sync drift of ~150 ms vs video is imperceptible.
+		BufferSize: 300 * time.Millisecond,
 	}
 	ctx, readyCh, otoErr := oto.NewContext(otoOp)
 	if otoErr != nil {
@@ -298,10 +361,11 @@ func appMain(driver gxui.Driver) {
 		<-readyCh
 		otoCtx = ctx
 		otoPlayer = otoCtx.NewPlayer(audioStr)
-		// Reduce the read-ahead buffer from the default ~500 ms to ~47 ms
-		// so that audio latency matches video latency and A/V sync is tight.
-		// 8192 bytes = 8192 / (44100 * 2 * 2) ≈ 46 ms of PCM stereo 16-bit.
-		otoPlayer.SetBufferSize(8192)
+		// 32768 bytes ≈ 186 ms of PCM stereo 16-bit at 44.1 kHz.
+		// Combined with the audioStream prebuffer this matches rdpyqt's
+		// hardware-buffer behaviour and keeps playback smooth across
+		// chunk boundaries.
+		otoPlayer.SetBufferSize(32768)
 		otoPlayer.Play()
 		slog.Debug("Audio output initialized")
 	}
