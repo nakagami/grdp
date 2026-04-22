@@ -140,6 +140,7 @@ func (g *GfxHandler) decodeAVC420(data []byte, destW, destH int) ([]byte, []avcR
 		return nil, nil
 	}
 	g.keyframeRequested = false
+	g.keyframeAttempts = 0
 	slog.Debug("RDPGFX: AVC420 decoded", "frameW", frame.Width, "frameH", frame.Height, "destW", destW, "destH", destH, "regions", len(stream.regions), "h264Len", len(stream.h264Data))
 	return cropBGRA(frame.Data, frame.Width, frame.Height, destW, destH), stream.regions
 }
@@ -175,6 +176,7 @@ func (g *GfxHandler) decodeAVC444(data []byte, destW, destH int) ([]byte, []avcR
 		return nil, nil
 	}
 	g.keyframeRequested = false
+	g.keyframeAttempts = 0
 	slog.Debug("RDPGFX: AVC444 decoded", "frameW", frame.Width, "frameH", frame.Height,
 		"destW", destW, "destH", destH, "h264Len", len(stream.h264Data))
 	return cropBGRA(frame.Data, frame.Width, frame.Height, destW, destH), stream.regions
@@ -217,6 +219,7 @@ func (g *GfxHandler) maybeRequestKeyframe() {
 	if n := g.h264dec.HardResetCount(); n != g.lastHardResetCount {
 		g.lastHardResetCount = n
 		g.keyframeRequested = false
+		g.keyframeAttempts = 0
 		g.lastKeyframeRequest = time.Time{}
 	}
 	// Rate-limit: maybeRequestKeyframe is only called when the decoder is
@@ -230,7 +233,13 @@ func (g *GfxHandler) maybeRequestKeyframe() {
 	}
 	g.keyframeRequested = true
 	g.lastKeyframeRequest = time.Now()
-	go g.onKeyframeNeeded()
+	g.keyframeAttempts++
+	// First two nudges use the lightweight RefreshRect.  If the server
+	// keeps ignoring them (typical Windows behaviour during active video
+	// playback), escalate to the full SuppressOutput off→on toggle which
+	// forces a complete display repaint and a guaranteed new IDR.
+	force := g.keyframeAttempts >= 3
+	go g.onKeyframeNeeded(force)
 }
 
 // cropBGRA crops or pads BGRA pixel data to the target dimensions.

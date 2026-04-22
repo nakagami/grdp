@@ -600,3 +600,22 @@ func (c *Client) SendRefreshRect(width, height uint16) {
 		Bottom:        height - 1,
 	})
 }
+
+// SendForceRefresh asks the server for a complete display repaint by toggling
+// SuppressOutput off→on.  Per MS-RDPBCGR 2.2.11.3.1, sending ALLOW_DISPLAY_UPDATES
+// after SUPPRESS_DISPLAY_UPDATES forces the server to send a fresh full-screen
+// update — for the RDPGFX H.264 pipeline this means a new IDR frame, which is
+// what we need to recover after a hardware-decoder hard reset.  Plain
+// SendRefreshRect is sometimes silently ignored by Windows servers while a
+// video stream is active; this is the reliable fallback used by mstsc/FreeRDP.
+func (c *Client) SendForceRefresh(width, height uint16) {
+	slog.Debug("PDU: SendForceRefresh (suppress→allow)", "w", width, "h", height)
+	c.sendDataPDU(&SuppressOutputPDU{
+		AllowDisplayUpdates: 0x00, // SUPPRESS_DISPLAY_UPDATES
+	})
+	c.sendDataPDU(&SuppressOutputPDU{
+		AllowDisplayUpdates: 0x01, // ALLOW_DISPLAY_UPDATES
+		Right:               width - 1,
+		Bottom:              height - 1,
+	})
+}
