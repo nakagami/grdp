@@ -395,48 +395,103 @@ func rlgr3Decode(data []byte, outputSize int, dst []int16) []int16 {
 }
 
 // rlgrBitReader reads bits MSB-first from a byte slice.
+//
+// To minimise the per-bit cost on the RLGR hot path we keep a 64-bit
+// shift-register (`acc`, MSB-aligned with `bitsInAcc` valid bits at the top)
+// fed from `data[bytePos:]`. Reads up to 32 bits are a shift+mask, and runs
+// of identical bits are extracted with a single `bits.LeadingZeros64`.
 type rlgrBitReader struct {
-	data    []byte
-	bytePos int
-	bitPos  int // 0=MSB, 7=LSB
-	total   int
-	read    int
+	data      []byte
+	bytePos   int    // next byte to load into acc
+	acc       uint64 // bits aligned to MSB
+	bitsInAcc int    // number of valid bits in acc (MSB-aligned)
+	total     int    // total bits available (data*8)
+	read      int    // bits consumed
 }
 
 func (br *rlgrBitReader) remaining() int {
 	return br.total - br.read
 }
 
+// fill loads bytes into the high end of acc until at least `need` bits are
+// buffered or the input is exhausted. need must be <= 56.
+func (br *rlgrBitReader) fill(need int) {
+	for br.bitsInAcc < need && br.bytePos < len(br.data) {
+		br.acc |= uint64(br.data[br.bytePos]) << uint(56-br.bitsInAcc)
+		br.bytePos++
+		br.bitsInAcc += 8
+	}
+}
+
 func (br *rlgrBitReader) readBits(n int) uint32 {
-	val := uint32(0)
-	for i := 0; i < n; i++ {
-		if br.read >= br.total {
-			return val
-		}
-		bit := (br.data[br.bytePos] >> uint(7-br.bitPos)) & 1
-		val = (val << 1) | uint32(bit)
-		br.bitPos++
-		br.read++
-		if br.bitPos >= 8 {
-			br.bitPos = 0
-			br.bytePos++
-		}
+	if n <= 0 {
+		return 0
+	}
+	if br.bitsInAcc < n {
+		br.fill(n)
+	}
+	avail := br.bitsInAcc
+	if avail > n {
+		avail = n
+	}
+	var val uint32
+	if avail > 0 {
+		val = uint32(br.acc >> uint(64-avail))
+		br.acc <<= uint(avail)
+		br.bitsInAcc -= avail
+		br.read += avail
+	}
+	if avail < n {
+		// Past EOF: pad with zeros, but mark them as consumed so
+		// subsequent remaining() accurately reports underflow.
+		val <<= uint(n - avail)
+		br.read += n - avail
 	}
 	return val
 }
 
-// countLeadingBits counts consecutive bits matching 'target' (0 or 1),
-// then skips the terminator bit (the opposite). Returns the count.
+// countLeadingBits counts consecutive bits matching 'target' (0 or 1) and
+// then consumes (skips) the terminator bit of the opposite value.
 func (br *rlgrBitReader) countLeadingBits(target uint32) uint32 {
 	count := uint32(0)
-	for br.remaining() > 0 {
-		bit := br.readBits(1)
-		if bit == target {
-			count++
-		} else {
-			// This is the terminator bit
+	for {
+		if br.bitsInAcc < 56 && br.bytePos < len(br.data) {
+			br.fill(56)
+		}
+		if br.bitsInAcc == 0 {
 			return count
 		}
+		var run int
+		if target == 0 {
+			// Run of 0s ends at the first 1 bit.
+			lz := bits.LeadingZeros64(br.acc)
+			if lz >= br.bitsInAcc {
+				// Entire buffered window is zeros — consume all and refill.
+				count += uint32(br.bitsInAcc)
+				br.read += br.bitsInAcc
+				br.acc = 0
+				br.bitsInAcc = 0
+				continue
+			}
+			run = lz
+		} else {
+			// Run of 1s ends at the first 0 bit. Inverting maps it to LZ.
+			lo := bits.LeadingZeros64(^br.acc)
+			if lo >= br.bitsInAcc {
+				count += uint32(br.bitsInAcc)
+				br.read += br.bitsInAcc
+				br.acc = 0
+				br.bitsInAcc = 0
+				continue
+			}
+			run = lo
+		}
+		// Consume `run` matching bits plus the single terminator bit.
+		consume := run + 1
+		count += uint32(run)
+		br.acc <<= uint(consume)
+		br.bitsInAcc -= consume
+		br.read += consume
+		return count
 	}
-	return count
 }

@@ -417,18 +417,33 @@ func rfxPlaceTileAbs(yCoeffs, cbCoeffs, crCoeffs []int16, tileX, tileY int, outp
 		return
 	}
 
+	stride := outW * 4
 	for row := 0; row < tileH; row++ {
+		// Bound-check the destination row once per row, then drop bounds
+		// checks on the per-pixel writes via a fixed-length slice.
+		dstStart := ((tileY+row)*outW + tileX) * 4
+		dstEnd := dstStart + tileW*4
+		if dstStart < 0 || dstEnd > len(output) {
+			continue
+		}
+		dstRow := output[dstStart:dstEnd:dstEnd]
+		srcOff := row * rfxTileSize
+		yRow := yCoeffs[srcOff : srcOff+tileW : srcOff+tileW]
+		cbRow := cbCoeffs[srcOff : srcOff+tileW : srcOff+tileW]
+		crRow := crCoeffs[srcOff : srcOff+tileW : srcOff+tileW]
+		_ = stride
 		for col := 0; col < tileW; col++ {
-			idx := row*rfxTileSize + col
-			yVal := int64(yCoeffs[idx])
-			cb := int64(cbCoeffs[idx])
-			cr := int64(crCoeffs[idx])
+			yVal := int32(yRow[col])
+			cb := int32(cbRow[col])
+			cr := int32(crRow[col])
 
-			// ICT (YCbCr \u2192 RGB) with fixed-point arithmetic
+			// ICT (YCbCr → RGB) with fixed-point arithmetic. Scaled
+			// coefficients fit in int32: |y| < 4096, |cb,cr| < 4096
+			// so the largest product (cb*115992) fits in ~28 bits.
 			yScaled := (yVal + 4096) << 16
-			r := int32((cr*91916 + yScaled) >> 21)
-			g := int32((yScaled - cb*22527 - cr*46819) >> 21)
-			b := int32((cb*115992 + yScaled) >> 21)
+			r := (cr*91916 + yScaled) >> 21
+			g := (yScaled - cb*22527 - cr*46819) >> 21
+			b := (cb*115992 + yScaled) >> 21
 
 			if r < 0 {
 				r = 0
@@ -446,13 +461,11 @@ func rfxPlaceTileAbs(yCoeffs, cbCoeffs, crCoeffs []int16, tileX, tileY int, outp
 				b = 255
 			}
 
-			outIdx := ((tileY+row)*outW + (tileX + col)) * 4
-			if outIdx+3 < len(output) {
-				output[outIdx] = byte(b)
-				output[outIdx+1] = byte(g)
-				output[outIdx+2] = byte(r)
-				output[outIdx+3] = 0xFF
-			}
+			i := col * 4
+			dstRow[i] = byte(b)
+			dstRow[i+1] = byte(g)
+			dstRow[i+2] = byte(r)
+			dstRow[i+3] = 0xFF
 		}
 	}
 }

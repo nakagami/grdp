@@ -344,18 +344,17 @@ func (g *GfxHandler) Process(data []byte) {
 		return
 	}
 
-	// Queue decompressed data for async processing (ACKs + decode).
-	// Copy the slice so the decompression buffers can be reused.
-	msg := make([]byte, len(decompressed))
-	copy(msg, decompressed)
+	// decompressSegment / decompressMultipart already return owned
+	// buffers (freshly allocated or copied from input) so we can hand
+	// the slice directly to the async decode goroutine.
 	select {
-	case g.decodeCh <- msg:
+	case g.decodeCh <- decompressed:
 	default:
 		// Channel full — video decode is dropped, but we must still
 		// ACK any EndFrame PDUs so the server's outstanding-frame
 		// count stays accurate and it keeps sending.
 		slog.Warn("RDPGFX: decodeCh full, dropping frame (ACKs preserved)", "queueCap", cap(g.decodeCh))
-		g.ackDroppedFrames(msg)
+		g.ackDroppedFrames(decompressed)
 	}
 }
 
@@ -396,7 +395,12 @@ func (g *GfxHandler) decompressSegment(seg []byte) []byte {
 		return g.zgfx.Decompress(payload)
 	}
 	g.zgfx.historyWrite(payload)
-	return payload
+	// Return a copy: payload aliases the caller's network buffer, which
+	// will be reused on the next read. Callers (Process) hand the slice
+	// off to the async decode goroutine and must own the memory.
+	owned := make([]byte, len(payload))
+	copy(owned, payload)
+	return owned
 }
 
 // decompressMultipart handles ZGFX multipart segments and returns the
@@ -1070,26 +1074,44 @@ func decodePlanar(data []byte, w, h int) []byte {
 	applyDelta(bluePlane, w, h)
 
 	out := make([]byte, planeSize*4)
-	for i := 0; i < planeSize; i++ {
-		a := byte(0xFF)
-		if alphaPlane != nil && i < len(alphaPlane) {
-			a = alphaPlane[i]
+	// Hoist the per-pixel nil/length checks: clamp each plane to
+	// `planeSize` (zero-fill missing planes) so the inner loop has no
+	// branches and the bounds checks are eliminated.
+	rp := planeOrZero(redPlane, planeSize)
+	gp := planeOrZero(greenPlane, planeSize)
+	bp := planeOrZero(bluePlane, planeSize)
+	ap := alphaPlane
+	hasAlpha := ap != nil && len(ap) >= planeSize
+	if hasAlpha {
+		ap = ap[:planeSize]
+		for i := 0; i < planeSize; i++ {
+			j := i * 4
+			out[j] = bp[i]
+			out[j+1] = gp[i]
+			out[j+2] = rp[i]
+			out[j+3] = ap[i]
 		}
-		var rv, gv, bv byte
-		if redPlane != nil && i < len(redPlane) {
-			rv = redPlane[i]
+	} else {
+		for i := 0; i < planeSize; i++ {
+			j := i * 4
+			out[j] = bp[i]
+			out[j+1] = gp[i]
+			out[j+2] = rp[i]
+			out[j+3] = 0xFF
 		}
-		if greenPlane != nil && i < len(greenPlane) {
-			gv = greenPlane[i]
-		}
-		if bluePlane != nil && i < len(bluePlane) {
-			bv = bluePlane[i]
-		}
-		out[i*4] = bv
-		out[i*4+1] = gv
-		out[i*4+2] = rv
-		out[i*4+3] = a
 	}
+	return out
+}
+
+// planeOrZero returns a slice of exactly `size` bytes, either the input
+// plane (truncated if longer) or a zero-filled buffer when the plane is
+// nil or short.  Used to drop per-pixel nil/bounds checks in decodePlanar.
+func planeOrZero(plane []byte, size int) []byte {
+	if len(plane) >= size {
+		return plane[:size]
+	}
+	out := make([]byte, size)
+	copy(out, plane)
 	return out
 }
 
@@ -1162,9 +1184,15 @@ func applyDelta(plane []byte, w, h int) {
 	if plane == nil || len(plane) < w*h {
 		return
 	}
+	// Process row-by-row: previous row XORs into current row using
+	// fixed-length slices so the compiler eliminates per-element
+	// bounds checks and the index multiplications hoist.
 	for y := 1; y < h; y++ {
+		base := y * w
+		prev := plane[base-w : base : base]
+		cur := plane[base : base+w : base+w]
 		for x := 0; x < w; x++ {
-			plane[y*w+x] ^= plane[(y-1)*w+x]
+			cur[x] ^= prev[x]
 		}
 	}
 }
@@ -1198,15 +1226,22 @@ func (ctx *clearCodecCtx) decode(data []byte, w, h int) []byte {
 
 func decodeResidual(data []byte, w, h int, out []byte) {
 	for y := 0; y < h; y++ {
+		rowDstStart := y * w * 4
+		rowSrcStart := y * w * 3
+		rowDstEnd := rowDstStart + w*4
+		rowSrcEnd := rowSrcStart + w*3
+		if rowDstEnd > len(out) || rowSrcEnd > len(data) {
+			return
+		}
+		dst := out[rowDstStart:rowDstEnd:rowDstEnd]
+		src := data[rowSrcStart:rowSrcEnd:rowSrcEnd]
 		for x := 0; x < w; x++ {
-			si := (y*w + x) * 3
-			di := (y*w + x) * 4
-			if si+2 < len(data) && di+3 < len(out) {
-				out[di] = data[si]     // B
-				out[di+1] = data[si+1] // G
-				out[di+2] = data[si+2] // R
-				out[di+3] = 0xFF
-			}
+			si := x * 3
+			di := x * 4
+			dst[di] = src[si]
+			dst[di+1] = src[si+1]
+			dst[di+2] = src[si+2]
+			dst[di+3] = 0xFF
 		}
 	}
 }
@@ -1295,29 +1330,41 @@ func (ctx *clearCodecCtx) decodeBands(data []byte, surfW int, out []byte) {
 }
 
 func paintColumnBg(out []byte, surfW, x, yStart, height int, r, g, b uint8) {
+	if x < 0 || surfW <= 0 || x >= surfW {
+		return
+	}
 	for y := 0; y < height; y++ {
 		dy := yStart + y
 		idx := (dy*surfW + x) * 4
-		if idx+3 < len(out) {
-			out[idx] = b
-			out[idx+1] = g
-			out[idx+2] = r
-			out[idx+3] = 0xFF
+		if idx < 0 || idx+4 > len(out) {
+			continue
 		}
+		px := out[idx : idx+4 : idx+4]
+		px[0] = b
+		px[1] = g
+		px[2] = r
+		px[3] = 0xFF
 	}
 }
 
 func paintVBarPixels(out []byte, surfW, x, yStart, yOn int, entry vBarEntry) {
+	if x < 0 || surfW <= 0 || x >= surfW {
+		return
+	}
+	pixels := entry.pixels
 	for y := 0; y < entry.count; y++ {
 		si := y * 3
 		dy := yStart + yOn + y
 		di := (dy*surfW + x) * 4
-		if si+2 < len(entry.pixels) && di+3 < len(out) {
-			out[di] = entry.pixels[si]     // B
-			out[di+1] = entry.pixels[si+1] // G
-			out[di+2] = entry.pixels[si+2] // R
-			out[di+3] = 0xFF
+		if si+3 > len(pixels) || di < 0 || di+4 > len(out) {
+			continue
 		}
+		src := pixels[si : si+3 : si+3]
+		px := out[di : di+4 : di+4]
+		px[0] = src[0]
+		px[1] = src[1]
+		px[2] = src[2]
+		px[3] = 0xFF
 	}
 }
 
@@ -1337,18 +1384,26 @@ func decodeSubcodec(data []byte, surfW int, out []byte) {
 
 		if subcodecId == 0 {
 			// RAW BGR
+			rowSrc := int(width) * 3
+			rowDst := surfW * 4
 			for y := 0; y < int(height); y++ {
+				srcStart := y * rowSrc
+				srcEnd := srcStart + rowSrc
+				dy := int(yStart) + y
+				dstStart := dy*rowDst + int(xStart)*4
+				dstEnd := dstStart + int(width)*4
+				if srcEnd > len(bmpData) || dstStart < 0 || dstEnd > len(out) {
+					continue
+				}
+				src := bmpData[srcStart:srcEnd:srcEnd]
+				dst := out[dstStart:dstEnd:dstEnd]
 				for x := 0; x < int(width); x++ {
-					si := (y*int(width) + x) * 3
-					dy := int(yStart) + y
-					dx := int(xStart) + x
-					di := (dy*surfW + dx) * 4
-					if si+2 < len(bmpData) && di+3 < len(out) {
-						out[di] = bmpData[si]
-						out[di+1] = bmpData[si+1]
-						out[di+2] = bmpData[si+2]
-						out[di+3] = 0xFF
-					}
+					si := x * 3
+					di := x * 4
+					dst[di] = src[si]
+					dst[di+1] = src[si+1]
+					dst[di+2] = src[si+2]
+					dst[di+3] = 0xFF
 				}
 			}
 		}
