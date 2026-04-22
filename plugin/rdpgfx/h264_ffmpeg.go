@@ -140,12 +140,21 @@ static void grdp_sws_set_src_range(struct SwsContext *sws, int full_range) {
 import "C"
 
 import (
+	"bytes"
 	"fmt"
 	"log/slog"
 	"runtime"
 	"sync"
 	"unsafe"
 )
+
+// useSwscaleForYUV420 controls whether YUV420P/YUVJ420P frames are converted
+// to BGRA via swscale (SIMD-accelerated on x86_64) or via grdp_yuv420p_to_bgra
+// (a portable scalar C loop).  swscale is preferred where it is both correct
+// and fast; on ARM64 its non-accelerated yuv420p→bgra fallback ignores
+// sws_setColorspaceDetails and produces a strong green cast, so we fall back
+// to the hand-written loop there.
+var useSwscaleForYUV420 = runtime.GOARCH != "arm64"
 
 // avLogOnce ensures grdp_suppress_av_log is called only once per process.
 var avLogOnce sync.Once
@@ -365,8 +374,25 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 	// FFmpeg's "[h264 @ ...] sps_id out of range" errors are suppressed at
 	// the av_log level (AV_LOG_FATAL) set in newH264Decoder; grdp emits its
 	// own slog warning instead.
+	// Single pass over the Annex B stream: detect IDR/SPS NAL presence and
+	// (re)cache SPS/PPS in one walk.  Replaces three separate linear scans
+	// (h264ContainsKeyFrame ×2 + scanAndCacheParamSets).
+	scan := scanH264Packet(h264Data)
+	if scan.spsEnd > scan.spsStart {
+		nal := h264Data[scan.spsStart:scan.spsEnd]
+		if !bytes.Equal(nal, d.spsNAL) {
+			d.spsNAL = append(d.spsNAL[:0], nal...)
+		}
+	}
+	if scan.ppsEnd > scan.ppsStart {
+		nal := h264Data[scan.ppsStart:scan.ppsEnd]
+		if !bytes.Equal(nal, d.ppsNAL) {
+			d.ppsNAL = append(d.ppsNAL[:0], nal...)
+		}
+	}
+
 	if d.needsKeyFrame {
-		if !h264ContainsKeyFrame(h264Data) {
+		if !scan.hasKeyFrame {
 			d.keyframeWaitCount++
 			if d.keyframeWaitCount >= keyframeWaitLimit {
 				slog.Debug("H.264: no IDR received, proceeding without keyframe",
@@ -382,10 +408,6 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 			d.keyframeWaitCount = 0
 		}
 	}
-
-	// Scan and cache SPS/PPS NALs so we can prepend them after a hard reset
-	// recreates the HW decoder context (which loses all parameter sets).
-	d.scanAndCacheParamSets(h264Data)
 
 	// If the HW decoder has been stalled (silently returning null frames)
 	// for too long we DO NOT call avcodec_flush_buffers() — VideoToolbox
@@ -451,7 +473,7 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 	// natural GOP boundary.
 	if d.pendingHardReset {
 		d.pendingResetPackets++
-		if h264ContainsKeyFrame(h264Data) {
+		if scan.hasKeyFrame {
 			slog.Debug("H.264: deferred hard reset triggered by IDR arrival",
 				"pendingPackets", d.pendingResetPackets)
 			d.pendingHardReset = false
@@ -474,7 +496,7 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 	// (without SPS/PPS) after the first IDR of the session.
 	feedData := h264Data
 	if d.prependSPSNextIDR && d.useHW &&
-		h264ContainsKeyFrame(h264Data) &&
+		scan.hasKeyFrame &&
 		len(d.spsNAL) > 0 && len(d.ppsNAL) > 0 {
 		buf := make([]byte, 0, len(d.spsNAL)+len(d.ppsNAL)+len(h264Data))
 		buf = append(buf, d.spsNAL...)
@@ -486,10 +508,12 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 			"sps", len(d.spsNAL), "pps", len(d.ppsNAL), "idr", len(h264Data))
 	}
 
-	cData := C.CBytes(feedData)
-	defer C.free(cData)
-
-	d.packet.data = (*C.uint8_t)(cData)
+	// Pass the Go slice's backing array directly to avcodec_send_packet
+	// instead of allocating + copying via C.CBytes for every packet.
+	// FFmpeg copies the buffer internally for non-refcounted packets, so the
+	// memory only needs to remain valid for the duration of the C call —
+	// runtime.KeepAlive guarantees this.
+	d.packet.data = (*C.uint8_t)(unsafe.Pointer(&feedData[0]))
 	d.packet.size = C.int(len(feedData))
 
 	// Count packets sent to HW decoder (for init timeout tracking).
@@ -498,6 +522,13 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 	}
 
 	ret := C.avcodec_send_packet(d.codecCtx, d.packet)
+	// Make sure the Go-managed feedData backing array is not collected or
+	// moved while FFmpeg is reading from it inside the C call above.
+	runtime.KeepAlive(feedData)
+	// Drop the Go pointer from the AVPacket immediately so a subsequent
+	// avcodec_* call can't dereference stale memory.
+	d.packet.data = nil
+	d.packet.size = 0
 	if ret < 0 {
 		if d.useHW {
 			// After a hard reset the freshly-recreated decoder has no SPS/PPS
@@ -622,11 +653,13 @@ func (d *ffmpegDecoder) convertFrame() (*h264Frame, error) {
 	out := make([]byte, outSize)
 
 	// For planar YUV420P (both limited- and full-range variants), use our own
-	// BT.601 conversion instead of swscale.  On ARM64, swscale has no
-	// accelerated colorspace-conversion path for yuv420p→bgra and its
-	// non-accelerated fallback ignores sws_setColorspaceDetails, producing
-	// a strong green cast.  The hand-written C loop is guaranteed correct.
-	if srcFmt == C.AV_PIX_FMT_YUV420P || srcFmt == C.AV_PIX_FMT_YUVJ420P {
+	// BT.601 conversion instead of swscale on ARM64.  swscale has no
+	// accelerated colorspace-conversion path for yuv420p→bgra on ARM64 and
+	// its non-accelerated fallback ignores sws_setColorspaceDetails,
+	// producing a strong green cast.  On x86_64 swscale is both correct and
+	// significantly faster (SIMD-accelerated), so we route through swscale
+	// there and only fall back to the hand-written loop on ARM64.
+	if (srcFmt == C.AV_PIX_FMT_YUV420P || srcFmt == C.AV_PIX_FMT_YUVJ420P) && !useSwscaleForYUV420 {
 		fullRange := C.int(0)
 		if srcFmt == C.AV_PIX_FMT_YUVJ420P || srcFrame.color_range == 2 {
 			fullRange = 1
@@ -691,46 +724,30 @@ func (d *ffmpegDecoder) convertFrame() (*h264Frame, error) {
 	}, nil
 }
 
-// h264ContainsKeyFrame scans an Annex B H.264 bitstream and returns true if
-// it contains a SPS (type 7) or IDR slice (type 5) NAL unit.  Such a packet
-// carries all the parameter sets needed by a freshly-initialised decoder.
-func h264ContainsKeyFrame(data []byte) bool {
-	for i := 0; i < len(data)-3; i++ {
-		// Look for 3-byte or 4-byte Annex B start code.
-		var naluStart int
-		if data[i] == 0 && data[i+1] == 0 && data[i+2] == 1 {
-			naluStart = i + 3
-		} else if i+3 < len(data) && data[i] == 0 && data[i+1] == 0 &&
-			data[i+2] == 0 && data[i+3] == 1 {
-			naluStart = i + 4
-		} else {
-			continue
-		}
-		if naluStart >= len(data) {
-			break
-		}
-		naluType := data[naluStart] & 0x1F
-		if naluType == 5 || naluType == 7 { // IDR or SPS
-			return true
-		}
-	}
-	return false
+// scanResult holds the IDR-presence flag and SPS/PPS NAL boundaries (offsets
+// into the original packet, including Annex B start code) discovered during a
+// single linear walk of an Annex B H.264 packet.  Use scanH264Packet to
+// produce one.
+type scanResult struct {
+	hasKeyFrame                          bool
+	spsStart, spsEnd, ppsStart, ppsEnd int
 }
 
-// scanAndCacheParamSets walks an Annex B H.264 stream and caches any SPS
-// (NAL type 7) or PPS (NAL type 8) units it finds.  The cache is used by
-// hardResetHW() to feed parameter sets to a freshly recreated HW decoder
-// when the next IDR arrives — Windows RDPGFX servers send bare IDRs after
-// the initial parameter set exchange, so a fresh decoder cannot otherwise
-// decode them.  Mirrors rdpyqt avc.py:_parse_and_cache_nals.
-func (d *ffmpegDecoder) scanAndCacheParamSets(data []byte) {
+// scanH264Packet walks an Annex B H.264 packet exactly once, returning
+// whether it contains any IDR slice (NAL type 5) or SPS (NAL type 7) NAL
+// unit and recording the byte ranges for the most recent SPS/PPS NALs found
+// (start offset includes the Annex B start code).  Replaces what used to be
+// three separate linear scans (h264ContainsKeyFrame ×2 + scanAndCacheParamSets)
+// performed per-packet.
+func scanH264Packet(data []byte) scanResult {
+	var r scanResult
 	n := len(data)
 	i := 0
-	for i < n {
+	for i+3 < n {
 		var scLen int
-		if i+4 <= n && data[i] == 0 && data[i+1] == 0 && data[i+2] == 0 && data[i+3] == 1 {
+		if data[i] == 0 && data[i+1] == 0 && data[i+2] == 0 && data[i+3] == 1 {
 			scLen = 4
-		} else if i+3 <= n && data[i] == 0 && data[i+1] == 0 && data[i+2] == 1 {
+		} else if data[i] == 0 && data[i+1] == 0 && data[i+2] == 1 {
 			scLen = 3
 		} else {
 			i++
@@ -740,43 +757,30 @@ func (d *ffmpegDecoder) scanAndCacheParamSets(data []byte) {
 			break
 		}
 		nalType := data[i+scLen] & 0x1F
-		if nalType != 7 && nalType != 8 {
-			i += scLen + 1
+		if nalType == 5 || nalType == 7 {
+			r.hasKeyFrame = true
+		}
+		if nalType == 7 || nalType == 8 {
+			// Locate end of this NAL: next start code or end of buffer.
+			j := i + scLen + 1
+			for j < n {
+				if (j+3 < n && data[j] == 0 && data[j+1] == 0 && data[j+2] == 0 && data[j+3] == 1) ||
+					(j+2 < n && data[j] == 0 && data[j+1] == 0 && data[j+2] == 1) {
+					break
+				}
+				j++
+			}
+			if nalType == 7 {
+				r.spsStart, r.spsEnd = i, j
+			} else {
+				r.ppsStart, r.ppsEnd = i, j
+			}
+			i = j
 			continue
 		}
-		// Locate end of this NAL: next start code or end of buffer.
-		j := i + scLen + 1
-		for j < n {
-			if (j+4 <= n && data[j] == 0 && data[j+1] == 0 && data[j+2] == 0 && data[j+3] == 1) ||
-				(j+3 <= n && data[j] == 0 && data[j+1] == 0 && data[j+2] == 1) {
-				break
-			}
-			j++
-		}
-		nal := data[i:j]
-		if nalType == 7 {
-			if !bytesEqual(nal, d.spsNAL) {
-				d.spsNAL = append(d.spsNAL[:0], nal...)
-			}
-		} else {
-			if !bytesEqual(nal, d.ppsNAL) {
-				d.ppsNAL = append(d.ppsNAL[:0], nal...)
-			}
-		}
-		i = j
+		i += scLen + 1
 	}
-}
-
-func bytesEqual(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
+	return r
 }
 
 // hardResetHW destroys the AVCodecContext and recreates a fresh HW-accelerated
