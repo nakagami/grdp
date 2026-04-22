@@ -15,6 +15,13 @@ type h264Decoder interface {
 	// (IDR) before it can produce output.  This happens after a decoder
 	// reset; the caller should request a refresh from the server.
 	NeedsKeyframe() bool
+	// IsBroken reports whether the decoder is permanently unrecoverable.
+	// When true, the application should reconnect the RDP session to
+	// create a fresh decoder.
+	IsBroken() bool
+	// HardResetCount returns the number of hard resets performed so far.
+	// Callers can use this to detect a new reset and clear rate-limit state.
+	HardResetCount() int
 	// Close releases all resources held by the decoder.
 	Close()
 }

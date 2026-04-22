@@ -130,6 +130,7 @@ func (g *GfxHandler) decodeAVC420(data []byte, destW, destH int) []byte {
 	}
 	if frame == nil {
 		g.maybeRequestKeyframe()
+		g.maybeNotifyDecoderBroken()
 		slog.Debug("RDPGFX: H.264 decode returned nil frame (buffering?)")
 		return nil
 	}
@@ -165,12 +166,31 @@ func (g *GfxHandler) decodeAVC444(data []byte, destW, destH int) []byte {
 	}
 	if frame == nil {
 		g.maybeRequestKeyframe()
+		g.maybeNotifyDecoderBroken()
 		return nil
 	}
 	g.keyframeRequested = false
 	slog.Debug("RDPGFX: AVC444 decoded", "frameW", frame.Width, "frameH", frame.Height,
 		"destW", destW, "destH", destH, "h264Len", len(stream.h264Data))
 	return cropBGRA(frame.Data, frame.Width, frame.Height, destW, destH)
+}
+
+// maybeNotifyDecoderBroken calls onDecoderBroken (if set) once when the H.264
+// decoder reports it is permanently unrecoverable.  The callback is fired at
+// most once per GfxHandler so the caller can initiate a reconnect without
+// repeated calls.
+func (g *GfxHandler) maybeNotifyDecoderBroken() {
+	if g.onDecoderBroken == nil {
+		return
+	}
+	if g.decoderBrokenNotified {
+		return
+	}
+	if g.h264dec == nil || !g.h264dec.IsBroken() {
+		return
+	}
+	g.decoderBrokenNotified = true
+	go g.onDecoderBroken()
 }
 
 // maybeRequestKeyframe calls onKeyframeNeeded (if set) the first time the
@@ -184,6 +204,15 @@ func (g *GfxHandler) maybeRequestKeyframe() {
 	}
 	if !g.h264dec.NeedsKeyframe() {
 		return
+	}
+	// If the decoder just performed a hard reset, clear the rate-limit so we
+	// send a fresh SendRefreshRect immediately rather than waiting up to 3 s.
+	// Without this, the stall-nudge's lastKeyframeRequest timestamp blocks the
+	// post-reset request, and the server never learns it must send a new IDR.
+	if n := g.h264dec.HardResetCount(); n != g.lastHardResetCount {
+		g.lastHardResetCount = n
+		g.keyframeRequested = false
+		g.lastKeyframeRequest = time.Time{}
 	}
 	// Rate-limit: allow re-request if the previous one was more than 3 seconds ago.
 	if g.keyframeRequested && time.Since(g.lastKeyframeRequest) < 3*time.Second {
