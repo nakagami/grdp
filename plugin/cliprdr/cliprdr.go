@@ -1,13 +1,9 @@
-//go:build windows
-
 package cliprdr
 
 import (
 	"bytes"
 	"fmt"
 	"log/slog"
-	"os"
-	"strings"
 	"unicode/utf16"
 
 	"github.com/lunixbochs/struc"
@@ -23,15 +19,12 @@ type CliprdrClient struct {
 	canLockClipData       bool
 	hasHugeFileSupport    bool
 	formatIdMap           map[uint32]uint32
-	Files                 []FileDescriptor
 	reply                 chan []byte
-	Control
 }
 
 func NewCliprdrClient() *CliprdrClient {
 	c := &CliprdrClient{
 		formatIdMap: make(map[uint32]uint32, 20),
-		Files:       make([]FileDescriptor, 0, 20),
 		reply:       make(chan []byte, 100),
 	}
 
@@ -107,7 +100,7 @@ func (c *CliprdrClient) processClipCaps(b []byte) {
 	var cp CliprdrCapabilitiesPDU
 	err := struc.Unpack(r, &cp)
 	if err != nil {
-		slog.Error("err", err)
+		slog.Error("Failed to unpack", "error", err)
 		return
 	}
 	slog.Debug(fmt.Sprintf("Capabilities:%+v", cp))
@@ -116,11 +109,11 @@ func (c *CliprdrClient) processClipCaps(b []byte) {
 	c.fileClipNoFilePaths = cp.CapabilitySets[0].GeneralFlags&CB_FILECLIP_NO_FILE_PATHS != 0
 	c.canLockClipData = cp.CapabilitySets[0].GeneralFlags&CB_CAN_LOCK_CLIPDATA != 0
 	c.hasHugeFileSupport = cp.CapabilitySets[0].GeneralFlags&CB_HUGE_FILE_SUPPORT_ENABLED != 0
-	slog.Debug("UseLongFormatNames:", c.useLongFormatNames)
-	slog.Debug("StreamFileClipEnabled:", c.streamFileClipEnabled)
-	slog.Debug("FileClipNoFilePaths:", c.fileClipNoFilePaths)
-	slog.Debug("CanLockClipData:", c.canLockClipData)
-	slog.Debug("HasHugeFileSupport:", c.hasHugeFileSupport)
+	slog.Debug("UseLongFormatNames", "value", c.useLongFormatNames)
+	slog.Debug("StreamFileClipEnabled", "value", c.streamFileClipEnabled)
+	slog.Debug("FileClipNoFilePaths", "value", c.fileClipNoFilePaths)
+	slog.Debug("CanLockClipData", "value", c.canLockClipData)
+	slog.Debug("HasHugeFileSupport", "value", c.hasHugeFileSupport)
 }
 
 func (c *CliprdrClient) processMonitorReady(b []byte) {
@@ -129,79 +122,30 @@ func (c *CliprdrClient) processMonitorReady(b []byte) {
 }
 
 func (c *CliprdrClient) processFormatList(b []byte) {
-	c.withOpenClipboard(func() {
-		if !EmptyClipboard() {
-			slog.Error("EmptyClipboard failed")
-		}
-	})
-	fl, hasFile := c.readForamtList(b)
-	slog.Debug("numFormats:", fl.NumFormats)
-
-	if hasFile {
-		c.SendCliprdrMessage()
-	} else {
-		c.withOpenClipboard(func() {
-			if !EmptyClipboard() {
-				slog.Error("EmptyClipboard failed")
-			}
-			for i := range c.formatIdMap {
-				slog.Debug("i:", i)
-				SetClipboardData(i, 0)
-			}
-		})
-
-	}
-
+	EmptyClipboard()
+	fl, _ := c.readForamtList(b)
+	slog.Debug("numFormats", "count", fl.NumFormats)
 	c.sendFormatListResponse(CB_RESPONSE_OK)
 }
+
 func (c *CliprdrClient) processFormatListResponse(flag uint16, b []byte) {
 	if flag != CB_RESPONSE_OK {
 		slog.Error("Format List Response Failed")
 		return
 	}
-	slog.Error("Format List Response OK")
+	slog.Debug("Format List Response OK")
 }
-func getFilesDescriptor(name string) (FileDescriptor, error) {
-	var fd FileDescriptor
-	fd.Flags = FD_ATTRIBUTES | FD_FILESIZE | FD_WRITESTIME | FD_PROGRESSUI
-	f, e := os.Stat(name)
-	if e != nil {
-		slog.Error(e.Error())
-		return fd, e
-	}
-	fd.FileAttributes, fd.LastWriteTime,
-		fd.FileSizeHigh, fd.FileSizeLow = GetFileInfo(f.Sys())
-	fd.FileName = core.UnicodeEncode(name)
 
-	return fd, nil
-}
 func (c *CliprdrClient) processFormatDataRequest(b []byte) {
 	r := bytes.NewReader(b)
-	requestId, _ := core.ReadUInt32LE(r)
+	_, _ = core.ReadUInt32LE(r) // requestId
 
 	buff := &bytes.Buffer{}
-	if requestId == RegisterClipboardFormat(CFSTR_FILEDESCRIPTORW) {
-		fs := GetFileNames()
-		core.WriteUInt32LE(uint32(len(fs)), buff)
-		c.Files = c.Files[:0]
-		for _, v := range fs {
-			slog.Debug("Name:", v)
-			f, _ := getFilesDescriptor(v)
-			buff.Write(f.serialize())
-			for i := 0; i < 8; i++ {
-				buff.WriteByte(0)
-			}
-			c.Files = append(c.Files, f)
-
-		}
-	} else {
-		c.withOpenClipboard(func() {
-			data := GetClipboardData(requestId)
-			slog.Debug("data:", data)
-			buff.Write(core.UnicodeEncode(data))
-			buff.Write([]byte{0, 0})
-		})
-	}
+	// Text-only: directly get clipboard data for any text format
+	data := GetClipboardText()
+	slog.Debug("clipboard data", "content", data)
+	buff.Write(core.UnicodeEncode(data))
+	buff.Write([]byte{0, 0})
 
 	c.sendFormatDataResponse(buff.Bytes())
 }
@@ -213,41 +157,12 @@ func (c *CliprdrClient) processFormatDataResponse(flag uint16, b []byte) {
 }
 
 func (c *CliprdrClient) processFileContentsRequest(b []byte) {
-	r := bytes.NewReader(b)
-	var req CliprdrFileContentsRequest
-	struc.Unpack(r, &req)
-	if len(c.Files) <= int(req.Lindex) {
-		slog.Error("No found file:", req.Lindex)
-		c.sendFormatContentsResponse(req.StreamId, []byte{})
-		return
-	}
-	buff := &bytes.Buffer{}
-	f := c.Files[req.Lindex]
-	if req.DwFlags == FILECONTENTS_SIZE {
-		core.WriteUInt32LE(f.FileSizeLow, buff)
-		core.WriteUInt32LE(f.FileSizeHigh, buff)
-		c.sendFormatContentsResponse(req.StreamId, buff.Bytes())
-	} else if req.DwFlags == FILECONTENTS_RANGE {
-		name := core.UnicodeDecode(f.FileName)
-		fi, err := os.Open(name)
-		if err != nil {
-			slog.Error(err.Error())
-			return
-		}
-		defer fi.Close()
-		data := make([]byte, req.CbRequested)
-		n, _ := fi.ReadAt(data, int64(f.FileSizeHigh))
-		c.sendFormatContentsResponse(req.StreamId, data[:n])
-	}
+	// Text-only mode doesn't support file transfer
+	slog.Debug("File transfer not supported in text-only mode")
 }
+
 func (c *CliprdrClient) processFileContentsResponse(flag uint16, b []byte) {
-	if flag != CB_RESPONSE_OK {
-		slog.Error("File Contents Response Failed")
-	}
-	var resp CliprdrFileContentsResponse
-	resp.Unpack(b)
-	slog.Debug("Get File Contents Response:", resp.StreamId, resp.CbRequested)
-	c.reply <- resp.RequestedData
+	// Text-only mode doesn't support file transfer
 }
 func (c *CliprdrClient) processLockClipData(b []byte) {
 	r := bytes.NewReader(b)
@@ -262,14 +177,13 @@ func (c *CliprdrClient) processUnlockClipData(b []byte) {
 }
 
 func (c *CliprdrClient) sendClientCapabilitiesPDU() {
-	slog.Debug("Send Client Clipboard Capabilities PDU")
+	slog.Debug("Send Client Clipboard Capabilities PDU (text-only mode)")
 	var cs CliprdrGeneralCapabilitySet
 	cs.CapabilitySetLength = 12
 	cs.CapabilitySetType = CB_CAPSTYPE_GENERAL
 	cs.Version = CB_CAPS_VERSION_2
-	cs.GeneralFlags = CB_USE_LONG_FORMAT_NAMES |
-		CB_STREAM_FILECLIP_ENABLED |
-		CB_FILECLIP_NO_FILE_PATHS
+	// Text-only mode: only use long format names
+	cs.GeneralFlags = CB_USE_LONG_FORMAT_NAMES
 	body := &bytes.Buffer{}
 	core.WriteUInt16LE(1, body) // cCapabilitiesSets
 	core.WriteUInt16LE(0, body) // pad
@@ -278,17 +192,13 @@ func (c *CliprdrClient) sendClientCapabilitiesPDU() {
 }
 
 func (c *CliprdrClient) sendTemporaryDirectoryPDU() {
-	slog.Debug("Send Temporary Directory PDU")
-	body := make([]byte, 260)
-	copy(body, core.UnicodeEncode(os.TempDir()))
-	sendClipPDU(c.w, CB_TEMP_DIRECTORY, 0, body)
+	slog.Debug("Send Temporary Directory PDU (ignored in text-only mode)")
 }
 
 func (c *CliprdrClient) sendFormatListPDU() {
-	slog.Debug("Send Format List PDU")
-	formats := GetFormatList(c.hwnd)
-	slog.Debug("NumFormats:", len(formats))
-	slog.Debug("Formats:", formats)
+	slog.Debug("Send Format List PDU (text formats only)")
+	formats := GetFormatList()
+	slog.Debug("available formats", "count", len(formats), "formats", formats)
 
 	body := &bytes.Buffer{}
 	for _, v := range formats {
@@ -308,7 +218,6 @@ func (c *CliprdrClient) readForamtList(b []byte) (*CliprdrFormatList, bool) {
 	r := bytes.NewReader(b)
 	fs := make([]CliprdrFormat, 0, 20)
 	var numFormats uint32 = 0
-	hasFile := false
 	c.formatIdMap = make(map[uint32]uint32, 0)
 	for r.Len() > 0 {
 		foramtId, _ := core.ReadUInt32LE(r)
@@ -322,13 +231,10 @@ func (c *CliprdrClient) readForamtList(b []byte) (*CliprdrFormatList, bool) {
 			bs = append(bs, b)
 		}
 		name := string(utf16.Decode(bs))
-		if strings.EqualFold(name, CFSTR_FILEDESCRIPTORW) {
-			hasFile = true
-		}
 		slog.Debug(fmt.Sprintf("Format:%d Name:<%s>", foramtId, name))
 		if name != "" {
 			localId := RegisterClipboardFormat(name)
-			slog.Debug("local:", localId, "remote:", foramtId)
+			slog.Debug("format mapping", "local", localId, "remote", foramtId)
 			c.formatIdMap[localId] = foramtId
 		} else {
 			c.formatIdMap[foramtId] = foramtId
@@ -338,7 +244,7 @@ func (c *CliprdrClient) readForamtList(b []byte) (*CliprdrFormatList, bool) {
 		fs = append(fs, CliprdrFormat{foramtId, name})
 	}
 
-	return &CliprdrFormatList{numFormats, fs}, hasFile
+	return &CliprdrFormatList{numFormats, fs}, false
 }
 
 func (c *CliprdrClient) sendFormatListResponse(flags uint16) {
@@ -356,40 +262,4 @@ func (c *CliprdrClient) sendFormatDataRequest(id uint32) {
 func (c *CliprdrClient) sendFormatDataResponse(b []byte) {
 	slog.Debug("Send Format Data Response")
 	sendClipPDU(c.w, CB_FORMAT_DATA_RESPONSE, CB_RESPONSE_OK, b)
-}
-
-func (c *CliprdrClient) sendFormatContentsRequest(r CliprdrFileContentsRequest) {
-	slog.Debug("Send Format Contents Request")
-	slog.Debug(fmt.Sprintf("Format Contents Request:%+v", r))
-	body := &bytes.Buffer{}
-	core.WriteUInt32LE(r.StreamId, body)
-	core.WriteUInt32LE(uint32(r.Lindex), body)
-	core.WriteUInt32LE(r.DwFlags, body)
-	core.WriteUInt32LE(r.NPositionLow, body)
-	core.WriteUInt32LE(r.NPositionHigh, body)
-	core.WriteUInt32LE(r.CbRequested, body)
-	core.WriteUInt32LE(r.ClipDataId, body)
-	sendClipPDU(c.w, CB_FILECONTENTS_REQUEST, 0, body.Bytes())
-}
-
-func (c *CliprdrClient) sendFormatContentsResponse(streamId uint32, b []byte) {
-	slog.Debug("Send Format Contents Response")
-	body := &bytes.Buffer{}
-	core.WriteUInt32LE(streamId, body)
-	core.WriteBytes(b, body)
-	sendClipPDU(c.w, CB_FILECONTENTS_RESPONSE, CB_RESPONSE_OK, body.Bytes())
-}
-
-func (c *CliprdrClient) sendLockClipData() {
-	slog.Debug("Send Lock Clip Data")
-	body := &bytes.Buffer{}
-	core.WriteUInt32LE(0, body) // ClipDataId
-	sendClipPDU(c.w, CB_LOCK_CLIPDATA, 0, body.Bytes())
-}
-
-func (c *CliprdrClient) sendUnlockClipData() {
-	slog.Debug("Send Unlock Clip Data")
-	body := &bytes.Buffer{}
-	core.WriteUInt32LE(0, body) // ClipDataId
-	sendClipPDU(c.w, CB_UNLOCK_CLIPDATA, 0, body.Bytes())
 }
