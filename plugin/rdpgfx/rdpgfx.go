@@ -155,6 +155,16 @@ type GfxHandler struct {
 	onKeyframeNeeded    func()
 	keyframeRequested   bool
 	lastKeyframeRequest time.Time
+	// onDecoderBroken is called once when the H.264 decoder becomes permanently
+	// unrecoverable.  The caller should reconnect the RDP session to create a
+	// fresh decoder.
+	onDecoderBroken        func()
+	decoderBrokenNotified  bool
+	// lastHardResetCount tracks the decoder's hard-reset count so we can
+	// detect a new reset and immediately clear the keyframe rate-limit.
+	// After a hard reset the decoder wants a fresh IDR urgently; we must
+	// not wait up to 3 s for the rate-limit window to expire.
+	lastHardResetCount int
 }
 
 // NewGfxHandler creates a new RDPGFX handler.
@@ -187,6 +197,14 @@ func (g *GfxHandler) SetSendFunc(fn func([]byte)) {
 // starts a new GOP and decoding can resume promptly.
 func (g *GfxHandler) SetKeyframeNeededCallback(fn func()) {
 	g.onKeyframeNeeded = fn
+}
+
+// SetDecoderBrokenCallback registers a function that is called once when the
+// H.264 decoder becomes permanently unrecoverable (all hard-reset retries
+// exhausted).  The callback should reconnect the RDP session so a fresh
+// decoder can be created from scratch.
+func (g *GfxHandler) SetDecoderBrokenCallback(fn func()) {
+	g.onDecoderBroken = fn
 }
 
 // OnChannelCreated is called after the DVC CREATE_RSP has been sent.

@@ -316,6 +316,14 @@ func (g *RdpClient) doLogin(routingToken []byte) error {
 	gfxHandler.SetKeyframeNeededCallback(func() {
 		g.pdu.SendRefreshRect(uint16(g.width), uint16(g.height))
 	})
+	gfxHandler.SetDecoderBrokenCallback(func() {
+		slog.Warn("H.264 decoder broken; reconnecting RDP session")
+		go func() {
+			if err := g.Reconnect(g.width, g.height); err != nil {
+				slog.Warn("Reconnect after decoder broken failed", "err", err)
+			}
+		}()
+	})
 	dvcClient.RegisterHandler(rdpgfx.ChannelName, gfxHandler)
 
 	// Reject Video Optimized Remoting (VOR) channels so the server keeps

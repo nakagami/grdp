@@ -182,6 +182,17 @@ const hwHardErrorThreshold = 5
 // SW decoder anyway; FFmpeg's error-concealment keeps the session alive.
 const keyframeWaitLimit = 150
 
+// hwPostResetStuckThreshold is the maximum number of packets that can be
+// delivered to a freshly hard-reset HW decoder (hwReady == false, i.e. after
+// the first hardReset call) without producing any decoded frame before we
+// consider the decoder permanently stuck and either retry the reset or mark it
+// broken.  At ~30 fps this corresponds to roughly 10 seconds of no output.
+const hwPostResetStuckThreshold = 300
+
+// hwMaxRecoveries is the maximum number of hard resets attempted before the
+// decoder is marked broken and the application-level watchdog reconnects.
+const hwMaxRecoveries = 3
+
 type ffmpegDecoder struct {
 	codecCtx  *C.AVCodecContext
 	packet    *C.AVPacket
@@ -221,6 +232,22 @@ type ffmpegDecoder struct {
 	// the server happens to send (rdpyqt avc.py:140-166).
 	wantsServerRefresh bool
 	stallCycles        int  // consecutive HW stall→nudge cycles without any successful decode in between
+
+	// postResetPackets counts packets delivered to the decoder while
+	// hwReady == false *after* at least one hard reset (hwRecoveries > 0).
+	// If this exceeds hwPostResetStuckThreshold without a decoded frame we
+	// retry the hard reset or mark the decoder broken.
+	postResetPackets int
+
+	// pendingHardReset is true when the decoder has detected an unrecoverable
+	// VT stall but is waiting for the next IDR before performing the reset.
+	// This avoids the ~10 s wait per reset cycle that occurs when we reset
+	// mid-GOP: the server will not send a new IDR until the current GOP ends
+	// unless we can catch the IDR at the reset boundary.  Once the IDR
+	// arrives we do the reset and immediately feed the IDR so the fresh
+	// context starts decoding without delay.
+	pendingHardReset    bool
+	pendingResetPackets int
 }
 
 func newH264Decoder() h264Decoder {
@@ -306,6 +333,16 @@ func (d *ffmpegDecoder) NeedsKeyframe() bool {
 	return d.needsKeyFrame || d.wantsServerRefresh
 }
 
+func (d *ffmpegDecoder) IsBroken() bool {
+	return d.broken
+}
+
+// HardResetCount returns the number of hard resets performed so far.
+// GfxHandler uses this to detect a new reset and clear its keyframe rate-limit.
+func (d *ffmpegDecoder) HardResetCount() int {
+	return d.hwRecoveries
+}
+
 func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 	if len(h264Data) == 0 {
 		return nil, nil
@@ -371,22 +408,63 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 			// recreate works.  Mirrors rdpyqt avc.py:_hard_reset escalation.
 			const hwStuckCycles = 2
 			if d.stallCycles >= hwStuckCycles {
-				slog.Debug("H.264: HW decoder stuck across multiple nudge cycles, hard reset",
-					"stallCycles", d.stallCycles)
+				// Do NOT hard-reset immediately.  We are almost certainly
+				// mid-GOP: the server won't send a new IDR until the current
+				// GOP ends, so resetting now means waiting ~10 s for the next
+				// IDR before the decoder can produce frames again.  Instead,
+				// defer the reset until the next IDR arrives so we can feed it
+				// immediately to the fresh context (zero wait).
 				d.stallCycles = 0
 				d.stallCount = 0
-				d.hardResetHW()
-				return nil, nil
+				if !d.pendingHardReset {
+					slog.Debug("H.264: HW decoder stuck, deferring hard reset until next IDR")
+					d.pendingHardReset = true
+					d.pendingResetPackets = 0
+				}
+				d.wantsServerRefresh = true
+				// fall through and keep feeding packets to the decoder
+			} else {
+				slog.Debug("H.264: HW decoder stalled, nudging server for IDR (no drop, no flush)",
+					"stallCount", d.stallCount, "cycle", d.stallCycles)
+				d.wantsServerRefresh = true
+				d.stallCount = 0
+				// fall through and feed this packet to the decoder
 			}
-			slog.Debug("H.264: HW decoder stalled, nudging server for IDR (no drop, no flush)",
-				"stallCount", d.stallCount, "cycle", d.stallCycles)
-			d.wantsServerRefresh = true
-			d.stallCount = 0
-			// fall through and feed this packet to the decoder
 		} else {
 			slog.Debug("H.264: SW decoder stalled, flushing", "stallCount", d.stallCount)
 			C.avcodec_flush_buffers(d.codecCtx)
 			d.stallCount = 0
+		}
+	}
+
+	// If a hard reset is pending (deferred from the stall-stuck detection above),
+	// check whether this packet is an IDR.  If so, perform the reset now and
+	// immediately feed the IDR to the new context — zero wait, no server round-
+	// trip needed.
+	//
+	// If no IDR arrives within hwPostResetStuckThreshold packets we conclude
+	// that the server's GOP is longer than the wait window (or SendRefreshRect
+	// is not being honoured).  In that case we mark the decoder broken so the
+	// application-level watchdog reconnects immediately.  Reconnecting is much
+	// faster than cycling through hwMaxRecoveries hard-reset retries (~10 s
+	// each) while waiting for an IDR that may never arrive before the next
+	// natural GOP boundary.
+	if d.pendingHardReset {
+		d.pendingResetPackets++
+		if h264ContainsKeyFrame(h264Data) {
+			slog.Debug("H.264: deferred hard reset triggered by IDR arrival",
+				"pendingPackets", d.pendingResetPackets)
+			d.pendingHardReset = false
+			d.hardResetHW()
+			// prependSPSNextIDR is now true; fall through so the prepend
+			// block and avcodec_send_packet run with the fresh context.
+		} else if d.pendingResetPackets >= hwPostResetStuckThreshold {
+			slog.Warn("H.264: deferred reset timed out waiting for IDR; marking decoder broken for reconnect",
+				"pendingPackets", d.pendingResetPackets)
+			d.pendingHardReset = false
+			d.broken = true
+			d.wantsServerRefresh = false
+			return nil, nil
 		}
 	}
 
@@ -429,11 +507,28 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 			// the cycle.  Mirrors rdpyqt avc.py where decode() returning
 			// silently for non-IDR packets does not increment _hw_error_count.
 			// We ask the GfxHandler to nudge the server (via wantsServerRefresh)
-			// so an IDR arrives soon.  If the server never produces a usable
-			// frame, no bitmaps flow and the application-level watchdog
-			// reconnects.
+			// so an IDR arrives soon.
 			if !d.hwReady {
 				d.wantsServerRefresh = true
+				if d.hwRecoveries > 0 {
+					// We are in the post-hard-reset window.  Count packets so
+					// that if the server never delivers a usable IDR we can
+					// detect the permanent-freeze state and retry / give up.
+					d.postResetPackets++
+					if d.postResetPackets >= hwPostResetStuckThreshold {
+						if d.hwRecoveries < hwMaxRecoveries {
+							slog.Debug("H.264: HW decoder stuck after hard reset, retrying",
+								"postResetPackets", d.postResetPackets,
+								"attempt", d.hwRecoveries+1)
+							d.hardResetHW()
+						} else {
+							slog.Warn("H.264: HW decoder unrecoverable after max resets, marking broken",
+								"hwRecoveries", d.hwRecoveries)
+							d.broken = true
+							d.wantsServerRefresh = false
+						}
+					}
+				}
 				return nil, nil
 			}
 			// VideoToolbox hard error.  flush_buffers cannot recover this;
@@ -772,6 +867,9 @@ func (d *ffmpegDecoder) hardResetHW() {
 	d.hwReady = false
 	d.hwSentCount = 0
 	d.hwErrorCount = 0
+	d.postResetPackets = 0
+	d.pendingHardReset = false
+	d.pendingResetPackets = 0
 	// Ask the GfxHandler to nudge the server for a fresh IDR.  Until that
 	// IDR arrives, send_packet on P-frames is expected to fail silently
 	// (handled in Decode where !d.hwReady suppresses the hard-reset cascade).
