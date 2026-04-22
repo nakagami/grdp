@@ -200,8 +200,11 @@ func (d *rfxDecoder) decodeTileset(data []byte, left, top int, surfData []byte, 
 	}
 
 	// Decode tiles concurrently — each tile writes to its own non-overlapping
-	// 64×64 region of the output buffer so no locking is needed.
-	if len(tiles) > 1 {
+	// 64×64 region of the output buffer so no locking is needed. For small
+	// tile counts the goroutine + channel + WaitGroup overhead exceeds the
+	// per-tile work, so fall back to serial decoding below the threshold.
+	const parallelTileThreshold = 4
+	if len(tiles) >= parallelTileThreshold {
 		workers := runtime.NumCPU()
 		if workers > len(tiles) {
 			workers = len(tiles)
@@ -227,8 +230,10 @@ func (d *rfxDecoder) decodeTileset(data []byte, left, top int, surfData []byte, 
 			}()
 		}
 		wg.Wait()
-	} else if len(tiles) == 1 {
-		d.decodeTile(tiles[0].content, quants, rlgrMode, left, top, surfData, width, height)
+	} else {
+		for _, t := range tiles {
+			d.decodeTile(t.content, quants, rlgrMode, left, top, surfData, width, height)
+		}
 	}
 
 	return quants
