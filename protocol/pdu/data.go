@@ -1622,9 +1622,22 @@ type PointerEvent struct {
 }
 
 func (p *PointerEvent) Serialize() []byte {
-	buff := &bytes.Buffer{}
-	struc.Pack(buff, p)
-	return buff.Bytes()
+	return []byte{
+		byte(p.PointerFlags), byte(p.PointerFlags >> 8),
+		byte(p.XPos), byte(p.XPos >> 8),
+		byte(p.YPos), byte(p.YPos >> 8),
+	}
+}
+
+// FastPathEncode appends this mouse event in the Fast-Path Input wire format
+// (MS-RDPBCGR §2.2.8.1.2.2.3) to buf and returns the new slice.
+func (p *PointerEvent) FastPathEncode(buf []byte) []byte {
+	buf = append(buf, byte(FASTPATH_INPUT_EVENT_MOUSE<<5))
+	buf = append(buf,
+		byte(p.PointerFlags), byte(p.PointerFlags>>8),
+		byte(p.XPos), byte(p.XPos>>8),
+		byte(p.YPos), byte(p.YPos>>8))
+	return buf
 }
 
 type SynchronizeEvent struct {
@@ -1633,9 +1646,11 @@ type SynchronizeEvent struct {
 }
 
 func (p *SynchronizeEvent) Serialize() []byte {
-	buff := &bytes.Buffer{}
-	struc.Pack(buff, p)
-	return buff.Bytes()
+	return []byte{
+		byte(p.Pad2Octets), byte(p.Pad2Octets >> 8),
+		byte(p.ToggleFlags), byte(p.ToggleFlags >> 8),
+		byte(p.ToggleFlags >> 16), byte(p.ToggleFlags >> 24),
+	}
 }
 
 type ScancodeKeyEvent struct {
@@ -1645,9 +1660,35 @@ type ScancodeKeyEvent struct {
 }
 
 func (p *ScancodeKeyEvent) Serialize() []byte {
-	buff := &bytes.Buffer{}
-	struc.Pack(buff, p)
-	return buff.Bytes()
+	return []byte{
+		byte(p.KeyboardFlags), byte(p.KeyboardFlags >> 8),
+		byte(p.KeyCode), byte(p.KeyCode >> 8),
+		byte(p.Pad2Octets), byte(p.Pad2Octets >> 8),
+	}
+}
+
+// FastPathEncode appends this scancode event in the Fast-Path Input wire
+// format (MS-RDPBCGR §2.2.8.1.2.2.1) to buf and returns the new slice.
+//
+// Slow-path callers in this codebase historically encoded extended keys by
+// stuffing the 0xE0 prefix into the high byte of KeyCode (e.g. 0xE048 for
+// the up-arrow) and leaving KBDFLAGS_EXTENDED unset.  Fast-path can only
+// carry an 8-bit make code, so we promote any 0xE0XX encoding to the proper
+// EXTENDED flag here.
+func (p *ScancodeKeyEvent) FastPathEncode(buf []byte) []byte {
+	flags := byte(0)
+	if p.KeyboardFlags&KBDFLAGS_RELEASE != 0 {
+		flags |= FASTPATH_INPUT_KBDFLAGS_RELEASE
+	}
+	if p.KeyboardFlags&KBDFLAGS_EXTENDED != 0 || p.KeyCode&0xFF00 == 0xE000 {
+		flags |= FASTPATH_INPUT_KBDFLAGS_EXTENDED
+	}
+	if p.KeyboardFlags&KBDFLAGS_EXTENDED1 != 0 {
+		flags |= FASTPATH_INPUT_KBDFLAGS_EXTENDED1
+	}
+	buf = append(buf, byte(FASTPATH_INPUT_EVENT_SCANCODE<<5)|flags)
+	buf = append(buf, byte(p.KeyCode))
+	return buf
 }
 
 type UnicodeKeyEvent struct {
@@ -1657,9 +1698,23 @@ type UnicodeKeyEvent struct {
 }
 
 func (p *UnicodeKeyEvent) Serialize() []byte {
-	buff := &bytes.Buffer{}
-	struc.Pack(buff, p)
-	return buff.Bytes()
+	return []byte{
+		byte(p.KeyboardFlags), byte(p.KeyboardFlags >> 8),
+		byte(p.Unicode), byte(p.Unicode >> 8),
+		byte(p.Pad2Octets), byte(p.Pad2Octets >> 8),
+	}
+}
+
+// FastPathEncode appends this unicode key event in the Fast-Path Input wire
+// format (MS-RDPBCGR §2.2.8.1.2.2.5) to buf and returns the new slice.
+func (p *UnicodeKeyEvent) FastPathEncode(buf []byte) []byte {
+	flags := byte(0)
+	if p.KeyboardFlags&KBDFLAGS_RELEASE != 0 {
+		flags |= FASTPATH_INPUT_KBDFLAGS_RELEASE
+	}
+	buf = append(buf, byte(FASTPATH_INPUT_EVENT_UNICODE<<5)|flags)
+	buf = append(buf, byte(p.Unicode), byte(p.Unicode>>8))
+	return buf
 }
 
 type ClientInputEventPDU struct {

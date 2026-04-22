@@ -10,6 +10,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"github.com/lunixbochs/struc"
 	"io"
 	"log/slog"
@@ -266,6 +267,11 @@ type SEC struct {
 	encryptRc4 *rc4.Cipher
 
 	macKey []byte
+
+	// fastPathSender is the underlying transport (typically TPKT) that knows
+	// how to wrap a payload in a fast-path frame.  Set via SetFastPathSender
+	// to enable Fast-Path Client Input PDUs (MS-RDPBCGR §2.2.8.1.2).
+	fastPathSender core.FastPathSender
 }
 
 func NewSEC(t core.Transport) *SEC {
@@ -280,6 +286,7 @@ func NewSEC(t core.Transport) *SEC {
 		false,
 		0,
 		0,
+		nil,
 		nil,
 		nil,
 		nil,
@@ -309,6 +316,33 @@ func (s *SEC) Write(b []byte) (n int, err error) {
 
 func (s *SEC) Close() error {
 	return s.transport.Close()
+}
+
+// SetFastPathSender wires the underlying transport that can frame fast-path
+// PDUs.  When set, SendFastPath is usable.
+func (s *SEC) SetFastPathSender(f core.FastPathSender) {
+	s.fastPathSender = f
+}
+
+// SendFastPath wraps the given payload in a fast-path frame using the
+// underlying transport.  Returns an error when legacy RDP encryption is
+// enabled (this layer does not yet sign fast-path output), allowing the
+// caller to fall back to a slow-path send.
+func (s *SEC) SendFastPath(secFlag byte, b []byte) (int, error) {
+	if s.fastPathSender == nil {
+		return 0, fmt.Errorf("sec: fastPathSender not set")
+	}
+	if s.enableEncryption {
+		return 0, fmt.Errorf("sec: fast-path output not supported with legacy encryption")
+	}
+	return s.fastPathSender.SendFastPath(secFlag, b)
+}
+
+// LegacyEncryptionEnabled reports whether the per-PDU RDP encryption layer
+// (not TLS/CredSSP) is in use.  Callers use this to disable optimisations
+// like fast-path input that this layer does not yet implement signing for.
+func (s *SEC) LegacyEncryptionEnabled() bool {
+	return s.enableEncryption
 }
 
 func (s *SEC) sendFlagged(flag uint16, data []byte) (n int, err error) {

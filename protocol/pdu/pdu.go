@@ -24,7 +24,11 @@ type PDULayer struct {
 	serverCapabilities map[CapsType]Capability
 	clientCapabilities map[CapsType]Capability
 	fastPathSender     core.FastPathSender
-	demandActivePDU    *DemandActivePDU
+	// serverFastPathInput is set after capability exchange when both sides
+	// advertise INPUT_FLAG_FASTPATH_INPUT, allowing client input to be sent
+	// using the much shorter fast-path framing (MS-RDPBCGR §2.2.8.1.2).
+	serverFastPathInput bool
+	demandActivePDU     *DemandActivePDU
 }
 
 func NewPDULayer(t core.Transport) *PDULayer {
@@ -195,6 +199,9 @@ func (c *Client) recvDemandActivePDU(s []byte) {
 		slog.Debug("serverCaps", "type", caps.Type(), "value", caps)
 		c.serverCapabilities[caps.Type()] = caps
 	}
+	if ic, ok := c.serverCapabilities[CAPSTYPE_INPUT].(*InputCapability); ok {
+		c.serverFastPathInput = ic.Flags&INPUT_FLAG_FASTPATH_INPUT != 0
+	}
 
 	c.sendConfirmActivePDU()
 	c.sendClientFinalizeSynchronizePDU()
@@ -238,7 +245,8 @@ func (c *Client) sendConfirmActivePDU() {
 	//orderCapa.OrderSupport[TS_NEG_FAST_GLYPH_INDEX] = 1
 
 	inputCapa := c.clientCapabilities[CAPSTYPE_INPUT].(*InputCapability)
-	inputCapa.Flags = INPUT_FLAG_SCANCODES | INPUT_FLAG_MOUSEX | INPUT_FLAG_UNICODE
+	inputCapa.Flags = INPUT_FLAG_SCANCODES | INPUT_FLAG_MOUSEX | INPUT_FLAG_UNICODE |
+		INPUT_FLAG_FASTPATH_INPUT | INPUT_FLAG_FASTPATH_INPUT2
 	inputCapa.KeyboardLayout = c.clientCoreData.KbdLayout
 	inputCapa.KeyboardType = c.clientCoreData.KeyboardType
 	inputCapa.KeyboardSubType = c.clientCoreData.KeyboardSubType
@@ -523,7 +531,20 @@ type InputEventsInterface interface {
 	Serialize() []byte
 }
 
+// fastPathEncoder is implemented by input event types that know how to
+// produce their Fast-Path Input wire encoding (MS-RDPBCGR §2.2.8.1.2.2).
+type fastPathEncoder interface {
+	FastPathEncode(buf []byte) []byte
+}
+
 func (c *Client) SendInputEvents(msgType uint16, events []InputEventsInterface) {
+	if c.serverFastPathInput && c.fastPathSender != nil && c.canSendFastPathInput(events) {
+		if c.sendFastPathInputEvents(events) {
+			return
+		}
+		// Fall back to slow-path on send failure (e.g. legacy encryption).
+	}
+
 	p := &ClientInputEventPDU{}
 	p.NumEvents = uint16(len(events))
 	p.SlowPathInputEvents = make([]SlowPathInputEvent, 0, p.NumEvents)
@@ -534,6 +555,38 @@ func (c *Client) SendInputEvents(msgType uint16, events []InputEventsInterface) 
 	}
 
 	c.sendDataPDU(p)
+}
+
+// canSendFastPathInput reports whether every event in the batch implements
+// the fast-path encoder.  Falls back to slow-path if any event type doesn't
+// (currently just SynchronizeEvent, which the client never sends).
+func (c *Client) canSendFastPathInput(events []InputEventsInterface) bool {
+	if len(events) == 0 || len(events) > 15 {
+		return false
+	}
+	for _, e := range events {
+		if _, ok := e.(fastPathEncoder); !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func (c *Client) sendFastPathInputEvents(events []InputEventsInterface) bool {
+	// Worst case: 1 byte numberEvents + 7 bytes per event (mouse).
+	buf := make([]byte, 0, 1+7*len(events))
+	buf = append(buf, byte(len(events)))
+	for _, e := range events {
+		buf = e.(fastPathEncoder).FastPathEncode(buf)
+	}
+	if _, err := c.fastPathSender.SendFastPath(0, buf); err != nil {
+		// Disable for the rest of the session so we don't keep paying the
+		// failed-attempt cost on every input event.
+		c.serverFastPathInput = false
+		slog.Warn("fast-path input disabled, falling back to slow-path", "err", err)
+		return false
+	}
+	return true
 }
 
 // SendRefreshRect requests the server to redraw the given screen rectangle.

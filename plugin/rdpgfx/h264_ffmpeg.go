@@ -223,6 +223,16 @@ type ffmpegDecoder struct {
 	swFrameCount      int  // frames decoded by SW decoder (for diagnostics)
 	broken            bool // decoder is unrecoverable; stop producing frames so the app reconnects
 
+	// outRing holds two recyclable BGRA destination buffers.  convertFrame
+	// rotates between them so each Decode() avoids allocating a fresh
+	// width*height*4 buffer (≈8MB at 1920×1080 → ≈240MB/s of GC garbage at
+	// 30fps).  Two slots is sufficient because emitBitmap is called
+	// synchronously from the rdpgfx PDU loop and always finishes (the
+	// caller has copied the data into its backing image) before the next
+	// Decode runs.  outRingIdx selects the slot to use *next*.
+	outRing    [2][]byte
+	outRingIdx int
+
 	// SPS/PPS cache (Annex B framing, including start code).  Captured by
 	// scanning every Annex B stream we feed to the decoder.  After a hard
 	// reset of the HW decoder we prepend these to the next IDR so the fresh
@@ -673,7 +683,16 @@ func (d *ffmpegDecoder) convertFrame() (*h264Frame, error) {
 	srcFmt := C.enum_AVPixelFormat(srcFrame.format)
 
 	outSize := int(w) * int(h) * 4
-	out := make([]byte, outSize)
+	// Borrow the next ring buffer instead of allocating fresh.  At 1920×1080
+	// this avoids an 8MB allocation every frame.
+	out := d.outRing[d.outRingIdx]
+	if cap(out) < outSize {
+		out = make([]byte, outSize)
+	} else {
+		out = out[:outSize]
+	}
+	d.outRing[d.outRingIdx] = out
+	d.outRingIdx ^= 1
 
 	// For planar YUV420P (both limited- and full-range variants), use our own
 	// BT.601 conversion instead of swscale on ARM64.  swscale has no
@@ -762,21 +781,37 @@ type scanResult struct {
 // (start offset includes the Annex B start code).  Replaces what used to be
 // three separate linear scans (h264ContainsKeyFrame ×2 + scanAndCacheParamSets)
 // performed per-packet.
+// scanH264Packet walks an Annex B H.264 packet exactly once, returning
+// whether it contains any IDR slice (NAL type 5) or SPS (NAL type 7) NAL
+// unit and recording the byte ranges for the most recent SPS/PPS NALs found
+// (start offset includes the Annex B start code).  Replaces what used to be
+// three separate linear scans (h264ContainsKeyFrame ×2 + scanAndCacheParamSets)
+// performed per-packet.
+//
+// Uses bytes.Index to locate the canonical 3-byte start code (0x000001),
+// promoting it to the 4-byte form when preceded by a zero.  bytes.Index is
+// implemented in optimized assembly on the major Go platforms, so this
+// out-performs a hand-rolled byte loop especially for the long IDR packets
+// that dominate the H.264 hot path.
 func scanH264Packet(data []byte) scanResult {
 	var r scanResult
-	n := len(data)
-	i := 0
-	for i+3 < n {
-		var scLen int
-		if data[i] == 0 && data[i+1] == 0 && data[i+2] == 0 && data[i+3] == 1 {
-			scLen = 4
-		} else if data[i] == 0 && data[i+1] == 0 && data[i+2] == 1 {
-			scLen = 3
-		} else {
-			i++
-			continue
+	startCode := []byte{0, 0, 1}
+	pos := 0
+	// nalStart points to the byte just past the previous NAL header byte
+	// (i.e. into the NAL payload), used as the lower bound when searching
+	// for the *next* start code so we never re-find the current one.
+	for pos < len(data) {
+		off := bytes.Index(data[pos:], startCode)
+		if off < 0 {
+			break
 		}
-		if i+scLen >= n {
+		i := pos + off
+		scLen := 3
+		if i > 0 && data[i-1] == 0 {
+			i--
+			scLen = 4
+		}
+		if i+scLen >= len(data) {
 			break
 		}
 		nalType := data[i+scLen] & 0x1F
@@ -784,24 +819,29 @@ func scanH264Packet(data []byte) scanResult {
 			r.hasKeyFrame = true
 		}
 		if nalType == 7 || nalType == 8 {
-			// Locate end of this NAL: next start code or end of buffer.
-			j := i + scLen + 1
-			for j < n {
-				if (j+3 < n && data[j] == 0 && data[j+1] == 0 && data[j+2] == 0 && data[j+3] == 1) ||
-					(j+2 < n && data[j] == 0 && data[j+1] == 0 && data[j+2] == 1) {
-					break
+			// Locate the end of this NAL: search for the next 0x000001
+			// from just past the NAL header byte.
+			searchFrom := i + scLen + 1
+			j := len(data)
+			if searchFrom < len(data) {
+				if next := bytes.Index(data[searchFrom:], startCode); next >= 0 {
+					j = searchFrom + next
+					// If preceded by a zero, that zero belongs to the
+					// next start code (4-byte form).
+					if j > 0 && data[j-1] == 0 {
+						j--
+					}
 				}
-				j++
 			}
 			if nalType == 7 {
 				r.spsStart, r.spsEnd = i, j
 			} else {
 				r.ppsStart, r.ppsEnd = i, j
 			}
-			i = j
+			pos = j
 			continue
 		}
-		i += scLen + 1
+		pos = i + scLen + 1
 	}
 	return r
 }
@@ -864,18 +904,13 @@ func (d *ffmpegDecoder) hardResetHW() {
 		hwType = C.av_hwdevice_iterate_types(hwType)
 	}
 	if !hwOK {
-		// HW backend unavailable on this reset attempt (transient VT/HW
-		// device errors do happen, especially on macOS after sleep).
-		// Rather than declaring the decoder broken and forcing the app
-		// to reconnect the whole RDP session, fall back to a software
-		// H.264 decoder using the same fresh AVCodecContext.  Software
-		// decoding is slower but keeps the session alive until the
-		// server's next natural IDR.
-		slog.Warn("H.264: hardResetHW: no HW backend available, falling back to SW decoder")
-		if d.codecCtx.hw_device_ctx != nil {
-			C.av_buffer_unref(&d.codecCtx.hw_device_ctx)
-		}
-		d.hwPixFmt = C.AV_PIX_FMT_NONE
+		// HW backend unavailable on this reset attempt.  Per user
+		// requirement, do NOT fall back to a software decoder (the SW
+		// path produced more problems than it solved); instead mark the
+		// decoder broken and let the application-level watchdog reconnect.
+		slog.Warn("H.264: hardResetHW: no HW backend available, marking decoder broken")
+		d.broken = true
+		return
 	}
 
 	if C.avcodec_open2(d.codecCtx, codec, nil) < 0 {
@@ -884,7 +919,7 @@ func (d *ffmpegDecoder) hardResetHW() {
 		return
 	}
 
-	d.useHW = hwOK
+	d.useHW = true
 	d.lastW = 0
 	d.lastH = 0
 	d.lastFmt = C.AV_PIX_FMT_NONE
@@ -893,18 +928,15 @@ func (d *ffmpegDecoder) hardResetHW() {
 	// keyframeWaitLimit (150) packets while the server may not send a
 	// fresh IDR for several seconds wastes the wait, and after the wait
 	// expires we feed P-frames to a fresh decoder that has no SPS/PPS,
-	// which fails 5x and triggers another hard reset → the cascade ends
-	// in an SW fallback that the user sees as a sudden visual quality
-	// drop.  rdpyqt does NOT drop packets after a hard reset; it just
-	// asks the server for a refresh and lets the decoder silently fail
-	// on intervening P-frames until the next IDR arrives (avc.py:140-260).
+	// which fails 5x and triggers another hard reset.  rdpyqt does NOT
+	// drop packets after a hard reset; it just asks the server for a
+	// refresh and lets the decoder silently fail on intervening P-frames
+	// until the next IDR arrives (avc.py:140-260).
 	d.needsKeyFrame = false
 	d.keyframeWaitCount = 0
 	// hwReady gates the HW-only stall/post-reset logic in Decode().
-	// When we successfully set up HW, mark it not-ready so the first frame
-	// proves itself; for the SW fallback, mark it ready so the HW-specific
-	// branches stay disabled.
-	d.hwReady = !hwOK
+	// Mark it not-ready so the first frame proves itself.
+	d.hwReady = false
 	d.hwSentCount = 0
 	d.hwErrorCount = 0
 	d.postResetPackets = 0
