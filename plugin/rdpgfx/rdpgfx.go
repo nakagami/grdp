@@ -89,11 +89,59 @@ const (
 const headerSize = 8
 
 // BitmapUpdate represents a rendered bitmap region.
+//
+// Lifecycle: Data is borrowed from an internal buffer pool and is only
+// valid for the duration of the synchronous onBitmap callback.  After the
+// callback returns, the slice may be returned to the pool and overwritten
+// by subsequent updates.  Callers that need to retain the pixels (e.g. to
+// hand them to an asynchronous paint goroutine) MUST copy the bytes
+// before the callback returns.
 type BitmapUpdate struct {
 	DestLeft, DestTop, DestRight, DestBottom int
 	Width, Height                            int
 	Bpp                                      int    // bytes per pixel (always 4)
-	Data                                     []byte // BGRA pixel data
+	Data                                     []byte // BGRA pixel data — see lifecycle note above
+}
+
+// bitmapBufPool reuses BGRA byte slices used to back BitmapUpdate.Data.
+// Buffers are acquired with acquireBitmapBuf, handed to the onBitmap
+// callback, and released with releaseBitmapBuf once the (synchronous)
+// callback returns.  This eliminates per-rectangle allocations on the
+// hot CaVideo / AVC partial-blit paths.
+var bitmapBufPool = sync.Pool{
+	New: func() any { return []byte(nil) },
+}
+
+func acquireBitmapBuf(size int) []byte {
+	if size <= 0 {
+		return nil
+	}
+	b := bitmapBufPool.Get().([]byte)
+	if cap(b) < size {
+		return make([]byte, size)
+	}
+	return b[:size]
+}
+
+func releaseBitmapBuf(b []byte) {
+	if b == nil {
+		return
+	}
+	//nolint:staticcheck // intentional pool of byte slices
+	bitmapBufPool.Put(b[:cap(b)])
+}
+
+// emitAndReleaseUpdates calls the onBitmap callback and then returns the
+// pooled Data buffers of the supplied updates back to bitmapBufPool.  All
+// updates passed in must have Data acquired via acquireBitmapBuf.
+func (g *GfxHandler) emitAndReleaseUpdates(updates []BitmapUpdate) {
+	if g.onBitmap != nil && len(updates) > 0 {
+		g.onBitmap(updates)
+	}
+	for i := range updates {
+		releaseBitmapBuf(updates[i].Data)
+		updates[i].Data = nil
+	}
 }
 
 type surface struct {
@@ -717,7 +765,7 @@ func (g *GfxHandler) onWireToSurface1Decode(data []byte, skipHeavy bool) {
 		stride := int(s.width) * 4
 		for _, rc := range rects {
 			needed := rc.w * rc.h * 4
-			region := make([]byte, needed)
+			region := acquireBitmapBuf(needed)
 			rowBytes := rc.w * 4
 			for row := 0; row < rc.h; row++ {
 				srcOff := (rc.y+row)*stride + rc.x*4
@@ -734,7 +782,7 @@ func (g *GfxHandler) onWireToSurface1Decode(data []byte, skipHeavy bool) {
 				Width: rc.w, Height: rc.h, Bpp: 4, Data: region,
 			})
 		}
-		g.onBitmap(updates)
+		g.emitAndReleaseUpdates(updates)
 		return
 	}
 
@@ -809,7 +857,7 @@ func (g *GfxHandler) onWireToSurface2Decode(data []byte, skipHeavy bool) {
 			stride := w * 4
 			for _, rc := range rects {
 				needed := rc.w * rc.h * 4
-				region := make([]byte, needed)
+				region := acquireBitmapBuf(needed)
 				rowBytes := rc.w * 4
 				for row := 0; row < rc.h; row++ {
 					srcOff := (rc.y+row)*stride + rc.x*4
@@ -826,7 +874,7 @@ func (g *GfxHandler) onWireToSurface2Decode(data []byte, skipHeavy bool) {
 					Width: rc.w, Height: rc.h, Bpp: 4, Data: region,
 				})
 			}
-			g.onBitmap(updates)
+			g.emitAndReleaseUpdates(updates)
 		}
 	case codecAVC420:
 		decoded, avcRegions := g.decodeAVC420(bmpData, w, h)
@@ -939,7 +987,7 @@ func (g *GfxHandler) onSolidFill(data []byte) {
 
 		if s.mapped && g.onBitmap != nil {
 			// Build fill data: fill first row, then replicate
-			fillData := make([]byte, w*h*4)
+			fillData := acquireBitmapBuf(w * h * 4)
 			rowW := w * 4
 			for x := 0; x < rowW; x += 4 {
 				copy(fillData[x:x+4], pixel[:])
@@ -949,7 +997,7 @@ func (g *GfxHandler) onSolidFill(data []byte) {
 			}
 			destL := int(s.outputX) + int(left)
 			destT := int(s.outputY) + int(top)
-			g.onBitmap([]BitmapUpdate{{
+			g.emitAndReleaseUpdates([]BitmapUpdate{{
 				DestLeft: destL, DestTop: destT,
 				DestRight: destL + w - 1, DestBottom: destT + h - 1,
 				Width: w, Height: h, Bpp: 4, Data: fillData,

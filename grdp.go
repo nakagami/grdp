@@ -93,6 +93,14 @@ type RdpClient struct {
 
 const mouseCoalesceInterval = 16 * time.Millisecond
 
+// Bitmap is a single rendered region delivered to the OnBitmap callback.
+//
+// Lifecycle: Bitmap.Data is borrowed from an internal buffer pool and is
+// only valid for the duration of the synchronous OnBitmap callback.  After
+// the callback returns the slice may be returned to the pool and overwritten
+// by subsequent updates.  Callers that need to retain the pixels (e.g. to
+// hand them to an asynchronous paint goroutine) MUST copy the bytes before
+// the callback returns.
 type Bitmap struct {
 	DestLeft     int
 	DestTop      int

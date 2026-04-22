@@ -296,6 +296,10 @@ func shouldUseAVCRegions(regions []avcRect, frameW, frameH int) bool {
 // frame into the persistent surface and emits a BitmapUpdate per region.
 // All region coordinates are in decoded-frame space (i.e. relative to
 // (left, top) on the surface).
+//
+// The emitted Data buffers are borrowed from bitmapBufPool and are returned
+// to the pool once the synchronous onBitmap callback completes — see the
+// BitmapUpdate lifecycle note.
 func (g *GfxHandler) blitAndEmitAVCRegions(s *surface, left, top, frameW, frameH int, decoded []byte, regions []avcRect) {
 	frameStride := frameW * 4
 	surfStride := int(s.width) * 4
@@ -316,7 +320,7 @@ func (g *GfxHandler) blitAndEmitAVCRegions(s *surface, left, top, frameW, frameH
 			continue
 		}
 		rowBytes := rw * 4
-		region := make([]byte, rw*rh*4)
+		region := acquireBitmapBuf(rw * rh * 4)
 		for row := 0; row < rh; row++ {
 			srcOff := (ry+row)*frameStride + rx*4
 			if srcOff+rowBytes > len(decoded) {
@@ -340,6 +344,7 @@ func (g *GfxHandler) blitAndEmitAVCRegions(s *surface, left, top, frameW, frameH
 				decoded[srcOff:srcOff+rowBytes])
 		}
 		if !s.mapped || g.onBitmap == nil {
+			releaseBitmapBuf(region)
 			continue
 		}
 		destL := int(s.outputX) + left + rx
@@ -350,7 +355,5 @@ func (g *GfxHandler) blitAndEmitAVCRegions(s *surface, left, top, frameW, frameH
 			Width: rw, Height: rh, Bpp: 4, Data: region,
 		})
 	}
-	if len(updates) > 0 {
-		g.onBitmap(updates)
-	}
+	g.emitAndReleaseUpdates(updates)
 }
