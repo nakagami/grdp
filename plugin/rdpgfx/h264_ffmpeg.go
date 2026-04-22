@@ -208,11 +208,18 @@ const hwPostResetStuckThreshold = 60
 // decoder is marked broken and the application-level watchdog reconnects.
 // Each attempt waits up to hwPostResetStuckThreshold packets (~2 s at 30 fps)
 // for an IDR before retrying, so the total wait before reconnect is roughly
-// hwMaxRecoveries * 2 s.  We need a generous budget because Windows RDPGFX
-// servers may take 10+ seconds to honour a SendRefreshRect when video is
-// streaming, and the application-level reconnect itself is not always
-// reliable — keeping the decoder in retry mode is preferable to giving up.
-const hwMaxRecoveries = 30
+// hwMaxRecoveries * 2 s.
+//
+// Empirically, when a Windows RDPGFX server is mid video-stream and the
+// VideoToolbox HW decoder gets stuck, neither SendRefreshRect nor the
+// SuppressOutput off→on toggle reliably elicits a fresh IDR — the server
+// keeps emitting AVC444 chroma-upgrade (LC=2) packets while withholding any
+// new luma/IDR.  In that state, additional hard resets cannot recover the
+// decoder; they merely prolong the visible video freeze.  A full RDP
+// reconnect is the only known-good remedy, so we cap the retry budget low
+// enough that the user sees a brief freeze (≈10 s) and then a clean
+// reconnect, rather than a long unresponsive period.
+const hwMaxRecoveries = 5
 
 type ffmpegDecoder struct {
 	codecCtx  *C.AVCodecContext
