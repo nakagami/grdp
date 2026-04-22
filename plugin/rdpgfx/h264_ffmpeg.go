@@ -71,42 +71,72 @@ static int grdp_is_full_range_fmt(enum AVPixelFormat fmt) {
             fmt == AV_PIX_FMT_YUVJ440P) ? 1 : 0;
 }
 
-// grdp_yuv420p_to_bgra converts a planar YUV420P/YUVJ420P frame to packed
-// BGRA in-place using BT.601 coefficients.  This bypasses swscale entirely
-// so that the broken ARM64 colorspace-matrix fallback path is never taken.
+// grdp_bt601_pixel writes one BGRA pixel using BT.601 coefficients.
+// u and v are pre-offset (i.e. raw_value - 128).
 // full_range: 0 = limited (video) range [16-235 / 16-240],
 //             1 = full range [0-255].
+#define CLAMP8(x) ((x) < 0 ? 0 : (x) > 255 ? 255 : (uint8_t)(x))
+static inline void grdp_bt601_pixel(
+    int y_raw, int u, int v, int full_range, uint8_t *dst)
+{
+    int r, g, b;
+    if (full_range) {
+        int y = y_raw;
+        r = (256*y + 359*v           + 128) >> 8;
+        g = (256*y -  88*u - 183*v   + 128) >> 8;
+        b = (256*y + 454*u           + 128) >> 8;
+    } else {
+        int c = y_raw - 16;
+        r = (298*c + 409*v           + 128) >> 8;
+        g = (298*c - 100*u - 208*v   + 128) >> 8;
+        b = (298*c + 516*u           + 128) >> 8;
+    }
+    dst[0] = CLAMP8(b);
+    dst[1] = CLAMP8(g);
+    dst[2] = CLAMP8(r);
+    dst[3] = 255;
+}
+
+// grdp_yuv420p_to_bgra converts a planar YUV420P/YUVJ420P frame to packed
+// BGRA using BT.601 coefficients.  This bypasses swscale entirely so that
+// the broken ARM64 colorspace-matrix fallback path is never taken.
 static void grdp_yuv420p_to_bgra(
     const AVFrame *src, uint8_t *dst, int dst_stride, int full_range)
 {
     int width  = src->width;
     int height = src->height;
     for (int row = 0; row < height; row++) {
-        const uint8_t *yrow = src->data[0] + row           * src->linesize[0];
-        const uint8_t *urow = src->data[1] + (row >> 1)    * src->linesize[1];
-        const uint8_t *vrow = src->data[2] + (row >> 1)    * src->linesize[2];
+        const uint8_t *yrow = src->data[0] + row        * src->linesize[0];
+        const uint8_t *urow = src->data[1] + (row >> 1) * src->linesize[1];
+        const uint8_t *vrow = src->data[2] + (row >> 1) * src->linesize[2];
         uint8_t *drow = dst + row * dst_stride;
         for (int col = 0; col < width; col++) {
             int u = (int)urow[col >> 1] - 128;
             int v = (int)vrow[col >> 1] - 128;
-            int r, g, b;
-            if (full_range) {
-                int y = (int)yrow[col];
-                r = (256*y + 359*v           + 128) >> 8;
-                g = (256*y -  88*u - 183*v   + 128) >> 8;
-                b = (256*y + 454*u           + 128) >> 8;
-            } else {
-                int c = (int)yrow[col] - 16;
-                r = (298*c + 409*v           + 128) >> 8;
-                g = (298*c - 100*u - 208*v   + 128) >> 8;
-                b = (298*c + 516*u           + 128) >> 8;
-            }
-#define CLAMP8(x) ((x) < 0 ? 0 : (x) > 255 ? 255 : (uint8_t)(x))
-            drow[col*4    ] = CLAMP8(b);
-            drow[col*4 + 1] = CLAMP8(g);
-            drow[col*4 + 2] = CLAMP8(r);
-            drow[col*4 + 3] = 255;
-#undef CLAMP8
+            grdp_bt601_pixel((int)yrow[col], u, v, full_range, drow + col*4);
+        }
+    }
+}
+
+// grdp_nv12_to_bgra converts a semi-planar NV12 frame (Y plane + interleaved
+// UV plane) to packed BGRA using BT.601 coefficients.  This bypasses swscale
+// for the same reason as grdp_yuv420p_to_bgra: on ARM64 swscale's
+// non-accelerated NV12→BGRA fallback ignores sws_setColorspaceDetails.
+// VideoToolbox (macOS HW decoder) always outputs NV12.
+static void grdp_nv12_to_bgra(
+    const AVFrame *src, uint8_t *dst, int dst_stride, int full_range)
+{
+    int width  = src->width;
+    int height = src->height;
+    for (int row = 0; row < height; row++) {
+        const uint8_t *yrow  = src->data[0] + row        * src->linesize[0];
+        const uint8_t *uvrow = src->data[1] + (row >> 1) * src->linesize[1];
+        uint8_t *drow = dst + row * dst_stride;
+        for (int col = 0; col < width; col++) {
+            // NV12 UV plane: U and V are interleaved, one pair per 2×2 block.
+            int u = (int)uvrow[(col >> 1) * 2    ] - 128;
+            int v = (int)uvrow[(col >> 1) * 2 + 1] - 128;
+            grdp_bt601_pixel((int)yrow[col], u, v, full_range, drow + col*4);
         }
     }
 }
@@ -156,6 +186,14 @@ import (
 // sws_setColorspaceDetails and produces a strong green cast, so we fall back
 // to the hand-written loop there.
 var useSwscaleForYUV420 = runtime.GOARCH != "arm64"
+
+// useSwscaleForNV12 mirrors useSwscaleForYUV420 for NV12 (VideoToolbox HW
+// output).  The same ARM64 swscale defect applies: the non-accelerated
+// nv12→bgra path ignores sws_setColorspaceDetails, so a zero-filled NV12
+// frame (e.g. produced by VideoToolbox during codec initialisation) is
+// converted as full-range and renders as solid green instead of black.
+// On x86_64, swscale's SSSE3/AVX2 NV12→BGRA path is both correct and fast.
+var useSwscaleForNV12 = runtime.GOARCH != "arm64"
 
 // avLogOnce ensures grdp_suppress_av_log is called only once per process.
 var avLogOnce sync.Once
@@ -223,6 +261,7 @@ type ffmpegDecoder struct {
 	lastW     C.int
 	lastH     C.int
 	lastFmt   C.enum_AVPixelFormat
+	lastFullRange C.int // tracks fullRange used when swsCtx was last configured
 	stallCycles        int       // consecutive HW stall→nudge cycles without any successful decode in between
 	lastSuccessTime    time.Time // wall-clock time of the last successfully decoded frame
 	lastRefreshTime    time.Time // wall-clock time of the last server-refresh request
@@ -659,6 +698,22 @@ func (d *ffmpegDecoder) convertFrame() (*h264Frame, error) {
 		return &h264Frame{Data: out, Width: int(w), Height: int(h)}, nil
 	}
 
+	// For NV12 (VideoToolbox HW transfer output) on ARM64, bypass swscale for
+	// the same reason as YUV420P: the non-accelerated ARM64 path ignores
+	// sws_setColorspaceDetails and produces a green cast on zero-filled frames.
+	if srcFmt == C.AV_PIX_FMT_NV12 && !useSwscaleForNV12 {
+		fullRange := C.int(0)
+		if srcFrame.color_range == 2 { // AVCOL_RANGE_JPEG
+			fullRange = 1
+		}
+		C.grdp_nv12_to_bgra(srcFrame,
+			(*C.uint8_t)(unsafe.Pointer(&out[0])), C.int(w*4), fullRange)
+		if srcFrame == d.swFrame {
+			C.av_frame_unref(d.swFrame)
+		}
+		return &h264Frame{Data: out, Width: int(w), Height: int(h)}, nil
+	}
+
 	// For other formats (e.g. NV12 from VideoToolbox HW transfer), use swscale.
 	swsFmt := C.grdp_yuvj_to_yuv(srcFmt)
 	fullRange := C.grdp_is_full_range_fmt(srcFmt)
@@ -666,7 +721,7 @@ func (d *ffmpegDecoder) convertFrame() (*h264Frame, error) {
 		fullRange = 1
 	}
 
-	if w != d.lastW || h != d.lastH || srcFmt != d.lastFmt {
+	if w != d.lastW || h != d.lastH || srcFmt != d.lastFmt || fullRange != d.lastFullRange {
 		if d.swsCtx != nil {
 			C.sws_freeContext(d.swsCtx)
 		}
@@ -682,6 +737,7 @@ func (d *ffmpegDecoder) convertFrame() (*h264Frame, error) {
 		d.lastW = w
 		d.lastH = h
 		d.lastFmt = srcFmt
+		d.lastFullRange = fullRange
 	}
 
 	C.grdp_frame_to_bgra(d.swsCtx, srcFrame,
