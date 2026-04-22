@@ -214,8 +214,13 @@ func (g *GfxHandler) maybeRequestKeyframe() {
 		g.keyframeRequested = false
 		g.lastKeyframeRequest = time.Time{}
 	}
-	// Rate-limit: allow re-request if the previous one was more than 3 seconds ago.
-	if g.keyframeRequested && time.Since(g.lastKeyframeRequest) < 3*time.Second {
+	// Rate-limit: maybeRequestKeyframe is only called when the decoder is
+	// already in a recovery state (NeedsKeyframe() == true, gated above).
+	// Nudge the server every 1 s while we wait, instead of every 3 s, so
+	// IDRs arrive sooner and the deferred-reset / post-reset wait windows
+	// (~10 s of packets) get more chances to catch one before we are
+	// forced to mark the decoder broken and reconnect.
+	if g.keyframeRequested && time.Since(g.lastKeyframeRequest) < time.Second {
 		return
 	}
 	g.keyframeRequested = true

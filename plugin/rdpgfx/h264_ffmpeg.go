@@ -481,12 +481,35 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 			// prependSPSNextIDR is now true; fall through so the prepend
 			// block and avcodec_send_packet run with the fresh context.
 		} else if d.pendingResetPackets >= hwPostResetStuckThreshold {
-			slog.Warn("H.264: deferred reset timed out waiting for IDR; marking decoder broken for reconnect",
-				"pendingPackets", d.pendingResetPackets)
-			d.pendingHardReset = false
-			d.broken = true
-			d.wantsServerRefresh = false
-			return nil, nil
+			// IDR never arrived within the wait window.  Rather than giving
+			// up immediately and forcing a full RDP reconnect, spend the
+			// remaining hwMaxRecoveries budget: perform the hard reset now
+			// (without an IDR to chase) and let the post-reset path nudge
+			// the server further.  Only mark broken once the budget is
+			// exhausted.
+			if d.hwRecoveries < hwMaxRecoveries {
+				slog.Debug("H.264: deferred reset timed out; performing hard reset to consume retry budget",
+					"pendingPackets", d.pendingResetPackets,
+					"attempt", d.hwRecoveries+1)
+				d.pendingHardReset = false
+				d.pendingResetPackets = 0
+				d.hardResetHW()
+				if d.broken {
+					d.wantsServerRefresh = false
+					return nil, nil
+				}
+				// fall through; current packet may not be IDR but
+				// avcodec_send_packet will silently fail (!hwReady path)
+				// and the post-reset stuck logic takes over.
+			} else {
+				slog.Warn("H.264: deferred reset exhausted retries; marking decoder broken for reconnect",
+					"pendingPackets", d.pendingResetPackets,
+					"hwRecoveries", d.hwRecoveries)
+				d.pendingHardReset = false
+				d.broken = true
+				d.wantsServerRefresh = false
+				return nil, nil
+			}
 		}
 	}
 
@@ -841,9 +864,18 @@ func (d *ffmpegDecoder) hardResetHW() {
 		hwType = C.av_hwdevice_iterate_types(hwType)
 	}
 	if !hwOK {
-		slog.Warn("H.264: hardResetHW: no HW backend available, marking decoder broken")
-		d.broken = true
-		return
+		// HW backend unavailable on this reset attempt (transient VT/HW
+		// device errors do happen, especially on macOS after sleep).
+		// Rather than declaring the decoder broken and forcing the app
+		// to reconnect the whole RDP session, fall back to a software
+		// H.264 decoder using the same fresh AVCodecContext.  Software
+		// decoding is slower but keeps the session alive until the
+		// server's next natural IDR.
+		slog.Warn("H.264: hardResetHW: no HW backend available, falling back to SW decoder")
+		if d.codecCtx.hw_device_ctx != nil {
+			C.av_buffer_unref(&d.codecCtx.hw_device_ctx)
+		}
+		d.hwPixFmt = C.AV_PIX_FMT_NONE
 	}
 
 	if C.avcodec_open2(d.codecCtx, codec, nil) < 0 {
@@ -852,7 +884,7 @@ func (d *ffmpegDecoder) hardResetHW() {
 		return
 	}
 
-	d.useHW = true
+	d.useHW = hwOK
 	d.lastW = 0
 	d.lastH = 0
 	d.lastFmt = C.AV_PIX_FMT_NONE
@@ -868,7 +900,11 @@ func (d *ffmpegDecoder) hardResetHW() {
 	// on intervening P-frames until the next IDR arrives (avc.py:140-260).
 	d.needsKeyFrame = false
 	d.keyframeWaitCount = 0
-	d.hwReady = false
+	// hwReady gates the HW-only stall/post-reset logic in Decode().
+	// When we successfully set up HW, mark it not-ready so the first frame
+	// proves itself; for the SW fallback, mark it ready so the HW-specific
+	// branches stay disabled.
+	d.hwReady = !hwOK
 	d.hwSentCount = 0
 	d.hwErrorCount = 0
 	d.postResetPackets = 0
