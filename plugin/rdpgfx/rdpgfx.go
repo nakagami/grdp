@@ -788,11 +788,14 @@ func (g *GfxHandler) onWireToSurface1Decode(data []byte, skipHeavy bool) {
 
 	var decoded []byte
 	var avcRegions []avcRect
+	owned := false // true ⇒ decoded buffer is from bitmapBufPool and must be released
 	switch codecId {
 	case codecUncompressed:
 		decoded = decodeUncompressed(bmpData, w, h, pixFmt)
+		owned = true
 	case codecPlanar:
 		decoded = decodePlanar(bmpData, w, h)
+		owned = true
 	case codecAVC420:
 		decoded, avcRegions = g.decodeAVC420(bmpData, w, h)
 	case codecAVC444, codecAVC444v2:
@@ -807,11 +810,18 @@ func (g *GfxHandler) onWireToSurface1Decode(data []byte, skipHeavy bool) {
 
 	if len(avcRegions) > 0 && shouldUseAVCRegions(avcRegions, w, h) {
 		g.blitAndEmitAVCRegions(s, int(left), int(top), w, h, decoded, avcRegions)
+		if owned {
+			releaseBitmapBuf(decoded)
+		}
 		return
 	}
 
 	blitToSurface(s, int(left), int(top), w, h, decoded)
-	g.emitBitmap(s, int(left), int(top), w, h, decoded)
+	if owned {
+		g.emitBitmapPooled(s, int(left), int(top), w, h, decoded)
+	} else {
+		g.emitBitmap(s, int(left), int(top), w, h, decoded)
+	}
 }
 
 // onWireToSurface2Decode handles RDPGFX_WIRE_TO_SURFACE_PDU_2 (MS-RDPEGFX 2.2.2.2).
@@ -842,11 +852,11 @@ func (g *GfxHandler) onWireToSurface2Decode(data []byte, skipHeavy bool) {
 	case codecUncompressed:
 		decoded = decodeUncompressed(bmpData, w, h, pixFmt)
 		blitToSurface(s, 0, 0, w, h, decoded)
-		g.emitBitmap(s, 0, 0, w, h, decoded)
+		g.emitBitmapPooled(s, 0, 0, w, h, decoded)
 	case codecPlanar:
 		decoded = decodePlanar(bmpData, w, h)
 		blitToSurface(s, 0, 0, w, h, decoded)
-		g.emitBitmap(s, 0, 0, w, h, decoded)
+		g.emitBitmapPooled(s, 0, 0, w, h, decoded)
 	case codecCaVideo:
 		if skipHeavy {
 			break // frame drop
@@ -1060,6 +1070,24 @@ func blitToSurface(s *surface, x, y, w, h int, src []byte) {
 	}
 }
 
+// emitBitmapPooled is like emitBitmap but releases `decoded` back to
+// bitmapBufPool after the synchronous onBitmap callback returns.  Use this
+// for codec output buffers that the GfxHandler owns end-to-end (currently
+// uncompressed and planar).
+func (g *GfxHandler) emitBitmapPooled(s *surface, x, y, w, h int, decoded []byte) {
+	if !s.mapped || g.onBitmap == nil {
+		releaseBitmapBuf(decoded)
+		return
+	}
+	destL := int(s.outputX) + x
+	destT := int(s.outputY) + y
+	g.emitAndReleaseUpdates([]BitmapUpdate{{
+		DestLeft: destL, DestTop: destT,
+		DestRight: destL + w - 1, DestBottom: destT + h - 1,
+		Width: w, Height: h, Bpp: 4, Data: decoded,
+	}})
+}
+
 func (g *GfxHandler) emitBitmap(s *surface, x, y, w, h int, decoded []byte) {
 	if !s.mapped || g.onBitmap == nil {
 		return
@@ -1076,12 +1104,16 @@ func (g *GfxHandler) emitBitmap(s *surface, x, y, w, h int, decoded []byte) {
 // --- Codec: Uncompressed ---
 
 func decodeUncompressed(data []byte, w, h int, pixFmt uint8) []byte {
-	out := make([]byte, w*h*4)
+	out := acquireBitmapBuf(w * h * 4)
 	n := w * h * 4
 	if len(data) >= n {
 		copy(out, data[:n])
 	} else {
-		copy(out, data)
+		copy(out[:len(data)], data)
+		// Zero the unfilled tail in case the slice was reused from the pool.
+		for i := len(data); i < n; i++ {
+			out[i] = 0
+		}
 	}
 	return out
 }
@@ -1090,7 +1122,7 @@ func decodeUncompressed(data []byte, w, h int, pixFmt uint8) []byte {
 
 func decodePlanar(data []byte, w, h int) []byte {
 	if len(data) < 1 {
-		return make([]byte, w*h*4)
+		return acquireBitmapBuf(w * h * 4)
 	}
 	header := data[0]
 	rle := (header >> 5) & 1
@@ -1121,7 +1153,7 @@ func decodePlanar(data []byte, w, h int) []byte {
 	applyDelta(greenPlane, w, h)
 	applyDelta(bluePlane, w, h)
 
-	out := make([]byte, planeSize*4)
+	out := acquireBitmapBuf(planeSize * 4)
 	// Hoist the per-pixel nil/length checks: clamp each plane to
 	// `planeSize` (zero-fill missing planes) so the inner loop has no
 	// branches and the bounds checks are eliminated.
