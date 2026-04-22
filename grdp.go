@@ -77,7 +77,21 @@ type RdpClient struct {
 	onClipboardFn  func(text string) // remote → local
 	getClipboardFn func() string     // local → remote
 	cliprdrHandler *cliprdr.CliprdrHandler
+
+	// Mouse-move coalescing.  High-frequency UI move events (often one per
+	// host pixel) are collapsed into at most one network PDU per
+	// mouseCoalesceInterval, with the latest position always winning.
+	// Button/key events are sent immediately but flush any pending move
+	// first so server-side ordering is preserved.
+	mouseMu      sync.Mutex
+	mousePending bool
+	mouseX       int
+	mouseY       int
+	mouseTimer   *time.Timer
+	mouseLastTx  time.Time
 }
+
+const mouseCoalesceInterval = 16 * time.Millisecond
 
 type Bitmap struct {
 	DestLeft     int
@@ -355,6 +369,14 @@ func (g *RdpClient) doLogin(routingToken []byte) error {
 	g.sec.SetChannelSender(g.mcs)
 	g.channels.SetChannelSender(g.sec)
 
+	// Wire fast-path output: pdu → sec → tpkt.  This enables the much
+	// shorter Fast-Path Client Input PDU framing for mouse/keyboard events
+	// (MS-RDPBCGR §2.2.8.1.2).  Use is gated at runtime both by capability
+	// negotiation in the PDU layer and by sec.SendFastPath itself, which
+	// refuses when legacy RDP encryption is in effect.
+	g.sec.SetFastPathSender(g.tpkt)
+	g.pdu.SetFastPathSender(g.sec)
+
 	g.x224.SetRequestedProtocol(x224.PROTOCOL_SSL | x224.PROTOCOL_HYBRID)
 	if routingToken != nil {
 		g.x224.SetRoutingToken(routingToken)
@@ -613,6 +635,7 @@ func (g *RdpClient) KeyUp(sc int) {
 		return
 	}
 	slog.Debug("KeyUp", "sc", sc)
+	g.flushMouseMove()
 
 	p := &pdu.ScancodeKeyEvent{}
 	p.KeyCode = uint16(sc)
@@ -625,21 +648,79 @@ func (g *RdpClient) KeyDown(sc int) {
 		return
 	}
 	slog.Debug("KeyDown", "sc", sc)
+	g.flushMouseMove()
 
 	p := &pdu.ScancodeKeyEvent{}
 	p.KeyCode = uint16(sc)
 	g.pdu.SendInputEvents(pdu.INPUT_EVENT_SCANCODE, []pdu.InputEventsInterface{p})
 }
 
+// MouseMove queues a mouse-move event.  Successive moves within
+// mouseCoalesceInterval are collapsed: only the latest (x,y) is sent.  The
+// first move in a burst is sent immediately so the server sees no extra
+// latency for a single isolated motion.
 func (g *RdpClient) MouseMove(x, y int) {
 	if !g.eventReady {
 		return
 	}
-	//slog.Debug("MouseMove", "x", x, "y", y)
-	p := &pdu.PointerEvent{}
-	p.PointerFlags |= pdu.PTRFLAGS_MOVE
-	p.XPos = uint16(x)
-	p.YPos = uint16(y)
+
+	g.mouseMu.Lock()
+	g.mouseX = x
+	g.mouseY = y
+	g.mousePending = true
+
+	now := time.Now()
+	since := now.Sub(g.mouseLastTx)
+	if since >= mouseCoalesceInterval {
+		// Throttle window has elapsed — send right away.
+		g.sendMouseMoveLocked(now)
+		g.mouseMu.Unlock()
+		return
+	}
+
+	// Within throttle window: schedule a flush for the remainder of it
+	// (unless one is already scheduled).
+	if g.mouseTimer == nil {
+		delay := mouseCoalesceInterval - since
+		g.mouseTimer = time.AfterFunc(delay, g.flushMouseMoveTimer)
+	}
+	g.mouseMu.Unlock()
+}
+
+// flushMouseMove sends any pending mouse-move event synchronously.  Called
+// before any non-move input event to preserve server-side ordering.
+func (g *RdpClient) flushMouseMove() {
+	g.mouseMu.Lock()
+	if g.mouseTimer != nil {
+		g.mouseTimer.Stop()
+		g.mouseTimer = nil
+	}
+	if g.mousePending {
+		g.sendMouseMoveLocked(time.Now())
+	}
+	g.mouseMu.Unlock()
+}
+
+// flushMouseMoveTimer is the time.AfterFunc callback.  Acquires the lock
+// itself and sends whatever's pending.
+func (g *RdpClient) flushMouseMoveTimer() {
+	g.mouseMu.Lock()
+	g.mouseTimer = nil
+	if g.mousePending && g.eventReady {
+		g.sendMouseMoveLocked(time.Now())
+	}
+	g.mouseMu.Unlock()
+}
+
+// sendMouseMoveLocked must be called with mouseMu held.
+func (g *RdpClient) sendMouseMoveLocked(now time.Time) {
+	p := &pdu.PointerEvent{
+		PointerFlags: pdu.PTRFLAGS_MOVE,
+		XPos:         uint16(g.mouseX),
+		YPos:         uint16(g.mouseY),
+	}
+	g.mousePending = false
+	g.mouseLastTx = now
 	g.pdu.SendInputEvents(pdu.INPUT_EVENT_MOUSE, []pdu.InputEventsInterface{p})
 }
 
@@ -648,6 +729,8 @@ func (g *RdpClient) MouseWheel(scroll int) {
 		return
 	}
 	slog.Debug("MouseWheel")
+	g.flushMouseMove()
+
 	p := &pdu.PointerEvent{}
 	p.PointerFlags |= pdu.PTRFLAGS_WHEEL
 	if scroll < 0 {
@@ -663,6 +746,7 @@ func (g *RdpClient) MouseUp(button int, x, y int) {
 		return
 	}
 	slog.Debug("MouseUp", "x", x, "y", y, "button", button)
+	g.flushMouseMove()
 	p := &pdu.PointerEvent{}
 
 	switch button {
@@ -686,6 +770,7 @@ func (g *RdpClient) MouseDown(button int, x, y int) {
 		return
 	}
 	slog.Debug("MouseDown", "x", x, "y", y, "button", button)
+	g.flushMouseMove()
 	p := &pdu.PointerEvent{}
 
 	p.PointerFlags |= pdu.PTRFLAGS_DOWN

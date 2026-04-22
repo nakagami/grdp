@@ -735,20 +735,26 @@ func (g *GfxHandler) onWireToSurface1Decode(data []byte, skipHeavy bool) {
 	}
 
 	var decoded []byte
+	var avcRegions []avcRect
 	switch codecId {
 	case codecUncompressed:
 		decoded = decodeUncompressed(bmpData, w, h, pixFmt)
 	case codecPlanar:
 		decoded = decodePlanar(bmpData, w, h)
 	case codecAVC420:
-		decoded = g.decodeAVC420(bmpData, w, h)
+		decoded, avcRegions = g.decodeAVC420(bmpData, w, h)
 	case codecAVC444, codecAVC444v2:
-		decoded = g.decodeAVC444(bmpData, w, h)
+		decoded, avcRegions = g.decodeAVC444(bmpData, w, h)
 	default:
 		slog.Warn(fmt.Sprintf("RDPGFX: unsupported codec 0x%04X in WTS1 (surf=%d %dx%d bmpLen=%d)", codecId, surfId, w, h, bmpLen))
 		return
 	}
 	if decoded == nil {
+		return
+	}
+
+	if len(avcRegions) > 0 && shouldUseAVCRegions(avcRegions, w, h) {
+		g.blitAndEmitAVCRegions(s, int(left), int(top), w, h, decoded, avcRegions)
 		return
 	}
 
@@ -819,16 +825,24 @@ func (g *GfxHandler) onWireToSurface2Decode(data []byte, skipHeavy bool) {
 			g.onBitmap(updates)
 		}
 	case codecAVC420:
-		decoded = g.decodeAVC420(bmpData, w, h)
+		decoded, avcRegions := g.decodeAVC420(bmpData, w, h)
 		if decoded != nil {
-			blitToSurface(s, 0, 0, w, h, decoded)
-			g.emitBitmap(s, 0, 0, w, h, decoded)
+			if len(avcRegions) > 0 && shouldUseAVCRegions(avcRegions, w, h) {
+				g.blitAndEmitAVCRegions(s, 0, 0, w, h, decoded, avcRegions)
+			} else {
+				blitToSurface(s, 0, 0, w, h, decoded)
+				g.emitBitmap(s, 0, 0, w, h, decoded)
+			}
 		}
 	case codecAVC444, codecAVC444v2:
-		decoded = g.decodeAVC444(bmpData, w, h)
+		decoded, avcRegions := g.decodeAVC444(bmpData, w, h)
 		if decoded != nil {
-			blitToSurface(s, 0, 0, w, h, decoded)
-			g.emitBitmap(s, 0, 0, w, h, decoded)
+			if len(avcRegions) > 0 && shouldUseAVCRegions(avcRegions, w, h) {
+				g.blitAndEmitAVCRegions(s, 0, 0, w, h, decoded, avcRegions)
+			} else {
+				blitToSurface(s, 0, 0, w, h, decoded)
+				g.emitBitmap(s, 0, 0, w, h, decoded)
+			}
 		}
 	case codecProgressive:
 		if skipHeavy {

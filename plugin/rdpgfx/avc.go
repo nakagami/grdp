@@ -110,69 +110,74 @@ func parseAVC444Stream(data []byte) (*avc420Stream, uint8, error) {
 	}
 }
 
-// decodeAVC420 decodes AVC420 bitmap data to BGRA pixels.
-func (g *GfxHandler) decodeAVC420(data []byte, destW, destH int) []byte {
+// decodeAVC420 decodes AVC420 bitmap data to BGRA pixels and returns the
+// decoded frame plus the dirty rectangle list reported in the AVC420 stream
+// header (in decoded-frame coordinates).  When regions is non-empty callers
+// can blit only those regions instead of the whole frame, which dramatically
+// reduces per-frame copying for typical desktop video where most of the
+// frame is unchanged from the previous frame.
+func (g *GfxHandler) decodeAVC420(data []byte, destW, destH int) ([]byte, []avcRect) {
 	if g.h264dec == nil {
-		return nil
+		return nil, nil
 	}
 	stream, err := parseAVC420Stream(data)
 	if err != nil {
 		slog.Warn("RDPGFX: AVC420 parse error", "err", err)
-		return nil
+		return nil, nil
 	}
 	if len(stream.h264Data) == 0 {
-		return nil
+		return nil, nil
 	}
 	frame, err := g.h264dec.Decode(stream.h264Data)
 	if err != nil {
 		slog.Warn("RDPGFX: H.264 decode error", "err", err)
-		return nil
+		return nil, nil
 	}
 	if frame == nil {
 		g.maybeRequestKeyframe()
 		g.maybeNotifyDecoderBroken()
 		slog.Debug("RDPGFX: H.264 decode returned nil frame (buffering?)")
-		return nil
+		return nil, nil
 	}
 	g.keyframeRequested = false
 	slog.Debug("RDPGFX: AVC420 decoded", "frameW", frame.Width, "frameH", frame.Height, "destW", destW, "destH", destH, "regions", len(stream.regions), "h264Len", len(stream.h264Data))
-	return cropBGRA(frame.Data, frame.Width, frame.Height, destW, destH)
+	return cropBGRA(frame.Data, frame.Width, frame.Height, destW, destH), stream.regions
 }
 
 // decodeAVC444 decodes AVC444 bitmap data to BGRA pixels.
 // Currently decodes the main YUV420 stream only (LC=0,1).
-func (g *GfxHandler) decodeAVC444(data []byte, destW, destH int) []byte {
+func (g *GfxHandler) decodeAVC444(data []byte, destW, destH int) ([]byte, []avcRect) {
 	if g.h264dec == nil {
-		return nil
+		return nil, nil
 	}
 	stream, lc, err := parseAVC444Stream(data)
 	if err != nil {
 		slog.Warn("RDPGFX: AVC444 parse error", "err", err)
-		return nil
+		return nil, nil
 	}
 	if stream == nil {
 		if lc == 2 {
 			slog.Debug("RDPGFX: AVC444 LC=2 (chroma upgrade) skipped")
 		}
-		return nil
+		return nil, nil
 	}
 	if len(stream.h264Data) == 0 {
-		return nil
+		return nil, nil
 	}
 	frame, err := g.h264dec.Decode(stream.h264Data)
 	if err != nil {
 		slog.Warn("RDPGFX: H.264 decode error (AVC444)", "err", err)
-		return nil
+		return nil, nil
 	}
 	if frame == nil {
 		g.maybeRequestKeyframe()
 		g.maybeNotifyDecoderBroken()
-		return nil
+		return nil, nil
 	}
 	g.keyframeRequested = false
 	slog.Debug("RDPGFX: AVC444 decoded", "frameW", frame.Width, "frameH", frame.Height,
 		"destW", destW, "destH", destH, "h264Len", len(stream.h264Data))
-	return cropBGRA(frame.Data, frame.Width, frame.Height, destW, destH)
+	return cropBGRA(frame.Data, frame.Width, frame.Height, destW, destH), stream.regions
 }
 
 // maybeNotifyDecoderBroken calls onDecoderBroken (if set) once when the H.264
@@ -249,4 +254,103 @@ func cropBGRA(src []byte, srcW, srcH, dstW, dstH int) []byte {
 		copy(out[y*dstStride:y*dstStride+rowBytes], src[y*srcStride:y*srcStride+rowBytes])
 	}
 	return out
+}
+
+// avcRegionUseThresholdPercent is the upper bound on the *fraction* of the
+// decoded frame area that the union of dirty rects can cover before we give
+// up and just blit the whole frame.  When the dirty area approaches the
+// total area, the per-rect bookkeeping (allocation per rect, separate
+// BitmapUpdate per rect) costs more than the bytes-copied savings.
+const avcRegionUseThresholdPercent = 60
+
+// shouldUseAVCRegions returns true when the per-region partial blit path is
+// expected to be cheaper than a single full-frame blit.  A single region
+// covering everything is treated as "no win"; many tiny regions covering
+// most of the frame are similarly bypassed.
+func shouldUseAVCRegions(regions []avcRect, frameW, frameH int) bool {
+	if frameW <= 0 || frameH <= 0 {
+		return false
+	}
+	total := frameW * frameH
+	if total == 0 {
+		return false
+	}
+	// Sum (with overlap double-counting) — overlap is uncommon in practice
+	// and the threshold leaves slack for it.
+	sum := 0
+	for _, r := range regions {
+		if r.right <= r.left || r.bottom <= r.top {
+			continue
+		}
+		w := int(r.right - r.left)
+		h := int(r.bottom - r.top)
+		sum += w * h
+		if sum*100 >= total*avcRegionUseThresholdPercent {
+			return false
+		}
+	}
+	return sum > 0
+}
+
+// blitAndEmitAVCRegions copies only the dirty rectangles of a decoded AVC
+// frame into the persistent surface and emits a BitmapUpdate per region.
+// All region coordinates are in decoded-frame space (i.e. relative to
+// (left, top) on the surface).
+func (g *GfxHandler) blitAndEmitAVCRegions(s *surface, left, top, frameW, frameH int, decoded []byte, regions []avcRect) {
+	frameStride := frameW * 4
+	surfStride := int(s.width) * 4
+	updates := make([]BitmapUpdate, 0, len(regions))
+	for _, rc := range regions {
+		if rc.right <= rc.left || rc.bottom <= rc.top {
+			continue
+		}
+		rx, ry := int(rc.left), int(rc.top)
+		rw, rh := int(rc.right-rc.left), int(rc.bottom-rc.top)
+		if rx+rw > frameW {
+			rw = frameW - rx
+		}
+		if ry+rh > frameH {
+			rh = frameH - ry
+		}
+		if rw <= 0 || rh <= 0 {
+			continue
+		}
+		rowBytes := rw * 4
+		region := make([]byte, rw*rh*4)
+		for row := 0; row < rh; row++ {
+			srcOff := (ry+row)*frameStride + rx*4
+			if srcOff+rowBytes > len(decoded) {
+				break
+			}
+			copy(region[row*rowBytes:row*rowBytes+rowBytes],
+				decoded[srcOff:srcOff+rowBytes])
+
+			// Mirror the same row into the persistent surface so any
+			// subsequent codec (RFX progressive etc.) operating on the
+			// same surface starts from the up-to-date pixels.
+			dy := top + ry + row
+			if dy < 0 || dy >= int(s.height) {
+				continue
+			}
+			dstOff := dy*surfStride + (left+rx)*4
+			if dstOff < 0 || dstOff+rowBytes > len(s.data) {
+				continue
+			}
+			copy(s.data[dstOff:dstOff+rowBytes],
+				decoded[srcOff:srcOff+rowBytes])
+		}
+		if !s.mapped || g.onBitmap == nil {
+			continue
+		}
+		destL := int(s.outputX) + left + rx
+		destT := int(s.outputY) + top + ry
+		updates = append(updates, BitmapUpdate{
+			DestLeft: destL, DestTop: destT,
+			DestRight: destL + rw - 1, DestBottom: destT + rh - 1,
+			Width: rw, Height: rh, Bpp: 4, Data: region,
+		})
+	}
+	if len(updates) > 0 {
+		g.onBitmap(updates)
+	}
 }
