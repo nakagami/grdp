@@ -160,23 +160,16 @@ var avLogOnce sync.Once
 // cause long video freezes before recovery is attempted.
 const hwStallThreshold = 10
 
-// hwInitTimeout is the maximum number of packets sent to the hardware decoder
-// before it has produced its first frame.  If VT never produces output within
-// this many input packets it is considered permanently broken and we switch to
-// software.  This covers streams that VT cannot decode at all (e.g. profiles
-// it does not support).
-const hwInitTimeout = 60
-
 // swStallThreshold is the equivalent threshold for the software decoder.
 const swStallThreshold = 30
 
-// hwMaxRecoveries is the number of times the HW decoder is given a chance to
-// recover (via full CodecContext recreate) before permanently falling back to
-// software.  Each attempt destroys and recreates the AVCodecContext (NOT a
-// flush_buffers, which puts VideoToolbox into an unrecoverable AVERROR_UNKNOWN
-// state) and prepends cached SPS/PPS NALs to the next IDR so the fresh
-// decoder has the codec parameters it needs.
-const hwMaxRecoveries = 3
+// NOTE: HW→SW runtime fallback has been removed.  Empirically the SW
+// decoder, once entered mid-session, frequently leaves the connection in a
+// hung state from which it never recovers.  Instead, when the HW decoder
+// hits an unrecoverable condition we mark the decoder `broken` and stop
+// producing frames; the application-level watchdog (e.g. grdpsdl2's
+// videoStallTimeout) will then reconnect, which restarts the whole RDP
+// session and re-creates the decoder from scratch.
 
 // hwHardErrorThreshold is the number of consecutive avcodec_send_packet
 // failures on a non-IDR packet before we attempt a hard reset of the HW
@@ -204,10 +197,11 @@ type ffmpegDecoder struct {
 	needsKeyFrame     bool // drop packets until an IDR/SPS is received
 	keyframeWaitCount int  // P-frames dropped so far while needsKeyFrame=true
 	hwReady           bool // HW decoder has produced at least one frame
-	hwSentCount       int  // packets sent to HW decoder (for init timeout)
+	hwSentCount       int  // packets sent to HW decoder (for diagnostics)
 	hwErrorCount      int  // consecutive avcodec_send_packet hard errors on HW
 	hwRecoveries      int  // number of HW hard-reset (recreate) attempts made
 	swFrameCount      int  // frames decoded by SW decoder (for diagnostics)
+	broken            bool // decoder is unrecoverable; stop producing frames so the app reconnects
 
 	// SPS/PPS cache (Annex B framing, including start code).  Captured by
 	// scanning every Annex B stream we feed to the decoder.  After a hard
@@ -314,6 +308,11 @@ func (d *ffmpegDecoder) NeedsKeyframe() bool {
 
 func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 	if len(h264Data) == 0 {
+		return nil, nil
+	}
+	if d.broken {
+		// HW decoder is unrecoverable.  Stop feeding packets so no frames
+		// are produced; the application-level watchdog will reconnect.
 		return nil, nil
 	}
 
@@ -427,41 +426,29 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 			// until the server's next IDR is fed to it (with prependSPSNextIDR).
 			// avcodec_send_packet on intervening P-frames is *expected* to fail
 			// and must NOT trigger another hard reset — that would just repeat
-			// the cycle and end in an SW fallback.  Mirrors rdpyqt avc.py
-			// where decode() returning silently for non-IDR packets does not
-			// increment _hw_error_count.  We still ask the GfxHandler to nudge
-			// the server (via wantsServerRefresh) so an IDR arrives soon, and
-			// we bail out to SW only if no frame ever materialises within
-			// hwInitTimeout packets.
+			// the cycle.  Mirrors rdpyqt avc.py where decode() returning
+			// silently for non-IDR packets does not increment _hw_error_count.
+			// We ask the GfxHandler to nudge the server (via wantsServerRefresh)
+			// so an IDR arrives soon.  If the server never produces a usable
+			// frame, no bitmaps flow and the application-level watchdog
+			// reconnects.
 			if !d.hwReady {
 				d.wantsServerRefresh = true
-				if d.hwSentCount >= hwInitTimeout {
-					slog.Warn("H.264: HW decoder failed to produce first frame after reset, switching to software",
-						"hwSentCount", d.hwSentCount)
-					d.reinitSoftware()
-				}
 				return nil, nil
 			}
 			// VideoToolbox hard error.  flush_buffers cannot recover this;
 			// only a full CodecContext recreate can (proven by rdpyqt's
-			// extensive macOS testing — see avc.py:214-260).  Try a hard
-			// reset up to hwMaxRecoveries times before giving up on HW.
+			// extensive macOS testing — see avc.py:214-260).  Keep retrying
+			// hard resets; if HW truly cannot recover, hardResetHW will set
+			// d.broken so the application-level watchdog reconnects.
 			d.hwErrorCount++
 			slog.Debug("H.264: HW avcodec_send_packet failed",
 				"err", int(ret), "hwErrorCount", d.hwErrorCount)
 			if d.hwErrorCount >= hwHardErrorThreshold {
-				if d.hwRecoveries < hwMaxRecoveries {
-					slog.Debug("H.264: HW decoder hard error, recreating context",
-						"hwErrorCount", d.hwErrorCount,
-						"attempt", d.hwRecoveries+1,
-						"maxAttempts", hwMaxRecoveries)
-					d.hardResetHW()
-				} else {
-					slog.Warn("H.264: HW decoder hard error, switching to software",
-						"hwErrorCount", d.hwErrorCount,
-						"recoveries", d.hwRecoveries)
-					d.reinitSoftware()
-				}
+				slog.Debug("H.264: HW decoder hard error, recreating context",
+					"hwErrorCount", d.hwErrorCount,
+					"attempt", d.hwRecoveries+1)
+				d.hardResetHW()
 			}
 			return nil, nil
 		}
@@ -505,20 +492,16 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 		}
 	} else {
 		// Only count stalls once HW has produced at least one frame.
-		// Before that, EAGAIN is normal initialisation behaviour.
-		// However, if HW never produces a frame within hwInitTimeout packets,
-		// treat that as a permanent failure too.
+		// Before that, EAGAIN is normal initialisation behaviour.  HW→SW
+		// runtime fallback has been removed — if HW never produces a
+		// frame, no bitmaps flow and the application-level watchdog
+		// reconnects (which restarts the decoder from scratch).
 		if !d.useHW || d.hwReady {
 			d.stallCount++
 			if d.useHW {
 				slog.Debug("H.264: HW stall tick", "stallCount", d.stallCount,
 					"threshold", hwStallThreshold, "hwSentCount", d.hwSentCount)
 			}
-		} else if d.hwSentCount >= hwInitTimeout {
-			slog.Warn("H.264: HW decoder failed to produce first frame, switching to software",
-				"hwSentCount", d.hwSentCount)
-			d.reinitSoftware()
-			return nil, nil
 		}
 	}
 	return result, nil
@@ -705,21 +688,18 @@ func bytesEqual(a, b []byte) bool {
 // one.  Used when avcodec_send_packet enters a persistent error state on
 // VideoToolbox that flush_buffers cannot recover from.  The cached SPS+PPS
 // are scheduled to be prepended to the next IDR so the new context has the
-// codec parameters it needs.  After hwMaxRecoveries hard resets we permanently
-// fall back to software.  Mirrors rdpyqt avc.py:_hard_reset.
+// codec parameters it needs.  If recreation fails (no HW backend, alloc/open
+// error) the decoder is marked broken; the application-level watchdog will
+// then reconnect, which restarts the whole RDP session.  Mirrors rdpyqt
+// avc.py:_hard_reset, but without the SW fallback path.
 func (d *ffmpegDecoder) hardResetHW() {
 	d.hwRecoveries++
-	if d.hwRecoveries > hwMaxRecoveries {
-		slog.Warn("H.264: HW recovery limit reached, switching to software",
-			"recoveries", d.hwRecoveries)
-		d.reinitSoftware()
-		return
-	}
 
 	// Try to find a HW backend again.
 	codec := C.avcodec_find_decoder(C.AV_CODEC_ID_H264)
 	if codec == nil {
-		d.reinitSoftware()
+		slog.Warn("H.264: hardResetHW: codec not found, marking decoder broken")
+		d.broken = true
 		return
 	}
 	if d.codecCtx != nil {
@@ -727,7 +707,8 @@ func (d *ffmpegDecoder) hardResetHW() {
 	}
 	d.codecCtx = C.avcodec_alloc_context3(codec)
 	if d.codecCtx == nil {
-		d.reinitSoftware()
+		slog.Warn("H.264: hardResetHW: avcodec_alloc_context3 failed, marking decoder broken")
+		d.broken = true
 		return
 	}
 
@@ -761,12 +742,14 @@ func (d *ffmpegDecoder) hardResetHW() {
 		hwType = C.av_hwdevice_iterate_types(hwType)
 	}
 	if !hwOK {
-		d.reinitSoftware()
+		slog.Warn("H.264: hardResetHW: no HW backend available, marking decoder broken")
+		d.broken = true
 		return
 	}
 
 	if C.avcodec_open2(d.codecCtx, codec, nil) < 0 {
-		d.reinitSoftware()
+		slog.Warn("H.264: hardResetHW: avcodec_open2 failed, marking decoder broken")
+		d.broken = true
 		return
 	}
 
@@ -798,46 +781,6 @@ func (d *ffmpegDecoder) hardResetHW() {
 	slog.Debug("H.264: HW decoder hard-reset complete",
 		"recovery", d.hwRecoveries,
 		"spsCached", len(d.spsNAL), "ppsCached", len(d.ppsNAL))
-}
-
-// reinitSoftware tears down the HW-accelerated codec context and reopens
-// the H.264 decoder in pure software mode.  Called when the HW decoder
-// (e.g. VideoToolbox) is permanently broken for the current stream.
-func (d *ffmpegDecoder) reinitSoftware() {
-	if d.swsCtx != nil {
-		C.sws_freeContext(d.swsCtx)
-		d.swsCtx = nil
-	}
-	if d.codecCtx != nil {
-		C.avcodec_free_context(&d.codecCtx)
-	}
-
-	codec := C.avcodec_find_decoder(C.AV_CODEC_ID_H264)
-	if codec == nil {
-		return
-	}
-	d.codecCtx = C.avcodec_alloc_context3(codec)
-	if d.codecCtx == nil {
-		return
-	}
-	if C.avcodec_open2(d.codecCtx, codec, nil) < 0 {
-		C.avcodec_free_context(&d.codecCtx)
-		return
-	}
-
-	d.useHW = false
-	d.hwPixFmt = C.AV_PIX_FMT_NONE
-	d.lastW = 0
-	d.lastH = 0
-	d.lastFmt = C.AV_PIX_FMT_NONE
-	d.stallCount = 0
-	d.needsKeyFrame = true
-	d.keyframeWaitCount = 0
-	d.hwReady = false
-	d.hwSentCount = 0
-	d.hwRecoveries = 0
-	d.swFrameCount = 0
-	d.wantsServerRefresh = false
 }
 
 func (d *ffmpegDecoder) Close() {
