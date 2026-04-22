@@ -195,12 +195,24 @@ const keyframeWaitLimit = 150
 // delivered to a freshly hard-reset HW decoder (hwReady == false, i.e. after
 // the first hardReset call) without producing any decoded frame before we
 // consider the decoder permanently stuck and either retry the reset or mark it
-// broken.  At ~30 fps this corresponds to roughly 10 seconds of no output.
-const hwPostResetStuckThreshold = 300
+// broken.  Also bounds the wait in the *deferred* hard-reset path (waiting for
+// an IDR before recreating the context).  At ~30 fps this corresponds to
+// roughly 2 seconds of no output, which keeps the total recovery time
+// (deferred wait + hwMaxRecoveries hard resets) under ~8 seconds before the
+// application-level watchdog reconnects.  Larger values were observed to
+// freeze video for ~10 s mid-session when the RDPGFX server did not honour
+// the SendRefreshRect nudge promptly.
+const hwPostResetStuckThreshold = 60
 
 // hwMaxRecoveries is the maximum number of hard resets attempted before the
 // decoder is marked broken and the application-level watchdog reconnects.
-const hwMaxRecoveries = 3
+// Each attempt waits up to hwPostResetStuckThreshold packets (~2 s at 30 fps)
+// for an IDR before retrying, so the total wait before reconnect is roughly
+// hwMaxRecoveries * 2 s.  We need a generous budget because Windows RDPGFX
+// servers may take 10+ seconds to honour a SendRefreshRect when video is
+// streaming, and the application-level reconnect itself is not always
+// reliable — keeping the decoder in retry mode is preferable to giving up.
+const hwMaxRecoveries = 30
 
 type ffmpegDecoder struct {
 	codecCtx  *C.AVCodecContext

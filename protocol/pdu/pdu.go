@@ -593,6 +593,7 @@ func (c *Client) sendFastPathInputEvents(events []InputEventsInterface) bool {
 // This causes the server to send a full refresh (including a new H.264 IDR)
 // for the specified region, which is useful after a decoder reset.
 func (c *Client) SendRefreshRect(width, height uint16) {
+	slog.Debug("PDU: SendRefreshRect", "w", width, "h", height)
 	c.sendDataPDU(&RefreshRectPDU{
 		NumberOfAreas: 1,
 		Right:         width - 1,
