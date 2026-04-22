@@ -197,11 +197,14 @@ type GfxHandler struct {
 	// each one to the server.  The server tracks outstanding frames
 	// individually, so skipping ACKs causes it to stop sending.
 	ackCh chan []byte
-	// onKeyframeNeeded is called once when the H.264 decoder switches to
-	// software and needs a fresh IDR from the server.  The caller should
-	// send a refresh request (e.g. RefreshRectPDU) to trigger a new GOP.
-	onKeyframeNeeded    func()
+	// onKeyframeNeeded is called when the H.264 decoder needs a fresh IDR
+	// from the server.  The `force` flag is set true when the regular
+	// SendRefreshRect nudge has been ignored several times — the caller
+	// should then issue a stronger refresh (e.g. SuppressOutput off→on)
+	// that Windows servers reliably honour during active video streaming.
+	onKeyframeNeeded    func(force bool)
 	keyframeRequested   bool
+	keyframeAttempts    int
 	lastKeyframeRequest time.Time
 	// onDecoderBroken is called once when the H.264 decoder becomes permanently
 	// unrecoverable.  The caller should reconnect the RDP session to create a
@@ -243,7 +246,7 @@ func (g *GfxHandler) SetSendFunc(fn func([]byte)) {
 // H.264 decoder resets to software mode and needs a fresh keyframe (IDR) from
 // the server.  The callback should send a screen-refresh request so the server
 // starts a new GOP and decoding can resume promptly.
-func (g *GfxHandler) SetKeyframeNeededCallback(fn func()) {
+func (g *GfxHandler) SetKeyframeNeededCallback(fn func(force bool)) {
 	g.onKeyframeNeeded = fn
 }
 

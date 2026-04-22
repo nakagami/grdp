@@ -335,8 +335,12 @@ func (g *RdpClient) doLogin(routingToken []byte) error {
 		}
 		g.onBitmapPaintFn(bs)
 	})
-	gfxHandler.SetKeyframeNeededCallback(func() {
-		g.pdu.SendRefreshRect(uint16(g.width), uint16(g.height))
+	gfxHandler.SetKeyframeNeededCallback(func(force bool) {
+		if force {
+			g.pdu.SendForceRefresh(uint16(g.width), uint16(g.height))
+		} else {
+			g.pdu.SendRefreshRect(uint16(g.width), uint16(g.height))
+		}
 	})
 	gfxHandler.SetDecoderBrokenCallback(func() {
 		slog.Warn("H.264 decoder broken; reconnecting RDP session")
