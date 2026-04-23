@@ -542,3 +542,40 @@ func TestRLGR3RoundTrip_ConsecutiveNonZero(t *testing.T) {
 		}
 	}
 }
+
+// BenchmarkRLGR1Decode benchmarks RLGR1 decode on a 64x64 coefficient block.
+func BenchmarkRLGR1Decode(b *testing.B) {
+// Create coefficients representative of a natural image tile (mostly zeros, some non-zero)
+coeffs := make([]int16, 4096)
+for i := range coeffs {
+if i%17 == 0 {
+coeffs[i] = int16(i%256 - 128)
+}
+}
+data := rlgr1Encode(coeffs)
+
+b.ResetTimer()
+var dst []int16
+for b.Loop() {
+dst = rlgr1Decode(data, len(coeffs), dst)
+}
+_ = dst
+}
+
+// BenchmarkRLGR3Decode benchmarks RLGR3 decode on a 64x64 coefficient block.
+func BenchmarkRLGR3Decode(b *testing.B) {
+coeffs := make([]int16, 4096)
+for i := range coeffs {
+if i%17 == 0 {
+coeffs[i] = int16(i%256 - 128)
+}
+}
+data := rlgr3Encode(coeffs)
+
+b.ResetTimer()
+var dst []int16
+for b.Loop() {
+dst = rlgr3Decode(data, len(coeffs), dst)
+}
+_ = dst
+}

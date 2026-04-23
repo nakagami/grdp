@@ -21,9 +21,7 @@ func rlgr1Decode(data []byte, outputSize int, dst []int16) []int16 {
 	var output []int16
 	if cap(dst) >= outputSize {
 		output = dst[:outputSize]
-		for i := range output {
-			output[i] = 0
-		}
+		clear(output)
 	} else {
 		output = make([]int16, outputSize)
 	}
@@ -116,11 +114,12 @@ func rlgr1Decode(data []byte, outputSize int, dst []int16) []int16 {
 				mag = -mag
 			}
 
-			// Output: run zeros, then the non-zero value
-			for i := uint32(0); i < run && cnt < outputSize; i++ {
-				output[cnt] = 0
-				cnt++
+			// Output: run zeros (already 0 from init), then the non-zero value
+			runEnd := cnt + int(run)
+			if runEnd > outputSize {
+				runEnd = outputSize
 			}
+			cnt = runEnd
 			if cnt < outputSize {
 				output[cnt] = mag
 				cnt++
@@ -170,8 +169,7 @@ func rlgr1Decode(data []byte, outputSize int, dst []int16) []int16 {
 				k = kp >> rlgrLSGR
 
 				if cnt < outputSize {
-					output[cnt] = 0
-					cnt++
+					cnt++ // zero already set from init
 				}
 			} else {
 				if kp > rlgrDQGR {
@@ -208,9 +206,7 @@ func rlgr3Decode(data []byte, outputSize int, dst []int16) []int16 {
 	var output []int16
 	if cap(dst) >= outputSize {
 		output = dst[:outputSize]
-		for i := range output {
-			output[i] = 0
-		}
+		clear(output)
 	} else {
 		output = make([]int16, outputSize)
 	}
@@ -293,10 +289,11 @@ func rlgr3Decode(data []byte, outputSize int, dst []int16) []int16 {
 				mag = -mag
 			}
 
-			for i := uint32(0); i < run && cnt < outputSize; i++ {
-				output[cnt] = 0
-				cnt++
+			runEnd3 := cnt + int(run)
+			if runEnd3 > outputSize {
+				runEnd3 = outputSize
 			}
+			cnt = runEnd3
 			if cnt < outputSize {
 				output[cnt] = mag
 				cnt++
