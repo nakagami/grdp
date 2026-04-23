@@ -260,9 +260,7 @@ func rfxDecodeComponent(data []byte, quant rfxQuant, rlgrMode int) []int16 {
 	coeffs := coeffPool.Get().([]int16)
 
 	if data == nil {
-		for i := range coeffs {
-			coeffs[i] = 0
-		}
+		clear(coeffs)
 		return coeffs
 	}
 
@@ -370,8 +368,41 @@ func rfxIDWT2DLevel(buf []int16, n int) {
 		tmp[hDstOff+x+1] = int16(hd)
 	}
 
-	// Step 2: Vertical IDWT on each column
-	for col := 0; col < size; col++ {
+	// Step 2: Vertical IDWT on each column.
+	// Process 4 columns at a time to improve cache utilisation (each row
+	// access loads a cache line that covers 4+ consecutive int16 values).
+	const blk = 4
+	col := 0
+	for ; col+blk <= size; col += blk {
+		for b := 0; b < blk; b++ {
+			c := col + b
+			lVal := int32(tmp[c])
+			hVal := int32(tmp[n*size+c])
+			buf[c] = int16(lVal - ((hVal*2 + 1) >> 1))
+		}
+		for row := 1; row < n; row++ {
+			for b := 0; b < blk; b++ {
+				c := col + b
+				lIdx := row*size + c
+				hIdx := (row+n)*size + c
+				hPrevIdx := (row-1+n)*size + c
+
+				even := int32(tmp[lIdx]) - ((int32(tmp[hPrevIdx]) + int32(tmp[hIdx]) + 1) >> 1)
+				buf[2*row*size+c] = int16(even)
+
+				prevEven := int32(buf[(2*row-2)*size+c])
+				odd := (int32(tmp[hPrevIdx]) << 1) + ((prevEven + even) >> 1)
+				buf[(2*row-1)*size+c] = int16(odd)
+			}
+		}
+		for b := 0; b < blk; b++ {
+			c := col + b
+			lastEven := int32(buf[(2*n-2)*size+c])
+			lastH := int32(tmp[(2*n-1)*size+c])
+			buf[(2*n-1)*size+c] = int16((lastH << 1) + lastEven)
+		}
+	}
+	for ; col < size; col++ {
 		lVal := int32(tmp[col])
 		hVal := int32(tmp[n*size+col])
 		buf[col] = int16(lVal - ((hVal*2 + 1) >> 1))
@@ -408,7 +439,7 @@ func ictToBGRA(yRow, cbRow, crRow []int16, dst []byte, n int) {
 	const batch = 8
 	full := (n / batch) * batch
 	for base := 0; base < full; base += batch {
-		var yv, cb, cr, r, g, b [batch]int32
+		var yv, cb, cr [batch]int32
 		for k := 0; k < batch; k++ {
 			yv[k] = int32(yRow[base+k])
 			cb[k] = int32(cbRow[base+k])
@@ -416,32 +447,10 @@ func ictToBGRA(yRow, cbRow, crRow []int16, dst []byte, n int) {
 		}
 		for k := 0; k < batch; k++ {
 			ys := (yv[k] + 4096) << 16
-			r[k] = (cr[k]*91916 + ys) >> 21
-			g[k] = (ys - cb[k]*22527 - cr[k]*46819) >> 21
-			b[k] = (cb[k]*115992 + ys) >> 21
-		}
-		for k := 0; k < batch; k++ {
-			if r[k] < 0 {
-				r[k] = 0
-			} else if r[k] > 255 {
-				r[k] = 255
-			}
-			if g[k] < 0 {
-				g[k] = 0
-			} else if g[k] > 255 {
-				g[k] = 255
-			}
-			if b[k] < 0 {
-				b[k] = 0
-			} else if b[k] > 255 {
-				b[k] = 255
-			}
-		}
-		for k := 0; k < batch; k++ {
 			i := (base + k) * 4
-			dst[i] = byte(b[k])
-			dst[i+1] = byte(g[k])
-			dst[i+2] = byte(r[k])
+			dst[i] = byte(max(0, min((cb[k]*115992+ys)>>21, 255)))
+			dst[i+1] = byte(max(0, min((ys-cb[k]*22527-cr[k]*46819)>>21, 255)))
+			dst[i+2] = byte(max(0, min((cr[k]*91916+ys)>>21, 255)))
 			dst[i+3] = 0xFF
 		}
 	}
@@ -451,28 +460,10 @@ func ictToBGRA(yRow, cbRow, crRow []int16, dst []byte, n int) {
 		cb := int32(cbRow[col])
 		cr := int32(crRow[col])
 		ys := (yv + 4096) << 16
-		rv := (cr*91916 + ys) >> 21
-		gv := (ys - cb*22527 - cr*46819) >> 21
-		bv := (cb*115992 + ys) >> 21
-		if rv < 0 {
-			rv = 0
-		} else if rv > 255 {
-			rv = 255
-		}
-		if gv < 0 {
-			gv = 0
-		} else if gv > 255 {
-			gv = 255
-		}
-		if bv < 0 {
-			bv = 0
-		} else if bv > 255 {
-			bv = 255
-		}
 		i := col * 4
-		dst[i] = byte(bv)
-		dst[i+1] = byte(gv)
-		dst[i+2] = byte(rv)
+		dst[i] = byte(max(0, min((cb*115992+ys)>>21, 255)))
+		dst[i+1] = byte(max(0, min((ys-cb*22527-cr*46819)>>21, 255)))
+		dst[i+2] = byte(max(0, min((cr*91916+ys)>>21, 255)))
 		dst[i+3] = 0xFF
 	}
 }
