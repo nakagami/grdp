@@ -1019,8 +1019,8 @@ func (g *GfxHandler) onSolidFill(data []byte) {
 	}
 
 	stride := int(s.width) * 4
-	// Pre-compose a single BGRA pixel for row-level fill
-	pixel := [4]byte{cb, cg, cr, 0xFF}
+	// Pre-compose a single BGRA pixel as a uint32 for one-shot writes.
+	pixelU32 := uint32(cb) | uint32(cg)<<8 | uint32(cr)<<16 | uint32(0xFF)<<24
 
 	for i := uint16(0); i < fillCount; i++ {
 		left, _ := core.ReadUint16LE(r)
@@ -1043,30 +1043,39 @@ func (g *GfxHandler) onSolidFill(data []byte) {
 			xEnd = int(s.width)
 		}
 
-		// Fill the first row, then copy() it to subsequent rows
+		// Fill the first row with PutUint32 (single 32-bit store per pixel),
+		// then replicate it to subsequent rows with copy().
 		rowStart := int(top)*stride + int(left)*4
 		rowBytes := (xEnd - int(left)) * 4
 		if rowStart+rowBytes <= len(s.data) {
-			for x := 0; x < rowBytes; x += 4 {
-				copy(s.data[rowStart+x:rowStart+x+4], pixel[:])
+			row := s.data[rowStart : rowStart+rowBytes]
+			for x := 0; x+4 <= rowBytes; x += 4 {
+				binary.LittleEndian.PutUint32(row[x:], pixelU32)
 			}
 			for y := int(top) + 1; y < yEnd; y++ {
 				dst := y*stride + int(left)*4
 				if dst+rowBytes <= len(s.data) {
-					copy(s.data[dst:dst+rowBytes], s.data[rowStart:rowStart+rowBytes])
+					copy(s.data[dst:dst+rowBytes], row)
 				}
 			}
 		}
 
 		if s.mapped && g.onBitmap != nil {
-			// Build fill data: fill first row, then replicate
+			// Build fill data: fill first row, then replicate (doubling).
 			fillData := acquireBitmapBuf(w * h * 4)
 			rowW := w * 4
-			for x := 0; x < rowW; x += 4 {
-				copy(fillData[x:x+4], pixel[:])
+			for x := 0; x+4 <= rowW; x += 4 {
+				binary.LittleEndian.PutUint32(fillData[x:], pixelU32)
 			}
-			for row := 1; row < h; row++ {
-				copy(fillData[row*rowW:(row+1)*rowW], fillData[:rowW])
+			// Doubling copy: O(log h) memmoves instead of h linear copies.
+			filled := rowW
+			total := rowW * h
+			for filled*2 <= total {
+				copy(fillData[filled:filled*2], fillData[:filled])
+				filled *= 2
+			}
+			if filled < total {
+				copy(fillData[filled:total], fillData[:total-filled])
 			}
 			destL := int(s.outputX) + int(left)
 			destT := int(s.outputY) + int(top)
