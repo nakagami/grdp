@@ -559,16 +559,12 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 		}
 	}
 
-	// If no successful frame has been decoded yet (startup), skip stall detection.
-	// Mirrors rdpyqt drdynvc.py _onAvcNoOutput: "No successful decode yet; normal
-	// during startup".
-	//
-	// Once HW (or SW) has proven it can produce frames, check wall-clock time
-	// elapsed since the last successful output.  If it exceeds avcFreezeThreshold
-	// (2 s) we request a server refresh, subject to avcRefreshCooldown (5 s).
-	// This replaces the old packet-count approach (stallCount >= hwStallThreshold /
-	// swStallThreshold) with the time-based detection used by rdpyqt.
-	if !d.lastSuccessTime.IsZero() {
+	// Time-based stall detection.  Only fires once the decoder has proven it
+	// can produce frames (hwReady=true for HW, or lastSuccessTime set for SW).
+	// When hwReady=false the decoder is in a post-reset window handled
+	// exclusively by the postResetPackets counter below; firing the time-based
+	// stall here would trigger extra hard resets that bypass hwMaxRecoveries.
+	if !d.lastSuccessTime.IsZero() && (!d.useHW || d.hwReady) {
 		frozenFor := time.Since(d.lastSuccessTime)
 		if frozenFor >= avcFreezeThreshold {
 			if time.Since(d.lastRefreshTime) >= avcRefreshCooldown {
@@ -586,6 +582,17 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 					const hwStuckCycles = 1
 					if d.stallCycles >= hwStuckCycles {
 						d.stallCycles = 0
+						if d.hwRecoveries >= hwMaxRecoveries {
+							// Budget exhausted — mark broken immediately instead of
+							// doing another futile reset.  The postResetPackets path
+							// (below) should normally handle this, but guard here too
+							// in case the stall fires concurrently with a post-reset.
+							slog.Warn("H.264: HW decoder unrecoverable after max resets (stall), marking broken",
+								"hwRecoveries", d.hwRecoveries, "frozenFor", frozenFor)
+							d.broken = true
+							d.wantsServerRefresh = false
+							return nil, nil
+						}
 						slog.Debug("H.264: HW decoder stuck, performing hard reset",
 							"frozenFor", frozenFor)
 						d.hardResetHW()
