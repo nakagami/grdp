@@ -237,8 +237,8 @@ func NewGfxHandler(onBitmap func([]BitmapUpdate)) *GfxHandler {
 		progressive:  newRfxProgressiveDecoder(),
 		h264dec:      newH264Decoder(),
 		onBitmap:     onBitmap,
-		decodeCh:     make(chan decodePkt, 256),
-		ackCh:        make(chan []byte, 256),
+		decodeCh:     make(chan decodePkt, 1024),
+		ackCh:        make(chan []byte, 512),
 	}
 	go g.decodeLoop()
 	go g.writeLoop()
@@ -478,9 +478,11 @@ func (g *GfxHandler) decompressMultipart(data []byte) []byte {
 	}
 	r := bytes.NewReader(data)
 	segCount, _ := core.ReadUint16LE(r)
-	core.ReadUInt32LE(r) // uncompSize
+	uncompSize, _ := core.ReadUInt32LE(r)
 
-	buf := &bytes.Buffer{}
+	// Pre-allocate to the advertised uncompressed size to avoid repeated
+	// buffer growths as each segment is appended.
+	buf := make([]byte, 0, uncompSize)
 	for i := uint16(0); i < segCount; i++ {
 		segSize, err := core.ReadUInt32LE(r)
 		if err != nil {
@@ -492,13 +494,13 @@ func (g *GfxHandler) decompressMultipart(data []byte) []byte {
 		}
 		raw, rawPooled := g.decompressSegment(segData)
 		if raw != nil {
-			buf.Write(raw)
+			buf = append(buf, raw...)
 			if rawPooled {
 				releaseBitmapBuf(raw)
 			}
 		}
 	}
-	return buf.Bytes()
+	return buf
 }
 
 // decodeLoop runs in a dedicated goroutine, reading decompressed PDU data
@@ -730,15 +732,24 @@ func (g *GfxHandler) onMapSurfaceToScaledOutput(data []byte) {
 }
 
 // sendFrameAck builds and queues a FRAME_ACKNOWLEDGE PDU.
-// Safe to call from any goroutine (uses atomic framesDecoded and
-// mutex-protected latestAck).
+// Safe to call from any goroutine (uses atomic framesDecoded).
+// The PDU is serialized directly into a 20-byte slice to avoid
+// the two bytes.Buffer allocations the previous implementation required.
 func (g *GfxHandler) sendFrameAck(frameId uint32) {
 	decoded := g.framesDecoded.Add(1)
-	p := &bytes.Buffer{}
-	core.WriteUInt32LE(0, p)
-	core.WriteUInt32LE(frameId, p)
-	core.WriteUInt32LE(decoded, p)
-	g.sendPduAsync(cmdidFrameAcknowledge, p.Bytes())
+	// 8-byte RDPGFX header + 12-byte FRAME_ACKNOWLEDGE payload = 20 bytes.
+	pdu := make([]byte, 20)
+	binary.LittleEndian.PutUint16(pdu[0:], cmdidFrameAcknowledge)
+	// pdu[2:4] = flags (0) — zero value
+	binary.LittleEndian.PutUint32(pdu[4:], 20) // total PDU length
+	// pdu[8:12] = queue (0) — zero value
+	binary.LittleEndian.PutUint32(pdu[12:], frameId)
+	binary.LittleEndian.PutUint32(pdu[16:], decoded)
+	select {
+	case g.ackCh <- pdu:
+	default:
+		slog.Warn("RDPGFX: ackCh full, ACK dropped")
+	}
 }
 
 func (g *GfxHandler) onEndFrame(data []byte) {
@@ -748,20 +759,25 @@ func (g *GfxHandler) onEndFrame(data []byte) {
 	g.sendFrameAck(binary.LittleEndian.Uint32(data))
 }
 
+// onWireToSurface1Decode handles RDPGFX_WIRE_TO_SURFACE_PDU_1 (MS-RDPEGFX 2.2.2.1).
 func (g *GfxHandler) onWireToSurface1Decode(data []byte, skipHeavy bool) {
 	if len(data) < 17 {
 		return
 	}
-	r := bytes.NewReader(data)
-	surfId, _ := core.ReadUint16LE(r)
-	codecId, _ := core.ReadUint16LE(r)
-	pixFmt, _ := core.ReadUInt8(r)
-	left, _ := core.ReadUint16LE(r)
-	top, _ := core.ReadUint16LE(r)
-	right, _ := core.ReadUint16LE(r)
-	bottom, _ := core.ReadUint16LE(r)
-	bmpLen, _ := core.ReadUInt32LE(r)
-	bmpData, _ := core.ReadBytes(int(bmpLen), r)
+	// Parse fixed header fields via direct binary indexing (avoids bytes.NewReader
+	// and per-field io.ReadFull overhead on the hot H.264 path).
+	surfId := binary.LittleEndian.Uint16(data[0:])
+	codecId := binary.LittleEndian.Uint16(data[2:])
+	pixFmt := data[4]
+	left := binary.LittleEndian.Uint16(data[5:])
+	top := binary.LittleEndian.Uint16(data[7:])
+	right := binary.LittleEndian.Uint16(data[9:])
+	bottom := binary.LittleEndian.Uint16(data[11:])
+	bmpLen := binary.LittleEndian.Uint32(data[13:])
+	if int(bmpLen) > len(data)-17 {
+		return
+	}
+	bmpData := data[17 : 17+int(bmpLen)]
 
 	slog.Debug(fmt.Sprintf("RDPGFX: WTS1 surfId=%d codecId=0x%04X %dx%d bmpLen=%d", surfId, codecId, right-left, bottom-top, bmpLen))
 
@@ -858,13 +874,17 @@ func (g *GfxHandler) onWireToSurface2Decode(data []byte, skipHeavy bool) {
 	if len(data) < 13 {
 		return
 	}
-	r := bytes.NewReader(data)
-	surfId, _ := core.ReadUint16LE(r)
-	codecId, _ := core.ReadUint16LE(r)
-	codecCtxId, _ := core.ReadUInt32LE(r)
-	pixFmt, _ := core.ReadUInt8(r)
-	bmpLen, _ := core.ReadUInt32LE(r)
-	bmpData, _ := core.ReadBytes(int(bmpLen), r)
+	// Parse fixed header fields via direct binary indexing (avoids bytes.NewReader
+	// and per-field io.ReadFull overhead on the hot H.264 path).
+	surfId := binary.LittleEndian.Uint16(data[0:])
+	codecId := binary.LittleEndian.Uint16(data[2:])
+	codecCtxId := binary.LittleEndian.Uint32(data[4:])
+	pixFmt := data[8]
+	bmpLen := binary.LittleEndian.Uint32(data[9:])
+	if int(bmpLen) > len(data)-13 {
+		return
+	}
+	bmpData := data[13 : 13+int(bmpLen)]
 
 	s, ok := g.surfaces[surfId]
 	if !ok {

@@ -25,18 +25,10 @@ func CVAL3(p *[]uint8, v *[3]uint8) {
 }
 
 func REPEAT(f func(), count *int, x *int, width int) {
-	for (*count & ^0x7) != 0 && ((*x + 8) < width) {
-		for i := 0; i < 8; i++ {
-			f()
-			*count = *count - 1
-			*x = *x + 1
-		}
-	}
-
-	for (*count > 0) && (*x < width) {
+	for *count > 0 && *x < width {
 		f()
-		*count = *count - 1
-		*x = *x + 1
+		*count--
+		*x++
 	}
 }
 
