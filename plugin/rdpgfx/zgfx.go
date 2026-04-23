@@ -363,22 +363,32 @@ func (z *zgfxContext) outputMatch(distance, count int, out *[]byte) {
 // The payload must NOT include the 1-byte segment header (flags byte).
 // In RDP8 ZGFX, the last byte of the payload encodes the number of
 // padding bits to subtract from the total bit count.
-func (z *zgfxContext) Decompress(data []byte) []byte {
+//
+// buf is an optional caller-supplied backing buffer (e.g. from a sync.Pool).
+// The returned slice may use buf's backing array or a new one if buf was too
+// small; callers that pool the output must use the RETURNED slice, not buf.
+func (z *zgfxContext) Decompress(data []byte, buf []byte) []byte {
 	if len(data) < 2 {
 		// Need at least 1 byte of compressed data + 1 byte of padding count
 		return nil
 	}
 
 	br := newBitReaderWithCount(data)
-	out := make([]byte, 0, len(data)*3)
+	// Use the caller-supplied buffer if it has enough capacity; otherwise fall
+	// back to a fresh allocation sized at 3× the compressed input.
+	estSize := len(data) * 3
+	var out []byte
+	if cap(buf) >= estSize {
+		out = buf[:0]
+	} else {
+		out = make([]byte, 0, estSize)
+	}
 
-	tokenCount := 0
 	for br.hasBitsRemaining() {
 		token, ok := z.decodeToken(br)
 		if !ok {
 			break
 		}
-		tokenCount++
 		// decodeToken already consumed prefixLen bits.
 
 		if token.tokenType == tokenLiteral {

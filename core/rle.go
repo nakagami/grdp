@@ -148,29 +148,41 @@ func decompress1(output *[]uint8, width, height int, input []uint8, size int) bo
 					x++
 				}
 				if prevline == 0 {
-					REPEAT(func() {
+					for count > 0 && x < width {
 						out[x+line] = 0
-					}, &count, &x, width)
+					
+						count--
+						x++
+					}
 				} else {
-					REPEAT(func() {
+					for count > 0 && x < width {
 						out[x+line] = out[prevline+x]
-					}, &count, &x, width)
+					
+						count--
+						x++
+					}
 				}
 				break
 			case 1: /* Mix */
 				if prevline == 0 {
-					REPEAT(func() {
+					for count > 0 && x < width {
 						out[x+line] = mix
-					}, &count, &x, width)
+					
+						count--
+						x++
+					}
 				} else {
-					REPEAT(func() {
+					for count > 0 && x < width {
 						out[x+line] = out[prevline+x] ^ mix
-					}, &count, &x, width)
+					
+						count--
+						x++
+					}
 				}
 				break
 			case 2: /* Fill or Mix */
 				if prevline == 0 {
-					REPEAT(func() {
+					for count > 0 && x < width {
 						mixmask <<= 1
 						if mixmask == 0 {
 							mask = fom_mask
@@ -184,9 +196,12 @@ func decompress1(output *[]uint8, width, height int, input []uint8, size int) bo
 						} else {
 							out[x+line] = 0
 						}
-					}, &count, &x, width)
+					
+						count--
+						x++
+					}
 				} else {
-					REPEAT(func() {
+					for count > 0 && x < width {
 						mixmask = mixmask << 1
 						if mixmask == 0 {
 							mask = fom_mask
@@ -200,21 +215,30 @@ func decompress1(output *[]uint8, width, height int, input []uint8, size int) bo
 						} else {
 							out[x+line] = out[prevline+x]
 						}
-					}, &count, &x, width)
+					
+						count--
+						x++
+					}
 				}
 				break
 			case 3: /* Colour */
-				REPEAT(func() {
+				for count > 0 && x < width {
 					out[x+line] = colour2
-				}, &count, &x, width)
+				
+					count--
+					x++
+				}
 				break
 			case 4: /* Copy */
-				REPEAT(func() {
+				for count > 0 && x < width {
 					out[x+line] = uint8(CVAL(&input))
-				}, &count, &x, width)
+				
+					count--
+					x++
+				}
 				break
 			case 8: /* Bicolour */
-				REPEAT(func() {
+				for count > 0 && x < width {
 					if bicolour {
 						out[x+line] = colour2
 						bicolour = false
@@ -223,19 +247,28 @@ func decompress1(output *[]uint8, width, height int, input []uint8, size int) bo
 						bicolour = true
 						count++
 					}
-				}, &count, &x, width)
+				
+					count--
+					x++
+				}
 
 				break
 
 			case 0xd: /* White */
-				REPEAT(func() {
+				for count > 0 && x < width {
 					out[x+line] = 0xff
-				}, &count, &x, width)
+				
+					count--
+					x++
+				}
 				break
 			case 0xe: /* Black */
-				REPEAT(func() {
+				for count > 0 && x < width {
 					out[x+line] = 0
-				}, &count, &x, width)
+				
+					count--
+					x++
+				}
 				break
 			default:
 				fmt.Printf("bitmap opcode 0x%x\n", opcode)
@@ -382,29 +415,41 @@ func decompress2(output *[]uint8, width, height int, input []uint8, size int) bo
 					x++
 				}
 				if prevline == 0 {
-					REPEAT(func() {
+					for count > 0 && x < width {
 						out[x+line] = 0
-					}, &count, &x, width)
+					
+						count--
+						x++
+					}
 				} else {
-					REPEAT(func() {
+					for count > 0 && x < width {
 						out[x+line] = out[prevline+x]
-					}, &count, &x, width)
+					
+						count--
+						x++
+					}
 				}
 				break
 			case 1: /* Mix */
 				if prevline == 0 {
-					REPEAT(func() {
+					for count > 0 && x < width {
 						out[x+line] = mix
-					}, &count, &x, width)
+					
+						count--
+						x++
+					}
 				} else {
-					REPEAT(func() {
+					for count > 0 && x < width {
 						out[x+line] = out[prevline+x] ^ mix
-					}, &count, &x, width)
+					
+						count--
+						x++
+					}
 				}
 				break
 			case 2: /* Fill or Mix */
 				if prevline == 0 {
-					REPEAT(func() {
+					for count > 0 && x < width {
 						mixmask <<= 1
 						if mixmask == 0 {
 							mask = fom_mask
@@ -418,9 +463,12 @@ func decompress2(output *[]uint8, width, height int, input []uint8, size int) bo
 						} else {
 							out[x+line] = 0
 						}
-					}, &count, &x, width)
+					
+						count--
+						x++
+					}
 				} else {
-					REPEAT(func() {
+					for count > 0 && x < width {
 						mixmask = mixmask << 1
 						if mixmask == 0 {
 							mask = fom_mask
@@ -434,24 +482,33 @@ func decompress2(output *[]uint8, width, height int, input []uint8, size int) bo
 						} else {
 							out[x+line] = out[prevline+x]
 						}
-					}, &count, &x, width)
+					
+						count--
+						x++
+					}
 				}
 				break
 			case 3: /* Colour */
-				REPEAT(func() {
+				for count > 0 && x < width {
 					out[x+line] = colour2
-				}, &count, &x, width)
+				
+					count--
+					x++
+				}
 				break
 			case 4: /* Copy */
-				REPEAT(func() {
+				for count > 0 && x < width {
 					var a uint16
 					CVAL2(&input, &a)
 					out[x+line] = a
-				}, &count, &x, width)
+				
+					count--
+					x++
+				}
 
 				break
 			case 8: /* Bicolour */
-				REPEAT(func() {
+				for count > 0 && x < width {
 					if bicolour {
 						out[x+line] = colour2
 						bicolour = false
@@ -460,18 +517,27 @@ func decompress2(output *[]uint8, width, height int, input []uint8, size int) bo
 						bicolour = true
 						count++
 					}
-				}, &count, &x, width)
+				
+					count--
+					x++
+				}
 
 				break
 			case 0xd: /* White */
-				REPEAT(func() {
+				for count > 0 && x < width {
 					out[x+line] = 0xffff
-				}, &count, &x, width)
+				
+					count--
+					x++
+				}
 				break
 			case 0xe: /* Black */
-				REPEAT(func() {
+				for count > 0 && x < width {
 					out[x+line] = 0
-				}, &count, &x, width)
+				
+					count--
+					x++
+				}
 				break
 			default:
 				fmt.Printf("bitmap opcode 0x%x\n", opcode)
@@ -609,37 +675,49 @@ func decompress3(output *[]uint8, width, height int, input []uint8, size int) bo
 					x++
 				}
 				if prevline == 0 {
-					REPEAT(func() {
+					for count > 0 && x < width {
 						out[3*x+line] = 0
 						out[3*x+line+1] = 0
 						out[3*x+line+2] = 0
-					}, &count, &x, width)
+					
+						count--
+						x++
+					}
 				} else {
-					REPEAT(func() {
+					for count > 0 && x < width {
 						out[3*x+line] = out[prevline+3*x]
 						out[3*x+line+1] = out[prevline+3*x+1]
 						out[3*x+line+2] = out[prevline+3*x+2]
-					}, &count, &x, width)
+					
+						count--
+						x++
+					}
 				}
 				break
 			case 1: /* Mix */
 				if prevline == 0 {
-					REPEAT(func() {
+					for count > 0 && x < width {
 						out[3*x+line] = mix[0]
 						out[3*x+line+1] = mix[1]
 						out[3*x+line+2] = mix[2]
-					}, &count, &x, width)
+					
+						count--
+						x++
+					}
 				} else {
-					REPEAT(func() {
+					for count > 0 && x < width {
 						out[3*x+line] = out[prevline+3*x] ^ mix[0]
 						out[3*x+line+1] = out[prevline+3*x+1] ^ mix[1]
 						out[3*x+line+2] = out[prevline+3*x+2] ^ mix[2]
-					}, &count, &x, width)
+					
+						count--
+						x++
+					}
 				}
 				break
 			case 2: /* Fill or Mix */
 				if prevline == 0 {
-					REPEAT(func() {
+					for count > 0 && x < width {
 						mixmask = mixmask << 1
 						if mixmask == 0 {
 							mask = fom_mask
@@ -657,9 +735,12 @@ func decompress3(output *[]uint8, width, height int, input []uint8, size int) bo
 							out[3*x+line+1] = 0
 							out[3*x+line+2] = 0
 						}
-					}, &count, &x, width)
+					
+						count--
+						x++
+					}
 				} else {
-					REPEAT(func() {
+					for count > 0 && x < width {
 						mixmask = mixmask << 1
 						if mixmask == 0 {
 							mask = fom_mask
@@ -677,26 +758,35 @@ func decompress3(output *[]uint8, width, height int, input []uint8, size int) bo
 							out[3*x+line+1] = out[prevline+3*x+1]
 							out[3*x+line+2] = out[prevline+3*x+2]
 						}
-					}, &count, &x, width)
+					
+						count--
+						x++
+					}
 				}
 				break
 			case 3: /* Colour */
-				REPEAT(func() {
+				for count > 0 && x < width {
 					out[3*x+line] = colour2[0]
 					out[3*x+line+1] = colour2[1]
 					out[3*x+line+2] = colour2[2]
 
-				}, &count, &x, width)
+				
+					count--
+					x++
+				}
 				break
 			case 4: /* Copy */
-				REPEAT(func() {
+				for count > 0 && x < width {
 					out[3*x+line] = uint8(CVAL(&input))
 					out[3*x+line+1] = uint8(CVAL(&input))
 					out[3*x+line+2] = uint8(CVAL(&input))
-				}, &count, &x, width)
+				
+					count--
+					x++
+				}
 				break
 			case 8: /* Bicolour */
-				REPEAT(func() {
+				for count > 0 && x < width {
 					if bicolour {
 						out[3*x+line] = colour2[0]
 						out[3*x+line+1] = colour2[1]
@@ -709,22 +799,31 @@ func decompress3(output *[]uint8, width, height int, input []uint8, size int) bo
 						bicolour = true
 						count++
 					}
-				}, &count, &x, width)
+				
+					count--
+					x++
+				}
 				break
 			case 0xd: /* White */
-				REPEAT(func() {
+				for count > 0 && x < width {
 					out[3*x+line] = 0xff
 					out[3*x+line+1] = 0xff
 					out[3*x+line+2] = 0xff
 
-				}, &count, &x, width)
+				
+					count--
+					x++
+				}
 				break
 			case 0xe: /* Black */
-				REPEAT(func() {
+				for count > 0 && x < width {
 					out[3*x+line] = 0
 					out[3*x+line+1] = 0
 					out[3*x+line+2] = 0
-				}, &count, &x, width)
+				
+					count--
+					x++
+				}
 				break
 			default:
 				fmt.Printf("bitmap opcode 0x%x\n", opcode)

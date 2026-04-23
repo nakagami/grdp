@@ -394,9 +394,9 @@ func (g *GfxHandler) Process(data []byte) {
 		}
 		decompressed, decompPooled = g.decompressSegment(data[1:])
 	case zgfxMultipart:
-		decompressed = g.decompressMultipart(data[1:])
+		decompressed, decompPooled = g.decompressMultipart(data[1:])
 	default:
-		slog.Warn(fmt.Sprintf("RDPGFX: unknown ZGFX descriptor 0x%02X, trying raw", descriptor))
+		slog.Warn("RDPGFX: unknown ZGFX descriptor", "descriptor", fmt.Sprintf("0x%02X", descriptor))
 		decompressed = data
 	}
 
@@ -452,6 +452,10 @@ func (g *GfxHandler) ackDroppedFrames(pkt decodePkt) {
 //
 //	bits 0-3: compression type (0x04 = RDP8)
 //	bit 5: PACKET_COMPRESSED (0x20)
+//
+// Always returns pooled=true: the returned slice was acquired from
+// bitmapBufPool (directly or via Decompress) and must be released with
+// releaseBitmapBuf once the caller is done with it.
 func (g *GfxHandler) decompressSegment(seg []byte) ([]byte, bool) {
 	if len(seg) < 1 {
 		return nil, false
@@ -459,7 +463,12 @@ func (g *GfxHandler) decompressSegment(seg []byte) ([]byte, bool) {
 	header := seg[0]
 	payload := seg[1:]
 	if header&0x20 != 0 {
-		return g.zgfx.Decompress(payload), false
+		// Acquire a pool buffer as the initial backing for Decompress output.
+		// Decompress may grow beyond it; the returned slice (not buf) must be
+		// released by the caller.  Any over-small buf that gets replaced is
+		// abandoned to GC — the pool converges to the right size over time.
+		buf := acquireBitmapBuf(len(payload) * 3)
+		return g.zgfx.Decompress(payload, buf), true
 	}
 	g.zgfx.historyWrite(payload)
 	// Return a pooled copy: payload aliases the caller's network buffer, which
@@ -472,35 +481,45 @@ func (g *GfxHandler) decompressSegment(seg []byte) ([]byte, bool) {
 
 // decompressMultipart handles ZGFX multipart segments and returns the
 // concatenated decompressed data (without processing PDUs).
-func (g *GfxHandler) decompressMultipart(data []byte) []byte {
+// Returns a slice acquired from bitmapBufPool; caller must release it.
+func (g *GfxHandler) decompressMultipart(data []byte) ([]byte, bool) {
 	if len(data) < 6 {
-		return nil
+		return nil, false
 	}
-	r := bytes.NewReader(data)
-	segCount, _ := core.ReadUint16LE(r)
-	uncompSize, _ := core.ReadUInt32LE(r)
+	// Direct slice indexing — avoids bytes.NewReader and per-field io.ReadFull.
+	segCount := binary.LittleEndian.Uint16(data[0:])
+	uncompSize := binary.LittleEndian.Uint32(data[2:])
+	offset := 6
 
 	// Pre-allocate to the advertised uncompressed size to avoid repeated
 	// buffer growths as each segment is appended.
-	buf := make([]byte, 0, uncompSize)
+	buf := acquireBitmapBuf(int(uncompSize))
+	result := buf[:0]
 	for i := uint16(0); i < segCount; i++ {
-		segSize, err := core.ReadUInt32LE(r)
-		if err != nil {
-			return nil
+		if offset+4 > len(data) {
+			break
 		}
-		segData, err := core.ReadBytes(int(segSize), r)
-		if err != nil {
-			return nil
+		segSize := int(binary.LittleEndian.Uint32(data[offset:]))
+		offset += 4
+		if offset+segSize > len(data) {
+			break
 		}
+		segData := data[offset : offset+segSize]
+		offset += segSize
 		raw, rawPooled := g.decompressSegment(segData)
 		if raw != nil {
-			buf = append(buf, raw...)
+			result = append(result, raw...)
 			if rawPooled {
 				releaseBitmapBuf(raw)
 			}
 		}
 	}
-	return buf
+	if len(result) == 0 {
+		releaseBitmapBuf(buf)
+		return nil, false
+	}
+	// If result grew beyond buf, buf was abandoned; result is the new owner.
+	return result, true
 }
 
 // decodeLoop runs in a dedicated goroutine, reading decompressed PDU data
@@ -585,7 +604,7 @@ func (g *GfxHandler) dispatchDecode(cmdId uint16, data []byte, skipHeavy bool) {
 	case cmdidMapSurfaceToScaledOutput, cmdidMapSurfaceToScaledOutputV2:
 		g.onMapSurfaceToScaledOutput(data)
 	default:
-		slog.Debug(fmt.Sprintf("RDPGFX: unhandled cmd 0x%04X", cmdId))
+		slog.Debug("RDPGFX: unhandled cmd", "cmdId", fmt.Sprintf("0x%04X", cmdId))
 	}
 }
 
@@ -651,7 +670,7 @@ func (g *GfxHandler) onCapsConfirm(data []byte) {
 	if dataLen >= 4 {
 		flags, _ = core.ReadUInt32LE(r)
 	}
-	slog.Debug(fmt.Sprintf("RDPGFX: CAPS_CONFIRM version=0x%08X flags=0x%08X", version, flags))
+	slog.Debug("RDPGFX: CAPS_CONFIRM", "version", fmt.Sprintf("0x%08X", version), "flags", fmt.Sprintf("0x%08X", flags))
 }
 
 func (g *GfxHandler) onResetGraphics(data []byte) {
@@ -661,7 +680,7 @@ func (g *GfxHandler) onResetGraphics(data []byte) {
 	r := bytes.NewReader(data)
 	w, _ := core.ReadUInt32LE(r)
 	h, _ := core.ReadUInt32LE(r)
-	slog.Debug(fmt.Sprintf("RDPGFX: RESET_GRAPHICS %dx%d", w, h))
+	slog.Debug("RDPGFX: RESET_GRAPHICS", "w", w, "h", h)
 	g.surfaces = make(map[uint16]*surface)
 	g.clearCtx = newClearCodecCtx()
 	g.framesDecoded.Store(0)
@@ -680,7 +699,7 @@ func (g *GfxHandler) onCreateSurface(data []byte) {
 	w, _ := core.ReadUint16LE(r)
 	h, _ := core.ReadUint16LE(r)
 	f, _ := core.ReadUInt8(r)
-	slog.Debug(fmt.Sprintf("RDPGFX: CREATE_SURFACE id=%d %dx%d", id, w, h))
+	slog.Debug("RDPGFX: CREATE_SURFACE", "id", id, "w", w, "h", h)
 	g.surfaces[id] = &surface{
 		width: w, height: h, format: f,
 		data: make([]byte, int(w)*int(h)*4),
@@ -704,7 +723,7 @@ func (g *GfxHandler) onMapSurfaceToOutput(data []byte) {
 	core.ReadUint16LE(r) // reserved
 	ox, _ := core.ReadUInt32LE(r)
 	oy, _ := core.ReadUInt32LE(r)
-	slog.Debug(fmt.Sprintf("RDPGFX: MAP_SURFACE id=%d → (%d,%d)", id, ox, oy))
+	slog.Debug("RDPGFX: MAP_SURFACE", "id", id, "ox", ox, "oy", oy)
 	if s, ok := g.surfaces[id]; ok {
 		s.outputX = ox
 		s.outputY = oy
@@ -723,7 +742,7 @@ func (g *GfxHandler) onMapSurfaceToScaledOutput(data []byte) {
 	oy, _ := core.ReadUInt32LE(r)
 	core.ReadUInt32LE(r) // targetWidth
 	core.ReadUInt32LE(r) // targetHeight
-	slog.Debug(fmt.Sprintf("RDPGFX: MAP_SURFACE_SCALED id=%d → (%d,%d)", id, ox, oy))
+	slog.Debug("RDPGFX: MAP_SURFACE_SCALED", "id", id, "ox", ox, "oy", oy)
 	if s, ok := g.surfaces[id]; ok {
 		s.outputX = ox
 		s.outputY = oy
@@ -779,7 +798,10 @@ func (g *GfxHandler) onWireToSurface1Decode(data []byte, skipHeavy bool) {
 	}
 	bmpData := data[17 : 17+int(bmpLen)]
 
-	slog.Debug(fmt.Sprintf("RDPGFX: WTS1 surfId=%d codecId=0x%04X %dx%d bmpLen=%d", surfId, codecId, right-left, bottom-top, bmpLen))
+	if slog.Default().Enabled(nil, slog.LevelDebug) {
+		slog.Debug("RDPGFX: WTS1", "surfId", surfId, "codecId", fmt.Sprintf("0x%04X", codecId),
+			"w", right-left, "h", bottom-top, "bmpLen", bmpLen)
+	}
 
 	w := int(right - left)
 	h := int(bottom - top)
@@ -846,7 +868,7 @@ func (g *GfxHandler) onWireToSurface1Decode(data []byte, skipHeavy bool) {
 		decoded, avcRegions, ownedAVC = g.decodeAVC444(bmpData, w, h)
 		owned = ownedAVC
 	default:
-		slog.Warn(fmt.Sprintf("RDPGFX: unsupported codec 0x%04X in WTS1 (surf=%d %dx%d bmpLen=%d)", codecId, surfId, w, h, bmpLen))
+		slog.Warn("RDPGFX: unsupported codec in WTS1", "codecId", fmt.Sprintf("0x%04X", codecId), "surfId", surfId, "w", w, "h", h, "bmpLen", bmpLen)
 		return
 	}
 	if decoded == nil {
@@ -894,7 +916,10 @@ func (g *GfxHandler) onWireToSurface2Decode(data []byte, skipHeavy bool) {
 	w := int(s.width)
 	h := int(s.height)
 
-	slog.Debug(fmt.Sprintf("RDPGFX: WTS2 surfId=%d codecId=0x%04X %dx%d bmpLen=%d", surfId, codecId, w, h, bmpLen))
+	if slog.Default().Enabled(nil, slog.LevelDebug) {
+		slog.Debug("RDPGFX: WTS2", "surfId", surfId, "codecId", fmt.Sprintf("0x%04X", codecId),
+			"w", w, "h", h, "bmpLen", bmpLen)
+	}
 
 	var decoded []byte
 	switch codecId {
@@ -996,7 +1021,7 @@ func (g *GfxHandler) onWireToSurface2Decode(data []byte, skipHeavy bool) {
 			regionPool.Put(region)
 		}
 	default:
-		slog.Debug(fmt.Sprintf("RDPGFX: WTS2 unsupported codec 0x%04X ctxId=%d", codecId, codecCtxId))
+		slog.Debug("RDPGFX: WTS2 unsupported codec", "codecId", fmt.Sprintf("0x%04X", codecId), "ctxId", codecCtxId)
 		return
 	}
 }
