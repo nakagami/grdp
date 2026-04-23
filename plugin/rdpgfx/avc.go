@@ -116,70 +116,76 @@ func parseAVC444Stream(data []byte) (*avc420Stream, uint8, error) {
 // can blit only those regions instead of the whole frame, which dramatically
 // reduces per-frame copying for typical desktop video where most of the
 // frame is unchanged from the previous frame.
-func (g *GfxHandler) decodeAVC420(data []byte, destW, destH int) ([]byte, []avcRect) {
+// The pooled return value is true when the returned slice was acquired from
+// bitmapBufPool; the caller must then call releaseBitmapBuf on it.
+func (g *GfxHandler) decodeAVC420(data []byte, destW, destH int) ([]byte, []avcRect, bool) {
 	if g.h264dec == nil {
-		return nil, nil
+		return nil, nil, false
 	}
 	stream, err := parseAVC420Stream(data)
 	if err != nil {
 		slog.Warn("RDPGFX: AVC420 parse error", "err", err)
-		return nil, nil
+		return nil, nil, false
 	}
 	if len(stream.h264Data) == 0 {
-		return nil, nil
+		return nil, nil, false
 	}
 	frame, err := g.h264dec.Decode(stream.h264Data)
 	if err != nil {
 		slog.Warn("RDPGFX: H.264 decode error", "err", err)
-		return nil, nil
+		return nil, nil, false
 	}
 	if frame == nil {
 		g.maybeRequestKeyframe()
 		g.maybeNotifyDecoderBroken()
 		slog.Debug("RDPGFX: H.264 decode returned nil frame (buffering?)")
-		return nil, nil
+		return nil, nil, false
 	}
 	g.keyframeRequested = false
 	g.keyframeAttempts = 0
 	slog.Debug("RDPGFX: AVC420 decoded", "frameW", frame.Width, "frameH", frame.Height, "destW", destW, "destH", destH, "regions", len(stream.regions), "h264Len", len(stream.h264Data))
-	return cropBGRA(frame.Data, frame.Width, frame.Height, destW, destH), stream.regions
+	decoded, pooled := cropBGRA(frame.Data, frame.Width, frame.Height, destW, destH)
+	return decoded, stream.regions, pooled
 }
 
 // decodeAVC444 decodes AVC444 bitmap data to BGRA pixels.
 // Currently decodes the main YUV420 stream only (LC=0,1).
-func (g *GfxHandler) decodeAVC444(data []byte, destW, destH int) ([]byte, []avcRect) {
+// The pooled return value is true when the returned slice was acquired from
+// bitmapBufPool; the caller must then call releaseBitmapBuf on it.
+func (g *GfxHandler) decodeAVC444(data []byte, destW, destH int) ([]byte, []avcRect, bool) {
 	if g.h264dec == nil {
-		return nil, nil
+		return nil, nil, false
 	}
 	stream, lc, err := parseAVC444Stream(data)
 	if err != nil {
 		slog.Warn("RDPGFX: AVC444 parse error", "err", err)
-		return nil, nil
+		return nil, nil, false
 	}
 	if stream == nil {
 		if lc == 2 {
 			slog.Debug("RDPGFX: AVC444 LC=2 (chroma upgrade) skipped")
 		}
-		return nil, nil
+		return nil, nil, false
 	}
 	if len(stream.h264Data) == 0 {
-		return nil, nil
+		return nil, nil, false
 	}
 	frame, err := g.h264dec.Decode(stream.h264Data)
 	if err != nil {
 		slog.Warn("RDPGFX: H.264 decode error (AVC444)", "err", err)
-		return nil, nil
+		return nil, nil, false
 	}
 	if frame == nil {
 		g.maybeRequestKeyframe()
 		g.maybeNotifyDecoderBroken()
-		return nil, nil
+		return nil, nil, false
 	}
 	g.keyframeRequested = false
 	g.keyframeAttempts = 0
 	slog.Debug("RDPGFX: AVC444 decoded", "frameW", frame.Width, "frameH", frame.Height,
 		"destW", destW, "destH", destH, "h264Len", len(stream.h264Data))
-	return cropBGRA(frame.Data, frame.Width, frame.Height, destW, destH), stream.regions
+	decoded, pooled := cropBGRA(frame.Data, frame.Width, frame.Height, destW, destH)
+	return decoded, stream.regions, pooled
 }
 
 // maybeNotifyDecoderBroken calls onDecoderBroken (if set) once when the H.264
@@ -243,11 +249,14 @@ func (g *GfxHandler) maybeRequestKeyframe() {
 }
 
 // cropBGRA crops or pads BGRA pixel data to the target dimensions.
-func cropBGRA(src []byte, srcW, srcH, dstW, dstH int) []byte {
+// When srcW == dstW and srcH == dstH the input slice is returned unchanged
+// and pooled is false.  Otherwise a new buffer is acquired from bitmapBufPool
+// (pooled == true) and the caller must call releaseBitmapBuf on it.
+func cropBGRA(src []byte, srcW, srcH, dstW, dstH int) ([]byte, bool) {
 	if srcW == dstW && srcH == dstH {
-		return src
+		return src, false
 	}
-	out := make([]byte, dstW*dstH*4)
+	out := acquireBitmapBuf(dstW * dstH * 4)
 	copyW := dstW
 	if srcW < copyW {
 		copyW = srcW
@@ -262,7 +271,7 @@ func cropBGRA(src []byte, srcW, srcH, dstW, dstH int) []byte {
 	for y := 0; y < copyH; y++ {
 		copy(out[y*dstStride:y*dstStride+rowBytes], src[y*srcStride:y*srcStride+rowBytes])
 	}
-	return out
+	return out, true
 }
 
 // avcRegionUseThresholdPercent is the upper bound on the *fraction* of the
