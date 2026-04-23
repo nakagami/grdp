@@ -2,7 +2,6 @@ package pdu
 
 import (
 	"bytes"
-	"fmt"
 	"log/slog"
 	"sync"
 
@@ -304,7 +303,7 @@ func (c *Client) recvServerSynchronizePDU(s []byte) {
 		} else {
 			slog.Error("recvServerSynchronizePDU ignore message", "type", pdu.ShareCtrlHeader.PDUType)
 		}
-		slog.Debug(fmt.Sprintf("%+v", dataPdu))
+		slog.Debug("recvServerSynchronizePDU dataPdu", "pdu", &dataPdu)
 		c.transport.Once("data", c.recvServerSynchronizePDU)
 		return
 	}

@@ -597,7 +597,7 @@ func (*UpdateDataPDU) Type2() uint8 {
 func (d *UpdateDataPDU) Unpack(r io.Reader) (err error) {
 	//slow path update
 	d.UpdateType, err = core.ReadUint16LE(r)
-	slog.Debug(fmt.Sprintf("UpdateType 0x%02x", d.UpdateType))
+	slog.Debug("FastPathUpdate", "type", d.UpdateType)
 	var p UpdateData
 	switch d.UpdateType {
 	case FASTPATH_UPDATETYPE_ORDERS:
@@ -642,7 +642,7 @@ func (d *PointerDataPDU) Unpack(r io.Reader) error {
 	if err != nil {
 		return err
 	}
-	slog.Debug(fmt.Sprintf("PointerDataPDU messageType 0x%04x", d.MessageType))
+	slog.Debug("PointerDataPDU", "messageType", d.MessageType)
 	var p UpdateData
 	switch d.MessageType {
 	case TS_PTRUPDATE_TYPE_CACHED:
@@ -652,7 +652,7 @@ func (d *PointerDataPDU) Unpack(r io.Reader) error {
 	case TS_PTRUPDATE_TYPE_SYSTEM, TS_PTRUPDATE_TYPE_POSITION, TS_PTRUPDATE_TYPE_COLOR:
 		// not yet parsed; remaining data is discarded by the caller
 	default:
-		slog.Debug(fmt.Sprintf("PointerDataPDU: unhandled messageType 0x%04x", d.MessageType))
+		slog.Debug("PointerDataPDU: unhandled", "messageType", d.MessageType)
 	}
 	if p != nil {
 		if err = p.Unpack(r); err != nil {

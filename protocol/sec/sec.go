@@ -8,7 +8,6 @@ import (
 	"crypto/rsa"
 	"crypto/sha1"
 	"encoding/binary"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"github.com/lunixbochs/struc"
@@ -346,7 +345,7 @@ func (s *SEC) LegacyEncryptionEnabled() bool {
 }
 
 func (s *SEC) sendFlagged(flag uint16, data []byte) (n int, err error) {
-	slog.Debug("sendFlagged", "flag", flag, "data", hex.EncodeToString(data))
+	slog.Debug("sendFlagged", "flag", flag, "data", core.Hex(data))
 	b := s.encryt(flag, data)
 	return s.transport.Write(b)
 }
@@ -406,7 +405,7 @@ func (s *SEC) writeEncryptedPayload(data []byte, checkSum bool) []byte {
 	result := make([]byte, 8+len(data))
 	copy(result[:8], sign)
 	s.encryptRc4.XORKeyStream(result[8:], data)
-	slog.Debug("writeEncryptedPayload", "sign", hex.EncodeToString(sign), "plaintext", hex.EncodeToString(result[8:]))
+	slog.Debug("writeEncryptedPayload", "sign", core.Hex(sign), "plaintext", core.Hex(result[8:]))
 	return result
 }
 
@@ -685,10 +684,10 @@ func (e *ClientSecurityExchangePDU) serialize() []byte {
 }
 func (c *Client) sendClientRandom() {
 	clientRandom := core.Random(32)
-	slog.Debug("sendClientRandom", "clientRandom", hex.EncodeToString(clientRandom))
+	slog.Debug("sendClientRandom", "clientRandom", core.Hex(clientRandom))
 
 	serverRandom := c.ServerSecurityData().ServerRandom
-	slog.Debug("sendlientRandom", "ServerRandom", hex.EncodeToString(serverRandom))
+	slog.Debug("sendlientRandom", "ServerRandom", core.Hex(serverRandom))
 
 	c.macKey, c.initialDecrytKey, c.initialEncryptKey = generateKeys(clientRandom,
 		serverRandom, c.ServerSecurityData().EncryptionMethod)
@@ -727,7 +726,7 @@ func (c *Client) sendInfoPkt() {
 }
 
 func (c *Client) recvLicenceInfo(channel string, s []byte) {
-	slog.Debug("recvLicenceInfo", "s", hex.EncodeToString(s))
+	slog.Debug("recvLicenceInfo", "s", core.Hex(s))
 	r := bytes.NewReader(s)
 	h := readSecurityHeader(r)
 	if (h.securityFlag & LICENSE_PKT) == 0 {
@@ -879,7 +878,7 @@ func (c *Client) sendClientChallengeResponse(data []byte) {
 }
 
 func (c *Client) recvData(channel string, s []byte) {
-	slog.Debug("sec recvData", "channel", channel, "s", hex.EncodeToString(s))
+	slog.Debug("sec recvData", "channel", channel, "s", core.Hex(s))
 	data := c.decrytData(s)
 	if channel != t125.GLOBAL_CHANNEL_NAME {
 		c.Emit("channel", channel, data)
@@ -905,7 +904,7 @@ func (c *Client) SetChannelSender(f core.ChannelSender) {
 
 func (c *Client) SendToChannel(channel string, b []byte) (int, error) {
 	if !c.enableEncryption {
-		slog.Debug("SendToChannel", "b", hex.EncodeToString(b))
+		slog.Debug("SendToChannel", "b", core.Hex(b))
 		return c.channelSender.SendToChannel(channel, b)
 	}
 	var flag uint16 = ENCRYPT
@@ -918,6 +917,6 @@ func (c *Client) SendToChannel(channel string, b []byte) (int, error) {
 	core.WriteUInt16LE(flag, buff)
 	core.WriteUInt16LE(0, buff)
 	core.WriteBytes(data, buff)
-	slog.Debug("SendToChannel", "channel", channel, "buff", hex.EncodeToString(buff.Bytes()))
+	slog.Debug("SendToChannel", "channel", channel, "buff", core.Hex(buff.Bytes()))
 	return c.channelSender.SendToChannel(channel, buff.Bytes())
 }
