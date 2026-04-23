@@ -112,36 +112,54 @@ type Bitmap struct {
 	Data         []byte
 }
 
-func pixelToRGBA(pixel int, i int, data []byte) (r, g, b, a uint8) {
-	a = 255
-	switch pixel {
-	case 1:
-		rgb555 := core.Uint16BE(data[i], data[i+1])
-		r, g, b = core.RGB555ToRGB(rgb555)
-	case 2:
-		rgb565 := core.Uint16BE(data[i], data[i+1])
-		r, g, b = core.RGB565ToRGB(rgb565)
-	case 3, 4:
-		fallthrough
-	default:
-		r, g, b = data[i+2], data[i+1], data[i]
-	}
-
-	return
-}
-
 func (bm *Bitmap) RGBA() *image.RGBA {
-	pixel := bm.BitsPerPixel
 	m := image.NewRGBA(image.Rect(0, 0, bm.Width, bm.Height))
 	pix := m.Pix
-	dataIdx := 0
-	for i := 0; i < len(pix); i += 4 {
-		r, g, b, a := pixelToRGBA(pixel, dataIdx, bm.Data)
-		pix[i] = r
-		pix[i+1] = g
-		pix[i+2] = b
-		pix[i+3] = a
-		dataIdx += pixel
+	data := bm.Data
+
+	// Per-format specialised loops avoid a per-pixel switch and let the
+	// compiler hoist bounds checks and emit tight, branch-free inner code.
+	switch bm.BitsPerPixel {
+	case 1:
+		// 16-bit RGB555 stored big-endian in two bytes.
+		n := len(pix) >> 2
+		if len(data) < n*2 {
+			n = len(data) / 2
+		}
+		for i := 0; i < n; i++ {
+			d := uint16(data[i*2])<<8 | uint16(data[i*2+1])
+			pix[i*4] = uint8((d & 0x7C00) >> 7)
+			pix[i*4+1] = uint8((d & 0x03E0) >> 2)
+			pix[i*4+2] = uint8((d & 0x001F) << 3)
+			pix[i*4+3] = 0xFF
+		}
+	case 2:
+		// 16-bit RGB565 stored big-endian in two bytes.
+		n := len(pix) >> 2
+		if len(data) < n*2 {
+			n = len(data) / 2
+		}
+		for i := 0; i < n; i++ {
+			d := uint16(data[i*2])<<8 | uint16(data[i*2+1])
+			pix[i*4] = uint8((d & 0xF800) >> 8)
+			pix[i*4+1] = uint8((d & 0x07E0) >> 3)
+			pix[i*4+2] = uint8((d & 0x001F) << 3)
+			pix[i*4+3] = 0xFF
+		}
+	default:
+		// 24/32-bit BGR(A) → RGBA with stride = bm.BitsPerPixel.
+		stride := bm.BitsPerPixel
+		n := len(pix) >> 2
+		if len(data) < n*stride {
+			n = len(data) / stride
+		}
+		for i := 0; i < n; i++ {
+			s := i * stride
+			pix[i*4] = data[s+2]
+			pix[i*4+1] = data[s+1]
+			pix[i*4+2] = data[s]
+			pix[i*4+3] = 0xFF
+		}
 	}
 	return m
 }

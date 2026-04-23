@@ -108,13 +108,11 @@ func WriteUInt32BE(data uint32, w io.Writer) (int, error) {
 }
 
 func PutUint16BE(data uint16) (uint8, uint8) {
-	var buf [2]byte
-	binary.BigEndian.PutUint16(buf[:], data)
-	return buf[0], buf[1]
+	return uint8(data >> 8), uint8(data)
 }
 
 func Uint16BE(d0, d1 uint8) uint16 {
-	return binary.BigEndian.Uint16([]byte{d0, d1})
+	return uint16(d0)<<8 | uint16(d1)
 }
 
 func RGB565ToRGB(data uint16) (r, g, b uint8) {
