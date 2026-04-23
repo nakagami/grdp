@@ -11,6 +11,9 @@ package rdpgfx
 #include <libswscale/swscale.h>
 #include <stdlib.h>
 #include <stdint.h>
+#ifdef __ARM_NEON__
+#include <arm_neon.h>
+#endif
 
 // grdp_suppress_av_log sets FFmpeg's global log level to FATAL so that
 // decoder-level error messages (e.g. "sps_id out of range", "no frame!")
@@ -123,22 +126,99 @@ static void grdp_yuv420p_to_bgra(
 // for the same reason as grdp_yuv420p_to_bgra: on ARM64 swscale's
 // non-accelerated NV12→BGRA fallback ignores sws_setColorspaceDetails.
 // VideoToolbox (macOS HW decoder) always outputs NV12.
+//
+// On ARM64 the inner loop is NEON-accelerated (8 pixels per iteration) to
+// reduce per-frame CPU cost and decode-loop jitter.
+#ifdef __ARM_NEON__
+// grdp_nv12_to_bgra_neon_8 processes 8 luma pixels (4 UV pairs) per call.
+// All int32x4_t intermediates prevent overflow of e.g. 298*239 = 71 222.
+static inline void grdp_nv12_to_bgra_neon_8(
+    const uint8_t *yrow, const uint8_t *uvrow, uint8_t *drow,
+    int col, int16_t ky, int16_t kr, int16_t kgu, int16_t kgv, int16_t kb,
+    int16_t yoff)
+{
+    // Load 8 luma bytes, convert to int16, subtract Y offset (16 or 0).
+    uint8x8_t y_u8 = vld1_u8(yrow + col);
+    int16x8_t c16  = vsubq_s16(vreinterpretq_s16_u16(vmovl_u8(y_u8)),
+                                vdupq_n_s16(yoff));
+
+    // Load 8 UV bytes: [U0,V0,U1,V1,U2,V2,U3,V3].
+    // vuzp deinterleaves into .val[0]=[U0,U1,U2,U3,…] .val[1]=[V0,V1,V2,V3,…].
+    // vzip then duplicates each value for the two luma pixels it serves.
+    uint8x8_t uv_u8    = vld1_u8(uvrow + col);
+    uint8x8x2_t uv_sep = vuzp_u8(uv_u8, uv_u8);
+    uint8x8_t u8       = vzip_u8(uv_sep.val[0], uv_sep.val[0]).val[0]; // [U0,U0,U1,U1,…]
+    uint8x8_t v8       = vzip_u8(uv_sep.val[1], uv_sep.val[1]).val[0]; // [V0,V0,V1,V1,…]
+
+    int16x8_t u16 = vsubq_s16(vreinterpretq_s16_u16(vmovl_u8(u8)), vdupq_n_s16(128));
+    int16x8_t v16 = vsubq_s16(vreinterpretq_s16_u16(vmovl_u8(v8)), vdupq_n_s16(128));
+
+    // Compute R/G/B with int32 to avoid overflow.  Process 4+4 pixels.
+    int16x4_t c_lo = vget_low_s16(c16),  u_lo = vget_low_s16(u16),  v_lo = vget_low_s16(v16);
+    int16x4_t c_hi = vget_high_s16(c16), u_hi = vget_high_s16(u16), v_hi = vget_high_s16(v16);
+
+    int32x4_t ky_lo = vmull_n_s16(c_lo, ky), ky_hi = vmull_n_s16(c_hi, ky);
+
+    int32x4_t r_lo = vaddq_s32(vaddq_s32(ky_lo, vmull_n_s16(v_lo, kr)), vdupq_n_s32(128));
+    int32x4_t g_lo = vaddq_s32(vsubq_s32(vsubq_s32(ky_lo, vmull_n_s16(u_lo, kgu)), vmull_n_s16(v_lo, kgv)), vdupq_n_s32(128));
+    int32x4_t b_lo = vaddq_s32(vaddq_s32(ky_lo, vmull_n_s16(u_lo, kb)),  vdupq_n_s32(128));
+
+    int32x4_t r_hi = vaddq_s32(vaddq_s32(ky_hi, vmull_n_s16(v_hi, kr)), vdupq_n_s32(128));
+    int32x4_t g_hi = vaddq_s32(vsubq_s32(vsubq_s32(ky_hi, vmull_n_s16(u_hi, kgu)), vmull_n_s16(v_hi, kgv)), vdupq_n_s32(128));
+    int32x4_t b_hi = vaddq_s32(vaddq_s32(ky_hi, vmull_n_s16(u_hi, kb)),  vdupq_n_s32(128));
+
+    // Shift >>8, saturate int32→int16→uint8, then store interleaved BGRA.
+    uint8x8_t r = vqmovun_s16(vcombine_s16(vqmovn_s32(vshrq_n_s32(r_lo,8)), vqmovn_s32(vshrq_n_s32(r_hi,8))));
+    uint8x8_t g = vqmovun_s16(vcombine_s16(vqmovn_s32(vshrq_n_s32(g_lo,8)), vqmovn_s32(vshrq_n_s32(g_hi,8))));
+    uint8x8_t b = vqmovun_s16(vcombine_s16(vqmovn_s32(vshrq_n_s32(b_lo,8)), vqmovn_s32(vshrq_n_s32(b_hi,8))));
+    uint8x8x4_t bgra;
+    bgra.val[0] = b;
+    bgra.val[1] = g;
+    bgra.val[2] = r;
+    bgra.val[3] = vdup_n_u8(255);
+    vst4_u8(drow + col * 4, bgra);
+}
+#endif // __ARM_NEON__
+
 static void grdp_nv12_to_bgra(
     const AVFrame *src, uint8_t *dst, int dst_stride, int full_range)
 {
     int width  = src->width;
     int height = src->height;
+#ifdef __ARM_NEON__
+    // NEON fast path: 8 pixels per inner iteration on ARM64.
+    int16_t ky  = full_range ? 256 : 298;
+    int16_t kr  = full_range ? 359 : 409;
+    int16_t kgu = full_range ?  88 : 100;
+    int16_t kgv = full_range ? 183 : 208;
+    int16_t kb  = full_range ? 454 : 516;
+    int16_t yoff = full_range ? 0 : 16;
     for (int row = 0; row < height; row++) {
         const uint8_t *yrow  = src->data[0] + row        * src->linesize[0];
         const uint8_t *uvrow = src->data[1] + (row >> 1) * src->linesize[1];
         uint8_t *drow = dst + row * dst_stride;
-        for (int col = 0; col < width; col++) {
-            // NV12 UV plane: U and V are interleaved, one pair per 2×2 block.
+        int col = 0;
+        for (; col + 7 < width; col += 8)
+            grdp_nv12_to_bgra_neon_8(yrow, uvrow, drow, col, ky, kr, kgu, kgv, kb, yoff);
+        // Scalar tail for widths not a multiple of 8.
+        for (; col < width; col++) {
             int u = (int)uvrow[(col >> 1) * 2    ] - 128;
             int v = (int)uvrow[(col >> 1) * 2 + 1] - 128;
             grdp_bt601_pixel((int)yrow[col], u, v, full_range, drow + col*4);
         }
     }
+#else
+    for (int row = 0; row < height; row++) {
+        const uint8_t *yrow  = src->data[0] + row        * src->linesize[0];
+        const uint8_t *uvrow = src->data[1] + (row >> 1) * src->linesize[1];
+        uint8_t *drow = dst + row * dst_stride;
+        for (int col = 0; col < width; col++) {
+            int u = (int)uvrow[(col >> 1) * 2    ] - 128;
+            int v = (int)uvrow[(col >> 1) * 2 + 1] - 128;
+            grdp_bt601_pixel((int)yrow[col], u, v, full_range, drow + col*4);
+        }
+    }
+#endif
 }
 
 // grdp_sample_yuv samples the centre pixel of a planar YUV frame for
@@ -200,12 +280,15 @@ var avLogOnce sync.Once
 
 // avcFreezeThreshold is the duration of no decoded output after which the
 // decoder is considered stalled and a server refresh is requested.
-// Mirrors rdpyqt drdynvc.py _AVC_FREEZE_THRESHOLD = 30.0.
-const avcFreezeThreshold = 30 * time.Second
+// Lowered from 30 s to 2 s so that stall detection fires before the
+// application-level watchdog (~5 s), giving the decoder-level recovery
+// (hard reset + IDR request) a chance to act first.
+const avcFreezeThreshold = 2 * time.Second
 
 // avcRefreshCooldown is the minimum interval between consecutive server
-// refresh requests.  Mirrors rdpyqt drdynvc.py _AVC_REFRESH_COOLDOWN = 60.0.
-const avcRefreshCooldown = 60 * time.Second
+// refresh requests.  Lowered from 60 s to 5 s to allow rapid re-detection
+// after a failed hard-reset attempt.
+const avcRefreshCooldown = 5 * time.Second
 
 // NOTE: HW→SW runtime fallback has been removed.  Empirically the SW
 // decoder, once entered mid-session, frequently leaves the connection in a
@@ -465,7 +548,7 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 	//
 	// Once HW (or SW) has proven it can produce frames, check wall-clock time
 	// elapsed since the last successful output.  If it exceeds avcFreezeThreshold
-	// (30 s) we request a server refresh, subject to avcRefreshCooldown (60 s).
+	// (2 s) we request a server refresh, subject to avcRefreshCooldown (5 s).
 	// This replaces the old packet-count approach (stallCount >= hwStallThreshold /
 	// swStallThreshold) with the time-based detection used by rdpyqt.
 	if !d.lastSuccessTime.IsZero() {
@@ -480,7 +563,10 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 					// parameter change where the cached SPS no longer matches).
 					// flush_buffers cannot recover this — only a full CodecContext
 					// recreate works.  Mirrors rdpyqt avc.py:_hard_reset escalation.
-					const hwStuckCycles = 2
+					// hwStuckCycles=1: skip the nudge phase and go straight to hard
+					// reset; nudging rarely causes the server to send an IDR during
+					// active video streaming.
+					const hwStuckCycles = 1
 					if d.stallCycles >= hwStuckCycles {
 						d.stallCycles = 0
 						slog.Debug("H.264: HW decoder stuck, performing hard reset",
