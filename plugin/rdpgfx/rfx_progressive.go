@@ -401,6 +401,82 @@ func rfxPlaceTile(yCoeffs, cbCoeffs, crCoeffs []int16, xIdx, yIdx int, output []
 	rfxPlaceTileAbs(yCoeffs, cbCoeffs, crCoeffs, xIdx*rfxTileSize, yIdx*rfxTileSize, output, outW, outH)
 }
 
+// ictToBGRA converts n pixels from YCbCr (ICT) to BGRA and writes them into
+// dst (which must hold ≥ 4*n bytes). Processing n pixels in [8]int32 fixed-size
+// arrays lets the compiler emit ARM64 NEON / x86 AVX2 vectorised instructions.
+func ictToBGRA(yRow, cbRow, crRow []int16, dst []byte, n int) {
+	const batch = 8
+	full := (n / batch) * batch
+	for base := 0; base < full; base += batch {
+		var yv, cb, cr, r, g, b [batch]int32
+		for k := 0; k < batch; k++ {
+			yv[k] = int32(yRow[base+k])
+			cb[k] = int32(cbRow[base+k])
+			cr[k] = int32(crRow[base+k])
+		}
+		for k := 0; k < batch; k++ {
+			ys := (yv[k] + 4096) << 16
+			r[k] = (cr[k]*91916 + ys) >> 21
+			g[k] = (ys - cb[k]*22527 - cr[k]*46819) >> 21
+			b[k] = (cb[k]*115992 + ys) >> 21
+		}
+		for k := 0; k < batch; k++ {
+			if r[k] < 0 {
+				r[k] = 0
+			} else if r[k] > 255 {
+				r[k] = 255
+			}
+			if g[k] < 0 {
+				g[k] = 0
+			} else if g[k] > 255 {
+				g[k] = 255
+			}
+			if b[k] < 0 {
+				b[k] = 0
+			} else if b[k] > 255 {
+				b[k] = 255
+			}
+		}
+		for k := 0; k < batch; k++ {
+			i := (base + k) * 4
+			dst[i] = byte(b[k])
+			dst[i+1] = byte(g[k])
+			dst[i+2] = byte(r[k])
+			dst[i+3] = 0xFF
+		}
+	}
+	// Scalar tail for pixels that don't fill a full batch.
+	for col := full; col < n; col++ {
+		yv := int32(yRow[col])
+		cb := int32(cbRow[col])
+		cr := int32(crRow[col])
+		ys := (yv + 4096) << 16
+		rv := (cr*91916 + ys) >> 21
+		gv := (ys - cb*22527 - cr*46819) >> 21
+		bv := (cb*115992 + ys) >> 21
+		if rv < 0 {
+			rv = 0
+		} else if rv > 255 {
+			rv = 255
+		}
+		if gv < 0 {
+			gv = 0
+		} else if gv > 255 {
+			gv = 255
+		}
+		if bv < 0 {
+			bv = 0
+		} else if bv > 255 {
+			bv = 255
+		}
+		i := col * 4
+		dst[i] = byte(bv)
+		dst[i+1] = byte(gv)
+		dst[i+2] = byte(rv)
+		dst[i+3] = 0xFF
+	}
+}
+
 // rfxPlaceTileAbs converts YCbCr tile to BGRA and writes into the output buffer
 // at absolute pixel coordinates (tileX, tileY).
 // Uses ICT (Irreversible Color Transform) from MS-RDPRFX.
@@ -417,10 +493,7 @@ func rfxPlaceTileAbs(yCoeffs, cbCoeffs, crCoeffs []int16, tileX, tileY int, outp
 		return
 	}
 
-	stride := outW * 4
 	for row := 0; row < tileH; row++ {
-		// Bound-check the destination row once per row, then drop bounds
-		// checks on the per-pixel writes via a fixed-length slice.
 		dstStart := ((tileY+row)*outW + tileX) * 4
 		dstEnd := dstStart + tileW*4
 		if dstStart < 0 || dstEnd > len(output) {
@@ -428,44 +501,11 @@ func rfxPlaceTileAbs(yCoeffs, cbCoeffs, crCoeffs []int16, tileX, tileY int, outp
 		}
 		dstRow := output[dstStart:dstEnd:dstEnd]
 		srcOff := row * rfxTileSize
-		yRow := yCoeffs[srcOff : srcOff+tileW : srcOff+tileW]
-		cbRow := cbCoeffs[srcOff : srcOff+tileW : srcOff+tileW]
-		crRow := crCoeffs[srcOff : srcOff+tileW : srcOff+tileW]
-		_ = stride
-		for col := 0; col < tileW; col++ {
-			yVal := int32(yRow[col])
-			cb := int32(cbRow[col])
-			cr := int32(crRow[col])
-
-			// ICT (YCbCr → RGB) with fixed-point arithmetic. Scaled
-			// coefficients fit in int32: |y| < 4096, |cb,cr| < 4096
-			// so the largest product (cb*115992) fits in ~28 bits.
-			yScaled := (yVal + 4096) << 16
-			r := (cr*91916 + yScaled) >> 21
-			g := (yScaled - cb*22527 - cr*46819) >> 21
-			b := (cb*115992 + yScaled) >> 21
-
-			if r < 0 {
-				r = 0
-			} else if r > 255 {
-				r = 255
-			}
-			if g < 0 {
-				g = 0
-			} else if g > 255 {
-				g = 255
-			}
-			if b < 0 {
-				b = 0
-			} else if b > 255 {
-				b = 255
-			}
-
-			i := col * 4
-			dstRow[i] = byte(b)
-			dstRow[i+1] = byte(g)
-			dstRow[i+2] = byte(r)
-			dstRow[i+3] = 0xFF
-		}
+		ictToBGRA(
+			yCoeffs[srcOff:srcOff+tileW:srcOff+tileW],
+			cbCoeffs[srcOff:srcOff+tileW:srcOff+tileW],
+			crCoeffs[srcOff:srcOff+tileW:srcOff+tileW],
+			dstRow, tileW,
+		)
 	}
 }

@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bufio"
 	"crypto/rsa"
 	"crypto/tls"
 	"encoding/asn1"
@@ -11,9 +12,15 @@ import (
 	"time"
 )
 
+// readBufSize is the size of the buffered reader used for socket reads.
+// RDP packets can be large (bitmap updates, channel data); a 64 KiB buffer
+// keeps the number of read(2) syscalls low without wasting memory.
+const readBufSize = 65536
+
 type SocketLayer struct {
 	conn       net.Conn
 	tlsConn    *tls.Conn
+	reader     *bufio.Reader // buffers reads regardless of TLS state
 	serverName string
 }
 
@@ -27,6 +34,7 @@ func NewSocketLayer(conn net.Conn, serverName string) *SocketLayer {
 		tlsConn:    nil,
 		serverName: serverName,
 	}
+	l.reader = bufio.NewReaderSize(conn, readBufSize)
 	return l
 }
 
@@ -35,10 +43,7 @@ func (s *SocketLayer) SetDeadline(t time.Time) error {
 }
 
 func (s *SocketLayer) Read(b []byte) (n int, err error) {
-	if s.tlsConn != nil {
-		return s.tlsConn.Read(b)
-	}
-	return s.conn.Read(b)
+	return s.reader.Read(b)
 }
 
 func (s *SocketLayer) Write(b []byte) (n int, err error) {
@@ -71,6 +76,10 @@ func (s *SocketLayer) StartTLS() error {
 		return err
 	}
 	s.tlsConn = tlsConn
+	// Reset the buffered reader to read from the TLS connection.
+	// Reset discards any unconsumed buffered bytes from the plain-text phase,
+	// which is correct because the TLS handshake has already consumed them.
+	s.reader.Reset(tlsConn)
 	return nil
 }
 
