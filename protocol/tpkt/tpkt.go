@@ -2,7 +2,6 @@ package tpkt
 
 import (
 	"bytes"
-	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -71,7 +70,7 @@ func (t *TPKT) StartNLA() error {
 	}
 	slog.Debug("StartNLA: TLS handshake complete")
 	req := nla.EncodeDERTRequest([]nla.Message{t.ntlm.GetNegotiateMessage()}, nil, nil)
-	slog.Debug("StartNLA send", "req", hex.EncodeToString(req), "len", len(req))
+	slog.Debug("StartNLA send", "req", core.Hex(req), "len", len(req))
 	_, err = t.Conn.Write(req)
 	if err != nil {
 		slog.Error("send NegotiateMessage", "err", err)
@@ -90,7 +89,7 @@ func (t *TPKT) StartNLA() error {
 }
 
 func (t *TPKT) recvChallenge(data []byte) error {
-	slog.Debug("recvChallenge", "data", hex.EncodeToString(data))
+	slog.Debug("recvChallenge", "data", core.Hex(data))
 	tsreq, err := nla.DecodeDERTRequest(data)
 	if err != nil {
 		slog.Debug("DecodeDERTRequest", "err", err)
@@ -99,14 +98,14 @@ func (t *TPKT) recvChallenge(data []byte) error {
 	slog.Debug("recvChallenge", "tsreq", tsreq)
 	// get pubkey
 	pubkey, err := t.Conn.TlsPubKey()
-	slog.Debug("recvChallenge", "pubkey", hex.EncodeToString(pubkey))
+	slog.Debug("recvChallenge", "pubkey", core.Hex(pubkey))
 
 	authMsg, ntlmSec := t.ntlm.GetAuthenticateMessage(tsreq.NegoTokens[0].Data)
 	t.ntlmSec = ntlmSec
 
 	encryptPubkey := ntlmSec.GssEncrypt(pubkey)
 	req := nla.EncodeDERTRequest([]nla.Message{authMsg}, nil, encryptPubkey)
-	slog.Debug("recvChallenge", "send", hex.EncodeToString(req), "len", len(req))
+	slog.Debug("recvChallenge", "send", core.Hex(req), "len", len(req))
 	_, err = t.Conn.Write(req)
 	if err != nil {
 		slog.Error("send AuthenticateMessage", "err", err)
@@ -125,16 +124,16 @@ func (t *TPKT) recvChallenge(data []byte) error {
 }
 
 func (t *TPKT) recvPubKeyInc(data []byte) error {
-	slog.Debug("recvPubKeyInc", "data", hex.EncodeToString(data), "len", len(data))
+	slog.Debug("recvPubKeyInc", "data", core.Hex(data), "len", len(data))
 	tsreq, err := nla.DecodeDERTRequest(data)
 	if err != nil {
 		slog.Debug("DecodeDERTRequest", "err", err)
 		return err
 	}
-	slog.Debug("PubKeyAuth", "key", hex.EncodeToString(tsreq.PubKeyAuth))
+	slog.Debug("PubKeyAuth", "key", core.Hex(tsreq.PubKeyAuth))
 	//ignore
 	pubkey := t.ntlmSec.GssDecrypt([]byte(tsreq.PubKeyAuth))
-	slog.Debug("GssDecrypy", "pubkey", hex.EncodeToString(pubkey))
+	slog.Debug("GssDecrypy", "pubkey", core.Hex(pubkey))
 	domain, username, password := t.ntlm.GetEncodedCredentials()
 	credentials := nla.EncodeDERTCredentials(domain, username, password)
 	authInfo := t.ntlmSec.GssEncrypt(credentials)
@@ -175,7 +174,7 @@ func (t *TPKT) SendFastPath(secFlag byte, data []byte) (n int, err error) {
 	hdr := uint16(len(data)+3) | 0x8000
 	buf = append(buf[:0], FASTPATH_ACTION_FASTPATH|((secFlag&0x3)<<6), byte(hdr>>8), byte(hdr))
 	buf = append(buf, data...)
-	slog.Debug("TPTK SendFastPath", "buff", hex.EncodeToString(buf))
+	slog.Debug("TPTK SendFastPath", "buff", core.Hex(buf))
 	n, err = t.Conn.Write(buf)
 	writePool.Put(buf[:0])
 	return
@@ -188,7 +187,7 @@ func (t *TPKT) recvHeader(s []byte, err error) {
 	}
 	r := bytes.NewReader(s)
 	version, _ := core.ReadUInt8(r)
-	slog.Debug("TPKT recvHeader", "version", version, "raw", hex.EncodeToString(s))
+	slog.Debug("TPKT recvHeader", "version", version, "raw", core.Hex(s))
 	if version == FASTPATH_ACTION_X224 {
 		core.StartReadBytes(2, t.Conn, t.recvExtendedHeader)
 	} else {

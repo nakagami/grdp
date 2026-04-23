@@ -2,7 +2,6 @@ package t125
 
 import (
 	"bytes"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -323,16 +322,16 @@ func (c *MCSClient) connect(selectedProtocol uint32) {
 	userDataBuff.Write(c.clientSecurityData.Pack())
 	userDataBuff.Write(gcc.PackClientMsgChannelData())
 
-	slog.Debug("userData", "data", hex.EncodeToString(userDataBuff.Bytes()), "len", len(userDataBuff.Bytes()))
+	slog.Debug("userData", "data", core.Hex(userDataBuff.Bytes()), "len", len(userDataBuff.Bytes()))
 	ccReq := gcc.MakeConferenceCreateRequest(userDataBuff.Bytes())
-	slog.Debug("ccReq", "data", hex.EncodeToString(ccReq), "len", len(ccReq))
+	slog.Debug("ccReq", "data", core.Hex(ccReq), "len", len(ccReq))
 	connectInitial := NewConnectInitial(ccReq)
 	connectInitialBerEncoded := connectInitial.BER()
 
 	dataBuff := &bytes.Buffer{}
 	ber.WriteApplicationTag(uint8(MCS_TYPE_CONNECT_INITIAL), len(connectInitialBerEncoded), dataBuff)
 	dataBuff.Write(connectInitialBerEncoded)
-	slog.Debug("send connet initial", "data", hex.EncodeToString(dataBuff.Bytes()), "len", len(dataBuff.Bytes()))
+	slog.Debug("send connet initial", "data", core.Hex(dataBuff.Bytes()), "len", len(dataBuff.Bytes()))
 
 	_, err := c.transport.Write(dataBuff.Bytes())
 	if err != nil {
@@ -344,7 +343,7 @@ func (c *MCSClient) connect(selectedProtocol uint32) {
 }
 
 func (c *MCSClient) recvConnectResponse(s []byte) {
-	slog.Debug("mcs recvConnectResponse", "s", hex.EncodeToString(s))
+	slog.Debug("mcs recvConnectResponse", "s", core.Hex(s))
 	cResp, err := ReadConnectResponse(bytes.NewReader(s))
 	if err != nil {
 		c.Emit("error", errors.New(fmt.Sprintf("ReadConnectResponse %v", err)))
@@ -392,7 +391,7 @@ func (c *MCSClient) sendAttachUserRequest() {
 }
 
 func (c *MCSClient) recvAttachUserConfirm(s []byte) {
-	slog.Debug("mcs recvAttachUserConfirm", "s", hex.EncodeToString(s))
+	slog.Debug("mcs recvAttachUserConfirm", "s", core.Hex(s))
 	r := bytes.NewReader(s)
 
 	option, err := core.ReadUInt8(r)
@@ -473,7 +472,7 @@ func (c *MCSClient) sendChannelJoinRequest(channelId uint16) {
 }
 
 func (c *MCSClient) recvData(s []byte) {
-	slog.Debug("mcs recvData", "s", hex.EncodeToString(s))
+	slog.Debug("mcs recvData", "s", core.Hex(s))
 
 	r := bytes.NewReader(s)
 	option, err := core.ReadUInt8(r)
@@ -521,12 +520,12 @@ func (c *MCSClient) recvData(s []byte) {
 		c.Emit("error", errors.New(fmt.Sprintf("mcs recvData get data error %v", err)))
 		return
 	}
-	slog.Debug("mcs emit sec", "channel", channelName, "left", hex.EncodeToString(left))
+	slog.Debug("mcs emit sec", "channel", channelName, "left", core.Hex(left))
 	c.Emit("sec", channelName, left)
 }
 
 func (c *MCSClient) recvChannelJoinConfirm(s []byte) {
-	slog.Debug("recvChannelJoinConfirm", "s", hex.EncodeToString(s))
+	slog.Debug("recvChannelJoinConfirm", "s", core.Hex(s))
 	r := bytes.NewReader(s)
 	option, err := core.ReadUInt8(r)
 	if err != nil {

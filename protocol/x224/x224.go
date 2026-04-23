@@ -2,7 +2,6 @@ package x224
 
 import (
 	"bytes"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -259,14 +258,14 @@ func (x *X224) Connect() error {
 	message.ProtocolNeg.Type = TYPE_RDP_NEG_REQ
 	message.ProtocolNeg.Result = uint32(x.requestedProtocol)
 
-	slog.Debug("x224 Connect", "message", hex.EncodeToString(message.Serialize()))
+	slog.Debug("x224 Connect", "message", core.Hex(message.Serialize()))
 	_, err := x.transport.Write(message.Serialize())
 	x.transport.Once("data", x.recvConnectionConfirm)
 	return err
 }
 
 func (x *X224) recvConnectionConfirm(s []byte) {
-	slog.Debug("x224 recvConnectionConfirm", "s", hex.EncodeToString(s))
+	slog.Debug("x224 recvConnectionConfirm", "s", core.Hex(s))
 	r := bytes.NewReader(s)
 	ln, _ := core.ReadUInt8(r)
 	if ln > 6 {

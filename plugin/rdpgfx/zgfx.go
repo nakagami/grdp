@@ -220,6 +220,20 @@ func (br *bitReader) getBit() uint32 {
 }
 
 func (br *bitReader) getBits(n uint8) uint32 {
+	if n == 0 {
+		return 0
+	}
+	// Fast path: enough bits remain in the current byte.
+	if n <= br.bitPos && br.bytePos < len(br.data) {
+		br.bitPos -= n
+		v := (uint32(br.data[br.bytePos]) >> br.bitPos) & ((1 << n) - 1)
+		if br.bitPos == 0 {
+			br.bytePos++
+			br.bitPos = 8
+		}
+		return v
+	}
+	// Slow path: span byte boundaries (n can be up to 24).
 	var result uint32
 	for i := uint8(0); i < n; i++ {
 		result = (result << 1) | br.getBit()
@@ -293,11 +307,19 @@ func (z *zgfxContext) outputMatch(distance, count int, out *[]byte) {
 	}
 	o := *out
 	base := len(o)
-	// Grow output by count zeroed bytes.  copy below fills them.
-	for cap(o)-len(o) < count {
-		o = append(o[:cap(o)], 0)
+	// Grow output by `count` bytes in a single allocation step.
+	if cap(o)-base < count {
+		// Standard slice-growth: at least double cap or fit count, whichever larger.
+		newCap := cap(o) * 2
+		if newCap < base+count {
+			newCap = base + count
+		}
+		grown := make([]byte, base+count, newCap)
+		copy(grown, o)
+		o = grown
+	} else {
+		o = o[:base+count]
 	}
-	o = o[:base+count]
 
 	srcIdx := z.historyIdx - distance
 	if srcIdx < 0 {
