@@ -38,6 +38,17 @@ static void grdp_set_get_format(AVCodecContext *ctx) {
     ctx->get_format = grdp_get_hw_format;
 }
 
+// grdp_set_low_delay enables AV_CODEC_FLAG_LOW_DELAY on the codec context
+// so the decoder emits frames as soon as they are decoded, without waiting
+// to reorder B-frames.  RDP H.264 streams transmit in display order and do
+// not use B-frame reordering, so the default reorder buffer only adds
+// apparent latency and (on VideoToolbox) makes legitimate frames look like
+// "null frames" to our stall detector, triggering spurious hard resets.
+static void grdp_set_low_delay(AVCodecContext *ctx) {
+    ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
+    ctx->flags2 |= AV_CODEC_FLAG2_FAST;
+}
+
 static void grdp_set_hw_pix_fmt(AVCodecContext *ctx, enum AVPixelFormat fmt) {
     ctx->opaque = (void*)(intptr_t)fmt;
 }
@@ -413,6 +424,12 @@ func newH264Decoder() h264Decoder {
 		hwPixFmt: C.AV_PIX_FMT_NONE,
 		lastFmt:  C.AV_PIX_FMT_NONE,
 	}
+
+	// Always enable LOW_DELAY: RDP H.264 streams are transmitted in display
+	// order with no B-frame reordering, so the default reorder buffer adds
+	// no value and (especially on VideoToolbox) makes the decoder appear
+	// stalled between IDRs.
+	C.grdp_set_low_delay(codecCtx)
 
 	// Probe available hardware acceleration backends.
 	hwType := C.av_hwdevice_iterate_types(C.AV_HWDEVICE_TYPE_NONE)
@@ -947,6 +964,7 @@ func (d *ffmpegDecoder) hardResetHW() {
 		d.broken = true
 		return
 	}
+	C.grdp_set_low_delay(d.codecCtx)
 
 	// Re-attach a HW device of the previously-used type if possible.
 	hwOK := false
@@ -1018,6 +1036,12 @@ func (d *ffmpegDecoder) hardResetHW() {
 	// (handled in Decode where !d.hwReady suppresses the hard-reset cascade).
 	d.wantsServerRefresh = true
 	d.stallCycles = 0
+	// Reset the time-based stall baseline so the next stall check measures
+	// freshly from this reset, not from the original stall ~2 s ago.  Without
+	// this, the very first packet after the avcRefreshCooldown window
+	// elapses re-triggers the time-based hard-reset path (frozenFor ≥ 2 s)
+	// even though we have just recreated the decoder.
+	d.lastSuccessTime = time.Now()
 	d.prependSPSNextIDR = len(d.spsNAL) > 0 && len(d.ppsNAL) > 0
 	slog.Debug("H.264: HW decoder hard-reset complete",
 		"recovery", d.hwRecoveries,
