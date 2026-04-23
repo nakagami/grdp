@@ -112,6 +112,14 @@ var bitmapBufPool = sync.Pool{
 	New: func() any { return []byte(nil) },
 }
 
+// decodePkt is the message type for the async decode channel.
+// pooled is true when data was acquired from bitmapBufPool; the receiver
+// must call releaseBitmapBuf(data) after processing.
+type decodePkt struct {
+	data   []byte
+	pooled bool
+}
+
 func acquireBitmapBuf(size int) []byte {
 	if size <= 0 {
 		return nil
@@ -191,7 +199,7 @@ type GfxHandler struct {
 	sendFn        func(data []byte)
 	onBitmap      func([]BitmapUpdate)
 	// decodeCh receives decompressed PDU data for asynchronous decode.
-	decodeCh chan []byte
+	decodeCh chan decodePkt
 	// ackCh is a buffered channel of serialized ACK PDUs.  Every
 	// EndFrame ACK is enqueued here and the writeLoop goroutine sends
 	// each one to the server.  The server tracks outstanding frames
@@ -229,7 +237,7 @@ func NewGfxHandler(onBitmap func([]BitmapUpdate)) *GfxHandler {
 		progressive:  newRfxProgressiveDecoder(),
 		h264dec:      newH264Decoder(),
 		onBitmap:     onBitmap,
-		decodeCh:     make(chan []byte, 256),
+		decodeCh:     make(chan decodePkt, 256),
 		ackCh:        make(chan []byte, 256),
 	}
 	go g.decodeLoop()
@@ -376,6 +384,7 @@ func (g *GfxHandler) Process(data []byte) {
 	}
 
 	var decompressed []byte
+	var decompPooled bool
 
 	descriptor := data[0]
 	switch descriptor {
@@ -383,7 +392,7 @@ func (g *GfxHandler) Process(data []byte) {
 		if len(data) < 2 {
 			return
 		}
-		decompressed = g.decompressSegment(data[1:])
+		decompressed, decompPooled = g.decompressSegment(data[1:])
 	case zgfxMultipart:
 		decompressed = g.decompressMultipart(data[1:])
 	default:
@@ -398,14 +407,15 @@ func (g *GfxHandler) Process(data []byte) {
 	// decompressSegment / decompressMultipart already return owned
 	// buffers (freshly allocated or copied from input) so we can hand
 	// the slice directly to the async decode goroutine.
+	pkt := decodePkt{data: decompressed, pooled: decompPooled}
 	select {
-	case g.decodeCh <- decompressed:
+	case g.decodeCh <- pkt:
 	default:
 		// Channel full — video decode is dropped, but we must still
 		// ACK any EndFrame PDUs so the server's outstanding-frame
 		// count stays accurate and it keeps sending.
 		slog.Warn("RDPGFX: decodeCh full, dropping frame (ACKs preserved)", "queueCap", cap(g.decodeCh))
-		g.ackDroppedFrames(decompressed)
+		g.ackDroppedFrames(pkt)
 	}
 }
 
@@ -414,7 +424,13 @@ func (g *GfxHandler) Process(data []byte) {
 // is full and the message is being dropped.  Without this, dropped
 // EndFrames would leave the server's outstanding-frame count stuck,
 // eventually causing it to stop sending entirely.
-func (g *GfxHandler) ackDroppedFrames(data []byte) {
+func (g *GfxHandler) ackDroppedFrames(pkt decodePkt) {
+	data := pkt.data
+	defer func() {
+		if pkt.pooled {
+			releaseBitmapBuf(data)
+		}
+	}()
 	for offset := 0; offset+headerSize <= len(data); {
 		cmdId := binary.LittleEndian.Uint16(data[offset:])
 		pduLength := binary.LittleEndian.Uint32(data[offset+4:])
@@ -436,22 +452,22 @@ func (g *GfxHandler) ackDroppedFrames(data []byte) {
 //
 //	bits 0-3: compression type (0x04 = RDP8)
 //	bit 5: PACKET_COMPRESSED (0x20)
-func (g *GfxHandler) decompressSegment(seg []byte) []byte {
+func (g *GfxHandler) decompressSegment(seg []byte) ([]byte, bool) {
 	if len(seg) < 1 {
-		return nil
+		return nil, false
 	}
 	header := seg[0]
 	payload := seg[1:]
 	if header&0x20 != 0 {
-		return g.zgfx.Decompress(payload)
+		return g.zgfx.Decompress(payload), false
 	}
 	g.zgfx.historyWrite(payload)
-	// Return a copy: payload aliases the caller's network buffer, which
-	// will be reused on the next read. Callers (Process) hand the slice
-	// off to the async decode goroutine and must own the memory.
-	owned := make([]byte, len(payload))
-	copy(owned, payload)
-	return owned
+	// Return a pooled copy: payload aliases the caller's network buffer, which
+	// will be reused on the next read. Callers hand the slice off to the async
+	// decode goroutine and must own the memory.
+	buf := acquireBitmapBuf(len(payload))
+	copy(buf, payload)
+	return buf, true
 }
 
 // decompressMultipart handles ZGFX multipart segments and returns the
@@ -474,9 +490,12 @@ func (g *GfxHandler) decompressMultipart(data []byte) []byte {
 		if err != nil {
 			return nil
 		}
-		raw := g.decompressSegment(segData)
+		raw, rawPooled := g.decompressSegment(segData)
 		if raw != nil {
 			buf.Write(raw)
+			if rawPooled {
+				releaseBitmapBuf(raw)
+			}
 		}
 	}
 	return buf.Bytes()
@@ -495,8 +514,11 @@ func (g *GfxHandler) decodeLoop() {
 		}
 	}()
 	slog.Debug("RDPGFX: decodeLoop started")
-	for data := range g.decodeCh {
-		g.decodePDUs(data)
+	for pkt := range g.decodeCh {
+		g.decodePDUs(pkt.data)
+		if pkt.pooled {
+			releaseBitmapBuf(pkt.data)
+		}
 	}
 }
 
@@ -800,9 +822,13 @@ func (g *GfxHandler) onWireToSurface1Decode(data []byte, skipHeavy bool) {
 		decoded = decodePlanar(bmpData, w, h)
 		owned = true
 	case codecAVC420:
-		decoded, avcRegions = g.decodeAVC420(bmpData, w, h)
+		var ownedAVC bool
+		decoded, avcRegions, ownedAVC = g.decodeAVC420(bmpData, w, h)
+		owned = ownedAVC
 	case codecAVC444, codecAVC444v2:
-		decoded, avcRegions = g.decodeAVC444(bmpData, w, h)
+		var ownedAVC bool
+		decoded, avcRegions, ownedAVC = g.decodeAVC444(bmpData, w, h)
+		owned = ownedAVC
 	default:
 		slog.Warn(fmt.Sprintf("RDPGFX: unsupported codec 0x%04X in WTS1 (surf=%d %dx%d bmpLen=%d)", codecId, surfId, w, h, bmpLen))
 		return
@@ -890,23 +916,37 @@ func (g *GfxHandler) onWireToSurface2Decode(data []byte, skipHeavy bool) {
 			g.emitAndReleaseUpdates(updates)
 		}
 	case codecAVC420:
-		decoded, avcRegions := g.decodeAVC420(bmpData, w, h)
+		decoded, avcRegions, ownedAVC := g.decodeAVC420(bmpData, w, h)
 		if decoded != nil {
 			if len(avcRegions) > 0 && shouldUseAVCRegions(avcRegions, w, h) {
 				g.blitAndEmitAVCRegions(s, 0, 0, w, h, decoded, avcRegions)
+				if ownedAVC {
+					releaseBitmapBuf(decoded)
+				}
 			} else {
 				blitToSurface(s, 0, 0, w, h, decoded)
-				g.emitBitmap(s, 0, 0, w, h, decoded)
+				if ownedAVC {
+					g.emitBitmapPooled(s, 0, 0, w, h, decoded)
+				} else {
+					g.emitBitmap(s, 0, 0, w, h, decoded)
+				}
 			}
 		}
 	case codecAVC444, codecAVC444v2:
-		decoded, avcRegions := g.decodeAVC444(bmpData, w, h)
+		decoded, avcRegions, ownedAVC := g.decodeAVC444(bmpData, w, h)
 		if decoded != nil {
 			if len(avcRegions) > 0 && shouldUseAVCRegions(avcRegions, w, h) {
 				g.blitAndEmitAVCRegions(s, 0, 0, w, h, decoded, avcRegions)
+				if ownedAVC {
+					releaseBitmapBuf(decoded)
+				}
 			} else {
 				blitToSurface(s, 0, 0, w, h, decoded)
-				g.emitBitmap(s, 0, 0, w, h, decoded)
+				if ownedAVC {
+					g.emitBitmapPooled(s, 0, 0, w, h, decoded)
+				} else {
+					g.emitBitmap(s, 0, 0, w, h, decoded)
+				}
 			}
 		}
 	case codecProgressive:
