@@ -279,11 +279,10 @@ var useSwscaleForNV12 = runtime.GOARCH != "arm64"
 var avLogOnce sync.Once
 
 // avcFreezeThreshold is the duration of no decoded output after which the
-// decoder is considered stalled and a server refresh is requested.
-// Lowered from 30 s to 2 s so that stall detection fires before the
-// application-level watchdog (~5 s), giving the decoder-level recovery
-// (hard reset + IDR request) a chance to act first.
-const avcFreezeThreshold = 2 * time.Second
+// decoder is considered stalled and a hard reset is performed.
+// Lowered from 2 s to 1 s so that the stall fires faster when VideoToolbox
+// gets stuck under load, reducing the visible freeze time.
+const avcFreezeThreshold = 1 * time.Second
 
 // avcRefreshCooldown is the minimum interval between consecutive server
 // refresh requests.  Lowered from 60 s to 5 s to allow rapid re-detection
@@ -309,17 +308,17 @@ const hwHardErrorThreshold = 5
 // SW decoder anyway; FFmpeg's error-concealment keeps the session alive.
 const keyframeWaitLimit = 150
 
-// hwPostResetStuckThreshold is the maximum number of packets that can be
-// delivered to a freshly hard-reset HW decoder (hwReady == false, i.e. after
-// the first hardReset call) without producing any decoded frame before we
-// consider the decoder permanently stuck and either retry the reset or mark it
-// broken.  At ~30 fps this corresponds to roughly 2 seconds of no output.
-const hwPostResetStuckThreshold = 60
+// hwPostResetStuckThreshold is the maximum number of packets delivered to a
+// freshly hard-reset HW decoder without producing a frame before we consider
+// it stuck and retry or give up.  Lowered from 60 to 30 (~1 s at 30 fps)
+// so that each recovery attempt fails faster, reducing total freeze time.
+const hwPostResetStuckThreshold = 30
 
 // hwMaxRecoveries is the maximum number of hard resets attempted before the
 // decoder is marked broken and the application-level watchdog reconnects.
-// Each attempt waits up to hwPostResetStuckThreshold packets (~2 s at 30 fps)
-// for an IDR before retrying, so the total wait before reconnect is roughly
+// Each attempt waits up to hwPostResetStuckThreshold packets (~2 s at 30 fps,
+// counting both luma and skipped LC=2 chroma-upgrade frames) for an IDR
+// before retrying, so the total wait before reconnect is roughly
 // hwMaxRecoveries * 2 s.
 //
 // Empirically, when a Windows RDPGFX server is mid video-stream and the
@@ -331,7 +330,7 @@ const hwPostResetStuckThreshold = 60
 // reconnect is the only known-good remedy, so we cap the retry budget low
 // enough that the user sees a brief freeze and then a clean reconnect.
 // Mirrors rdpyqt avc.py _hw_reset_count >= 3 fallback threshold.
-const hwMaxRecoveries = 3
+const hwMaxRecoveries = 2
 
 type ffmpegDecoder struct {
 	codecCtx  *C.AVCodecContext
@@ -483,6 +482,61 @@ func (d *ffmpegDecoder) IsBroken() bool {
 // GfxHandler uses this to detect a new reset and clear its keyframe rate-limit.
 func (d *ffmpegDecoder) HardResetCount() int {
 	return d.hwRecoveries
+}
+
+// CountSkippedPacket counts a packet that arrived but was not fed to the codec
+// (e.g. an AVC444 LC=2 chroma-upgrade frame).  When in a post-hard-reset
+// window (hwRecoveries > 0, hwReady == false) the skipped packet is counted
+// toward hwPostResetStuckThreshold so that stuck-detection fires at the expected
+// rate even when the server mostly sends non-luma frames.
+// Returns true if the decoder was just marked broken as a result.
+func (d *ffmpegDecoder) CountSkippedPacket() bool {
+	if !d.useHW || d.hwReady || d.hwRecoveries == 0 || d.broken {
+		return false
+	}
+	d.postResetPackets++
+	if d.postResetPackets >= hwPostResetStuckThreshold {
+		d.checkPostResetStuck()
+	}
+	return d.broken
+}
+
+// checkPostResetStuck runs the retry-or-give-up logic when postResetPackets
+// exceeds hwPostResetStuckThreshold.  It is called both from the normal
+// avcodec_send_packet failure path and from CountSkippedPacket so that
+// LC=2 chroma-upgrade frames count toward the stuck budget.
+func (d *ffmpegDecoder) checkPostResetStuck() {
+	if d.hwRecoveries < hwMaxRecoveries {
+		slog.Debug("H.264: HW decoder stuck after hard reset, retrying",
+			"postResetPackets", d.postResetPackets,
+			"attempt", d.hwRecoveries+1)
+		d.hardResetHW()
+	} else {
+		slog.Warn("H.264: HW decoder unrecoverable after max resets, marking broken",
+			"hwRecoveries", d.hwRecoveries)
+		d.broken = true
+		d.wantsServerRefresh = false
+	}
+}
+
+// NudgeForLumaRefresh checks whether the decoder has been idle (no luma
+// frames decoded) for at least threshold while only LC=2 chroma-upgrade
+// packets arrive.  If so it sets wantsServerRefresh so that the next
+// maybeRequestKeyframe() call sends a refresh request, potentially cutting a
+// ~2 s freeze down to <threshold.
+// Returns true if the stall was detected and the flag was set.
+func (d *ffmpegDecoder) NudgeForLumaRefresh(threshold time.Duration) bool {
+	if d.lastSuccessTime.IsZero() || d.wantsServerRefresh || d.broken {
+		return false
+	}
+	stalledFor := time.Since(d.lastSuccessTime)
+	if stalledFor < threshold {
+		return false
+	}
+	slog.Debug("H.264: luma stall while receiving LC=2 only, requesting refresh",
+		"stalledFor", stalledFor)
+	d.wantsServerRefresh = true
+	return true
 }
 
 func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
@@ -642,17 +696,7 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 					// detect the permanent-freeze state and retry / give up.
 					d.postResetPackets++
 					if d.postResetPackets >= hwPostResetStuckThreshold {
-						if d.hwRecoveries < hwMaxRecoveries {
-							slog.Debug("H.264: HW decoder stuck after hard reset, retrying",
-								"postResetPackets", d.postResetPackets,
-								"attempt", d.hwRecoveries+1)
-							d.hardResetHW()
-						} else {
-							slog.Warn("H.264: HW decoder unrecoverable after max resets, marking broken",
-								"hwRecoveries", d.hwRecoveries)
-							d.broken = true
-							d.wantsServerRefresh = false
-						}
+						d.checkPostResetStuck()
 					}
 				}
 				return nil, nil

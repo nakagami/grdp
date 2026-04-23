@@ -164,6 +164,18 @@ func (g *GfxHandler) decodeAVC444(data []byte, destW, destH int) ([]byte, []avcR
 	if stream == nil {
 		if lc == 2 {
 			slog.Debug("RDPGFX: AVC444 LC=2 (chroma upgrade) skipped")
+			// Count this skipped packet toward the post-reset stuck budget so
+			// that a server sending mostly chroma-upgrade (LC=2) frames does
+			// not artificially delay stuck-detection.  Also nudge the server
+			// for an IDR if luma has been absent long enough to cause a visible
+			// freeze: this fires before the full avcFreezeThreshold is reached,
+			// potentially halving the freeze duration.
+			if g.h264dec.CountSkippedPacket() {
+				g.maybeNotifyDecoderBroken()
+			} else {
+				g.h264dec.NudgeForLumaRefresh(avcFreezeThreshold / 2)
+				g.maybeRequestKeyframe()
+			}
 		}
 		return nil, nil, false
 	}
