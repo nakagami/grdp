@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unsafe"
 
 	"github.com/nakagami/grdp/plugin"
 	"github.com/nakagami/grdp/plugin/cliprdr"
@@ -151,6 +152,8 @@ func (bm *Bitmap) RGBA() *image.RGBA {
 		}
 	default:
 		// 24/32-bit BGR(A) → RGBA with stride = bm.BitsPerPixel.
+		// Write each pixel as a single 32-bit store to let the compiler
+		// vectorise the loop (avoids 4 separate byte stores per pixel).
 		stride := bm.BitsPerPixel
 		n := len(pix) >> 2
 		if len(data) < n*stride {
@@ -158,10 +161,8 @@ func (bm *Bitmap) RGBA() *image.RGBA {
 		}
 		for i := 0; i < n; i++ {
 			s := i * stride
-			pix[i*4] = data[s+2]
-			pix[i*4+1] = data[s+1]
-			pix[i*4+2] = data[s]
-			pix[i*4+3] = 0xFF
+			*(*uint32)(unsafe.Pointer(&pix[i*4])) =
+				uint32(data[s+2]) | uint32(data[s+1])<<8 | uint32(data[s])<<16 | 0xFF000000
 		}
 	}
 	return m
