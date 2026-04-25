@@ -8,6 +8,7 @@ import (
 	"image/draw"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"strings"
 	"sync"
@@ -242,7 +243,9 @@ var (
 
 func uiRdp(hostPort, domain, user, password string, width, height int, keyboardType, keyboardLayout string) (error, *grdp.RdpClient) {
 	bitmapCH = make(chan []grdp.Bitmap, 500)
-	g := grdp.NewRdpClient(hostPort, width, height)
+	g := grdp.NewRdpClient(hostPort, width, height, func(hp string) (net.Conn, error) {
+		return net.DialTimeout("tcp", hp, 30*time.Second)
+	})
 	if keyboardType != "" {
 		g.SetKeyboardType(keyboardType)
 	}

@@ -89,6 +89,8 @@ type RdpClient struct {
 	mouseY       int
 	mouseTimer   *time.Timer
 	mouseLastTx  time.Time
+
+	dialer func(hostPort string) (net.Conn, error)
 }
 
 const mouseCoalesceInterval = 16 * time.Millisecond
@@ -164,7 +166,7 @@ func (bm *Bitmap) RGBA() *image.RGBA {
 	return m
 }
 
-func NewRdpClient(host string, width, height int) *RdpClient {
+func NewRdpClient(host string, width, height int, dialer func(string) (net.Conn, error)) *RdpClient {
 	return &RdpClient{
 		hostPort:        host,
 		width:           width,
@@ -172,6 +174,7 @@ func NewRdpClient(host string, width, height int) *RdpClient {
 		kbdLayout:       uint32(gcc.US),
 		keyboardType:    uint32(gcc.KT_IBM_101_102_KEYS),
 		keyboardSubType: 0,
+		dialer:          dialer,
 		decompressPool: sync.Pool{
 			New: func() any { return []uint8(nil) },
 		},
@@ -269,7 +272,7 @@ func (g *RdpClient) Login(domain string, user string, password string) error {
 // When routingToken is non-nil it replaces the username cookie in the
 // x224 Connection Request (required for Server Redirection).
 func (g *RdpClient) doLogin(routingToken []byte) error {
-	conn, err := net.DialTimeout("tcp", g.hostPort, 30*time.Second)
+	conn, err := g.dialer(g.hostPort)
 	if err != nil {
 		return fmt.Errorf("[dial err] %v", err)
 	}
@@ -281,6 +284,10 @@ func (g *RdpClient) doLogin(routingToken []byte) error {
 	g.sec = sec.NewClient(g.mcs)
 	g.pdu = pdu.NewClient(g.sec)
 	g.channels = plugin.NewChannels(g.sec)
+
+	// Wire user-registered callbacks now that g.pdu is initialised.
+	// This allows callers to invoke On* methods before Login.
+	g.reregisterCallbacks()
 
 	// Wire RemoteFX surface decoder so the pdu layer can decode
 	// codecID=3 in surface bitmap commands without importing rdpgfx.
@@ -520,29 +527,37 @@ func (g *RdpClient) Height() int {
 
 func (g *RdpClient) OnError(f func(e error)) *RdpClient {
 	g.onErrorFn = f
-	g.pdu.On("error", func(e error) {
-		if !g.redirecting {
-			f(e)
-		}
-	})
+	if g.pdu != nil {
+		g.pdu.On("error", func(e error) {
+			if !g.redirecting {
+				f(e)
+			}
+		})
+	}
 	return g
 }
 
 func (g *RdpClient) OnClose(f func()) *RdpClient {
 	g.onCloseFn = f
-	g.pdu.On("close", f)
+	if g.pdu != nil {
+		g.pdu.On("close", f)
+	}
 	return g
 }
 
 func (g *RdpClient) OnSucces(f func()) *RdpClient {
 	g.onSuccesFn = f
-	g.pdu.On("succes", f)
+	if g.pdu != nil {
+		g.pdu.On("succes", f)
+	}
 	return g
 }
 
 func (g *RdpClient) OnReady(f func()) *RdpClient {
 	g.onReadyFn = f
-	g.pdu.On("ready", f)
+	if g.pdu != nil {
+		g.pdu.On("ready", f)
+	}
 	return g
 }
 
@@ -552,6 +567,9 @@ func (g *RdpClient) OnReady(f func()) *RdpClient {
 // the raw pixel data beyond paint, copy it or call bm.RGBA() inside paint.
 func (g *RdpClient) OnBitmap(paint func([]Bitmap)) *RdpClient {
 	g.onBitmapPaintFn = paint
+	if g.pdu == nil {
+		return g
+	}
 	g.pdu.On("bitmap", func(rectangles []pdu.BitmapData) {
 		bs := make([]Bitmap, 0, len(rectangles))
 		var pooled [][]uint8 // track buffers borrowed from pool
@@ -602,21 +620,27 @@ func (g *RdpClient) OnBitmap(paint func([]Bitmap)) *RdpClient {
 
 func (g *RdpClient) OnPointerHide(f func()) *RdpClient {
 	g.onPointerHideFn = f
-	g.pdu.On("pointer_hide", f)
+	if g.pdu != nil {
+		g.pdu.On("pointer_hide", f)
+	}
 	return g
 }
 
 func (g *RdpClient) OnPointerCached(f func(uint16)) *RdpClient {
 	g.onPointerCachedFn = f
-	g.pdu.On("pointer_cached", f)
+	if g.pdu != nil {
+		g.pdu.On("pointer_cached", f)
+	}
 	return g
 }
 
 func (g *RdpClient) OnPointerUpdate(f func(uint16, uint16, uint16, uint16, uint16, uint16, []byte, []byte)) *RdpClient {
 	g.onPointerUpdateFn = f
-	g.pdu.On("pointer_update", func(p *pdu.FastPathUpdatePointerPDU) {
-		f(p.CacheIdx, p.XorBpp, p.X, p.Y, p.Width, p.Height, p.Mask, p.Data)
-	})
+	if g.pdu != nil {
+		g.pdu.On("pointer_update", func(p *pdu.FastPathUpdatePointerPDU) {
+			f(p.CacheIdx, p.XorBpp, p.X, p.Y, p.Width, p.Height, p.Mask, p.Data)
+		})
+	}
 	return g
 }
 
