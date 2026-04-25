@@ -393,6 +393,7 @@ type ffmpegDecoder struct {
 	lastFmt   C.enum_AVPixelFormat
 	lastFullRange C.int // tracks fullRange used when swsCtx was last configured
 	lastSuccessTime   time.Time // wall-clock time of the last successfully decoded frame
+	hwFirstSendTime   time.Time // wall-clock time of the first packet sent to the HW decoder
 	needsKeyFrame     bool      // drop packets until an IDR/SPS is received
 	keyframeWaitCount int       // P-frames dropped so far while needsKeyFrame=true
 	hwReady           bool      // HW decoder has produced at least one frame
@@ -548,16 +549,29 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 		}
 	}
 
-	// Time-based stall detection for the HW decoder.  Once it has proven it
-	// can produce frames (hwReady=true), if no frame arrives for avcFreezeThreshold
-	// we mark it broken.  No hard reset, no IDR request — like FreeRDP, we
-	// rely on a clean application-level reconnect instead.
-	if d.useHW && d.hwReady && !d.lastSuccessTime.IsZero() {
-		if frozenFor := time.Since(d.lastSuccessTime); frozenFor >= avcFreezeThreshold {
-			slog.Warn("H.264: HW decoder frozen, marking broken",
-				"frozenFor", frozenFor)
-			d.broken = true
-			return nil, nil
+	// Time-based stall detection for the HW decoder.
+	// Once it has proven it can produce frames (hwReady=true), if no frame
+	// arrives for avcFreezeThreshold we mark it broken.
+	// Also, if the decoder has never produced a frame (hwReady=false) but has
+	// been receiving packets for avcFreezeThreshold, it failed to initialise —
+	// mark it broken so the soft-reset / reconnect path can proceed.
+	// No hard reset, no IDR request — like FreeRDP, we rely on a clean
+	// application-level reconnect instead.
+	if d.useHW {
+		if d.hwReady && !d.lastSuccessTime.IsZero() {
+			if frozenFor := time.Since(d.lastSuccessTime); frozenFor >= avcFreezeThreshold {
+				slog.Warn("H.264: HW decoder frozen, marking broken",
+					"frozenFor", frozenFor)
+				d.broken = true
+				return nil, nil
+			}
+		} else if !d.hwReady && !d.hwFirstSendTime.IsZero() {
+			if stalledFor := time.Since(d.hwFirstSendTime); stalledFor >= avcFreezeThreshold {
+				slog.Warn("H.264: HW decoder failed to produce first frame, marking broken",
+					"stalledFor", stalledFor, "hwSentCount", d.hwSentCount)
+				d.broken = true
+				return nil, nil
+			}
 		}
 	}
 
@@ -572,6 +586,9 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 	// Count packets sent to HW decoder (for init timeout tracking).
 	if d.useHW {
 		d.hwSentCount++
+		if d.hwSentCount == 1 {
+			d.hwFirstSendTime = time.Now()
+		}
 	}
 
 	ret := C.avcodec_send_packet(d.codecCtx, d.packet)
