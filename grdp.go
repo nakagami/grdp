@@ -72,6 +72,7 @@ type RdpClient struct {
 	onPointerUpdateFn func(uint16, uint16, uint16, uint16, uint16, uint16, []byte, []byte)
 	onAudioFn         func(rdpsnd.AudioFormat, []byte)
 	onAudioResetFn    func()
+	onH264RawFn       func(destX, destY, w, h int, isKey bool, data []byte)
 
 	// clipboard callbacks and handler
 	onClipboardFn  func(text string) // remote → local
@@ -375,6 +376,9 @@ func (g *RdpClient) doLogin(routingToken []byte) error {
 			}
 		}()
 	})
+	if g.onH264RawFn != nil {
+		gfxHandler.SetH264RawCallback(g.onH264RawFn)
+	}
 	dvcClient.RegisterHandler(rdpgfx.ChannelName, gfxHandler)
 
 	// Reject Video Optimized Remoting (VOR) channels so the server keeps
@@ -658,6 +662,15 @@ func (g *RdpClient) OnAudio(f func(rdpsnd.AudioFormat, []byte)) *RdpClient {
 // Must be called before Login.
 func (g *RdpClient) OnAudioReset(f func()) *RdpClient {
 	g.onAudioResetFn = f
+	return g
+}
+
+// OnH264Raw registers a callback that receives raw H.264 NAL unit data when
+// the built-in decoder is unavailable (e.g. WASM builds without CGo).
+// destX, destY are the top-left canvas coordinates; isKey flags an IDR frame.
+// The caller owns data and may retain it beyond the callback.
+func (g *RdpClient) OnH264Raw(fn func(destX, destY, w, h int, isKey bool, data []byte)) *RdpClient {
+	g.onH264RawFn = fn
 	return g
 }
 

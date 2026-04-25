@@ -110,6 +110,32 @@ func parseAVC444Stream(data []byte) (*avc420Stream, uint8, error) {
 	}
 }
 
+// isH264Keyframe returns true when data contains an IDR NAL unit (type 5),
+// which marks the start of a new GOP (key frame).  The scan handles both
+// 3-byte (00 00 01) and 4-byte (00 00 00 01) Annex-B start codes.
+func isH264Keyframe(data []byte) bool {
+	for i := 0; i+4 <= len(data); i++ {
+		// Look for Annex-B start code: 00 00 01 or 00 00 00 01.
+		if data[i] == 0x00 && data[i+1] == 0x00 {
+			var nalByte byte
+			if data[i+2] == 0x01 && i+3 < len(data) {
+				nalByte = data[i+3]
+				i += 2
+			} else if data[i+2] == 0x00 && i+3 < len(data) && data[i+3] == 0x01 && i+4 < len(data) {
+				nalByte = data[i+4]
+				i += 3
+			} else {
+				continue
+			}
+			nalType := nalByte & 0x1F
+			if nalType == 5 { // IDR slice
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // decodeAVC420 decodes AVC420 bitmap data to BGRA pixels and returns the
 // decoded frame plus the dirty rectangle list reported in the AVC420 stream
 // header (in decoded-frame coordinates).  When regions is non-empty callers
@@ -118,7 +144,15 @@ func parseAVC444Stream(data []byte) (*avc420Stream, uint8, error) {
 // frame is unchanged from the previous frame.
 // The pooled return value is true when the returned slice was acquired from
 // bitmapBufPool; the caller must then call releaseBitmapBuf on it.
-func (g *GfxHandler) decodeAVC420(data []byte, destW, destH int) ([]byte, []avcRect, bool) {
+func (g *GfxHandler) decodeAVC420(data []byte, destX, destY, destW, destH int) ([]byte, []avcRect, bool) {
+	if g.onH264Raw != nil {
+		stream, err := parseAVC420Stream(data)
+		if err == nil && len(stream.h264Data) > 0 {
+			nalData := make([]byte, len(stream.h264Data))
+			copy(nalData, stream.h264Data)
+			g.onH264Raw(destX, destY, destW, destH, isH264Keyframe(nalData), nalData)
+		}
+	}
 	if g.h264dec == nil {
 		return nil, nil, false
 	}
@@ -152,7 +186,15 @@ func (g *GfxHandler) decodeAVC420(data []byte, destW, destH int) ([]byte, []avcR
 // Currently decodes the main YUV420 stream only (LC=0,1).
 // The pooled return value is true when the returned slice was acquired from
 // bitmapBufPool; the caller must then call releaseBitmapBuf on it.
-func (g *GfxHandler) decodeAVC444(data []byte, destW, destH int) ([]byte, []avcRect, bool) {
+func (g *GfxHandler) decodeAVC444(data []byte, destX, destY, destW, destH int) ([]byte, []avcRect, bool) {
+	if g.onH264Raw != nil {
+		stream, _, err := parseAVC444Stream(data)
+		if err == nil && stream != nil && len(stream.h264Data) > 0 {
+			nalData := make([]byte, len(stream.h264Data))
+			copy(nalData, stream.h264Data)
+			g.onH264Raw(destX, destY, destW, destH, isH264Keyframe(nalData), nalData)
+		}
+	}
 	if g.h264dec == nil {
 		return nil, nil, false
 	}
