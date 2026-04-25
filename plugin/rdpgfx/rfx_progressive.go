@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log/slog"
+	"unsafe"
 )
 
 // Progressive block types (different from non-progressive WBT_* at same values!)
@@ -435,6 +436,8 @@ func rfxPlaceTile(yCoeffs, cbCoeffs, crCoeffs []int16, xIdx, yIdx int, output []
 // ictToBGRA converts n pixels from YCbCr (ICT) to BGRA and writes them into
 // dst (which must hold ≥ 4*n bytes). Processing n pixels in [8]int32 fixed-size
 // arrays lets the compiler emit ARM64 NEON / x86 AVX2 vectorised instructions.
+// Each pixel is written as a single 32-bit store (little-endian BGRA) to avoid
+// 4 separate byte stores that would block auto-vectorisation of the inner loop.
 func ictToBGRA(yRow, cbRow, crRow []int16, dst []byte, n int) {
 	const batch = 8
 	full := (n / batch) * batch
@@ -447,11 +450,10 @@ func ictToBGRA(yRow, cbRow, crRow []int16, dst []byte, n int) {
 		}
 		for k := 0; k < batch; k++ {
 			ys := (yv[k] + 4096) << 16
-			i := (base + k) * 4
-			dst[i] = byte(max(0, min((cb[k]*115992+ys)>>21, 255)))
-			dst[i+1] = byte(max(0, min((ys-cb[k]*22527-cr[k]*46819)>>21, 255)))
-			dst[i+2] = byte(max(0, min((cr[k]*91916+ys)>>21, 255)))
-			dst[i+3] = 0xFF
+			bv := uint32(max(0, min((cb[k]*115992+ys)>>21, 255)))
+			gv := uint32(max(0, min((ys-cb[k]*22527-cr[k]*46819)>>21, 255)))
+			rv := uint32(max(0, min((cr[k]*91916+ys)>>21, 255)))
+			*(*uint32)(unsafe.Pointer(&dst[(base+k)*4])) = bv | gv<<8 | rv<<16 | 0xFF000000
 		}
 	}
 	// Scalar tail for pixels that don't fill a full batch.
@@ -460,11 +462,10 @@ func ictToBGRA(yRow, cbRow, crRow []int16, dst []byte, n int) {
 		cb := int32(cbRow[col])
 		cr := int32(crRow[col])
 		ys := (yv + 4096) << 16
-		i := col * 4
-		dst[i] = byte(max(0, min((cb*115992+ys)>>21, 255)))
-		dst[i+1] = byte(max(0, min((ys-cb*22527-cr*46819)>>21, 255)))
-		dst[i+2] = byte(max(0, min((cr*91916+ys)>>21, 255)))
-		dst[i+3] = 0xFF
+		bv := uint32(max(0, min((cb*115992+ys)>>21, 255)))
+		gv := uint32(max(0, min((ys-cb*22527-cr*46819)>>21, 255)))
+		rv := uint32(max(0, min((cr*91916+ys)>>21, 255)))
+		*(*uint32)(unsafe.Pointer(&dst[col*4])) = bv | gv<<8 | rv<<16 | 0xFF000000
 	}
 }
 

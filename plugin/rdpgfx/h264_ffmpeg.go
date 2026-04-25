@@ -114,11 +114,89 @@ static inline void grdp_bt601_pixel(
 // grdp_yuv420p_to_bgra converts a planar YUV420P/YUVJ420P frame to packed
 // BGRA using BT.601 coefficients.  This bypasses swscale entirely so that
 // the broken ARM64 colorspace-matrix fallback path is never taken.
+#ifdef __ARM_NEON__
+// grdp_yuv420p_to_bgra_neon_8 processes 8 luma pixels (4 UV pairs) per call.
+// For YUV420P each UV sample covers 2 horizontal luma pixels; we load 4 U and
+// 4 V bytes and duplicate each with vzip to produce 8 per-pixel U/V vectors,
+// then follow the same NEON arithmetic path as grdp_nv12_to_bgra_neon_8.
+static inline void grdp_yuv420p_to_bgra_neon_8(
+    const uint8_t *yrow, const uint8_t *urow, const uint8_t *vrow,
+    uint8_t *drow, int col,
+    int16_t ky, int16_t kr, int16_t kgu, int16_t kgv, int16_t kb,
+    int16_t yoff)
+{
+    // Load 8 luma bytes, convert to int16, subtract Y offset (16 or 0).
+    uint8x8_t y_u8 = vld1_u8(yrow + col);
+    int16x8_t c16  = vsubq_s16(vreinterpretq_s16_u16(vmovl_u8(y_u8)),
+                                vdupq_n_s16(yoff));
+
+    // Load 4 U and 4 V bytes (one UV pair per 2 luma pixels).
+    // vzip duplicates each byte: [U0,U1,U2,U3,...] → [U0,U0,U1,U1,U2,U2,U3,U3].
+    // ffmpeg pads AVFrame line buffers for SIMD so loading 8 bytes is safe.
+    uint8x8_t u_raw = vld1_u8(urow + (col >> 1));
+    uint8x8_t v_raw = vld1_u8(vrow + (col >> 1));
+    uint8x8_t u8    = vzip_u8(u_raw, u_raw).val[0];
+    uint8x8_t v8    = vzip_u8(v_raw, v_raw).val[0];
+
+    int16x8_t u16 = vsubq_s16(vreinterpretq_s16_u16(vmovl_u8(u8)), vdupq_n_s16(128));
+    int16x8_t v16 = vsubq_s16(vreinterpretq_s16_u16(vmovl_u8(v8)), vdupq_n_s16(128));
+
+    // Compute R/G/B with int32 to avoid overflow.  Process 4+4 pixels.
+    int16x4_t c_lo = vget_low_s16(c16),  u_lo = vget_low_s16(u16),  v_lo = vget_low_s16(v16);
+    int16x4_t c_hi = vget_high_s16(c16), u_hi = vget_high_s16(u16), v_hi = vget_high_s16(v16);
+
+    int32x4_t ky_lo = vmull_n_s16(c_lo, ky), ky_hi = vmull_n_s16(c_hi, ky);
+
+    int32x4_t r_lo = vaddq_s32(vaddq_s32(ky_lo, vmull_n_s16(v_lo, kr)), vdupq_n_s32(128));
+    int32x4_t g_lo = vaddq_s32(vsubq_s32(vsubq_s32(ky_lo, vmull_n_s16(u_lo, kgu)), vmull_n_s16(v_lo, kgv)), vdupq_n_s32(128));
+    int32x4_t b_lo = vaddq_s32(vaddq_s32(ky_lo, vmull_n_s16(u_lo, kb)),  vdupq_n_s32(128));
+
+    int32x4_t r_hi = vaddq_s32(vaddq_s32(ky_hi, vmull_n_s16(v_hi, kr)), vdupq_n_s32(128));
+    int32x4_t g_hi = vaddq_s32(vsubq_s32(vsubq_s32(ky_hi, vmull_n_s16(u_hi, kgu)), vmull_n_s16(v_hi, kgv)), vdupq_n_s32(128));
+    int32x4_t b_hi = vaddq_s32(vaddq_s32(ky_hi, vmull_n_s16(u_hi, kb)),  vdupq_n_s32(128));
+
+    // Shift >>8, saturate int32→int16→uint8, store interleaved BGRA.
+    uint8x8_t r = vqmovun_s16(vcombine_s16(vqmovn_s32(vshrq_n_s32(r_lo,8)), vqmovn_s32(vshrq_n_s32(r_hi,8))));
+    uint8x8_t g = vqmovun_s16(vcombine_s16(vqmovn_s32(vshrq_n_s32(g_lo,8)), vqmovn_s32(vshrq_n_s32(g_hi,8))));
+    uint8x8_t b = vqmovun_s16(vcombine_s16(vqmovn_s32(vshrq_n_s32(b_lo,8)), vqmovn_s32(vshrq_n_s32(b_hi,8))));
+    uint8x8x4_t bgra;
+    bgra.val[0] = b;
+    bgra.val[1] = g;
+    bgra.val[2] = r;
+    bgra.val[3] = vdup_n_u8(255);
+    vst4_u8(drow + col * 4, bgra);
+}
+#endif // __ARM_NEON__
+
 static void grdp_yuv420p_to_bgra(
     const AVFrame *src, uint8_t *dst, int dst_stride, int full_range)
 {
     int width  = src->width;
     int height = src->height;
+#ifdef __ARM_NEON__
+    int16_t ky   = full_range ? 256 : 298;
+    int16_t kr   = full_range ? 359 : 409;
+    int16_t kgu  = full_range ?  88 : 100;
+    int16_t kgv  = full_range ? 183 : 208;
+    int16_t kb   = full_range ? 454 : 516;
+    int16_t yoff = full_range ?   0 :  16;
+    for (int row = 0; row < height; row++) {
+        const uint8_t *yrow = src->data[0] + row        * src->linesize[0];
+        const uint8_t *urow = src->data[1] + (row >> 1) * src->linesize[1];
+        const uint8_t *vrow = src->data[2] + (row >> 1) * src->linesize[2];
+        uint8_t *drow = dst + row * dst_stride;
+        int col = 0;
+        for (; col + 7 < width; col += 8)
+            grdp_yuv420p_to_bgra_neon_8(yrow, urow, vrow, drow, col,
+                                        ky, kr, kgu, kgv, kb, yoff);
+        // Scalar tail for widths not a multiple of 8.
+        for (; col < width; col++) {
+            int u = (int)urow[col >> 1] - 128;
+            int v = (int)vrow[col >> 1] - 128;
+            grdp_bt601_pixel((int)yrow[col], u, v, full_range, drow + col*4);
+        }
+    }
+#else
     for (int row = 0; row < height; row++) {
         const uint8_t *yrow = src->data[0] + row        * src->linesize[0];
         const uint8_t *urow = src->data[1] + (row >> 1) * src->linesize[1];
@@ -130,6 +208,7 @@ static void grdp_yuv420p_to_bgra(
             grdp_bt601_pixel((int)yrow[col], u, v, full_range, drow + col*4);
         }
     }
+#endif
 }
 
 // grdp_nv12_to_bgra converts a semi-planar NV12 frame (Y plane + interleaved
