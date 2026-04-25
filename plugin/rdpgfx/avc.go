@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log/slog"
-	"time"
 )
 
 type avcRect struct {
@@ -170,13 +169,10 @@ func (g *GfxHandler) decodeAVC420(data []byte, destX, destY, destW, destH int) (
 		return nil, nil, false
 	}
 	if frame == nil {
-		g.maybeRequestKeyframe()
 		g.maybeNotifyDecoderBroken()
 		slog.Debug("RDPGFX: H.264 decode returned nil frame (buffering?)")
 		return nil, nil, false
 	}
-	g.keyframeRequested = false
-	g.keyframeAttempts = 0
 	slog.Debug("RDPGFX: AVC420 decoded", "frameW", frame.Width, "frameH", frame.Height, "destW", destW, "destH", destH, "regions", len(stream.regions), "h264Len", len(stream.h264Data))
 	decoded, pooled := cropBGRA(frame.Data, frame.Width, frame.Height, destW, destH)
 	return decoded, stream.regions, pooled
@@ -218,12 +214,9 @@ func (g *GfxHandler) decodeAVC444(data []byte, destX, destY, destW, destH int) (
 		return nil, nil, false
 	}
 	if frame == nil {
-		g.maybeRequestKeyframe()
 		g.maybeNotifyDecoderBroken()
 		return nil, nil, false
 	}
-	g.keyframeRequested = false
-	g.keyframeAttempts = 0
 	slog.Debug("RDPGFX: AVC444 decoded", "frameW", frame.Width, "frameH", frame.Height,
 		"destW", destW, "destH", destH, "h264Len", len(stream.h264Data))
 	decoded, pooled := cropBGRA(frame.Data, frame.Width, frame.Height, destW, destH)
@@ -246,48 +239,6 @@ func (g *GfxHandler) maybeNotifyDecoderBroken() {
 	}
 	g.decoderBrokenNotified = true
 	go g.onDecoderBroken()
-}
-
-// maybeRequestKeyframe calls onKeyframeNeeded (if set) the first time the
-// H.264 decoder reports it is waiting for an IDR after a reset, and again
-// every 3 seconds while still waiting.  This handles the case where the first
-// refresh request goes unanswered (e.g. after an HW→SW decoder switch where
-// the server never retransmits an IDR in time).
-func (g *GfxHandler) maybeRequestKeyframe() {
-	if g.onKeyframeNeeded == nil {
-		return
-	}
-	if !g.h264dec.NeedsKeyframe() {
-		return
-	}
-	// If the decoder just performed a hard reset, clear the rate-limit so we
-	// send a fresh SendRefreshRect immediately rather than waiting up to 3 s.
-	// Without this, the stall-nudge's lastKeyframeRequest timestamp blocks the
-	// post-reset request, and the server never learns it must send a new IDR.
-	if n := g.h264dec.HardResetCount(); n != g.lastHardResetCount {
-		g.lastHardResetCount = n
-		g.keyframeRequested = false
-		g.keyframeAttempts = 0
-		g.lastKeyframeRequest = time.Time{}
-	}
-	// Rate-limit: maybeRequestKeyframe is only called when the decoder is
-	// already in a recovery state (NeedsKeyframe() == true, gated above).
-	// Nudge the server every 1 s while we wait, instead of every 3 s, so
-	// IDRs arrive sooner and the deferred-reset / post-reset wait windows
-	// (~10 s of packets) get more chances to catch one before we are
-	// forced to mark the decoder broken and reconnect.
-	if g.keyframeRequested && time.Since(g.lastKeyframeRequest) < time.Second {
-		return
-	}
-	g.keyframeRequested = true
-	g.lastKeyframeRequest = time.Now()
-	g.keyframeAttempts++
-	// First two nudges use the lightweight RefreshRect.  If the server
-	// keeps ignoring them (typical Windows behaviour during active video
-	// playback), escalate to the full SuppressOutput off→on toggle which
-	// forces a complete display repaint and a guaranteed new IDR.
-	force := g.keyframeAttempts >= 3
-	go g.onKeyframeNeeded(force)
 }
 
 // cropBGRA crops or pads BGRA pixel data to the target dimensions.

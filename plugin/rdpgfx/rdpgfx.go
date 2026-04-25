@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/nakagami/grdp/core"
 	"github.com/nakagami/grdp/plugin"
@@ -205,25 +204,14 @@ type GfxHandler struct {
 	// each one to the server.  The server tracks outstanding frames
 	// individually, so skipping ACKs causes it to stop sending.
 	ackCh chan []byte
-	// onKeyframeNeeded is called when the H.264 decoder needs a fresh IDR
-	// from the server.  The `force` flag is set true when the regular
-	// SendRefreshRect nudge has been ignored several times — the caller
-	// should then issue a stronger refresh (e.g. SuppressOutput off→on)
-	// that Windows servers reliably honour during active video streaming.
-	onKeyframeNeeded    func(force bool)
-	keyframeRequested   bool
-	keyframeAttempts    int
-	lastKeyframeRequest time.Time
+	// doneCh is closed by Close() to signal decodeLoop and writeLoop to exit.
+	doneCh    chan struct{}
+	closeOnce sync.Once
 	// onDecoderBroken is called once when the H.264 decoder becomes permanently
 	// unrecoverable.  The caller should reconnect the RDP session to create a
 	// fresh decoder.
-	onDecoderBroken        func()
-	decoderBrokenNotified  bool
-	// lastHardResetCount tracks the decoder's hard-reset count so we can
-	// detect a new reset and immediately clear the keyframe rate-limit.
-	// After a hard reset the decoder wants a fresh IDR urgently; we must
-	// not wait up to 3 s for the rate-limit window to expire.
-	lastHardResetCount int
+	onDecoderBroken       func()
+	decoderBrokenNotified bool
 	// onH264Raw is called with raw H.264 NAL unit data when h264dec is nil
 	// (e.g. WASM builds without CGo).  The caller can forward the data to a
 	// JavaScript WebCodecs VideoDecoder instead.
@@ -244,23 +232,27 @@ func NewGfxHandler(onBitmap func([]BitmapUpdate)) *GfxHandler {
 		onBitmap:     onBitmap,
 		decodeCh:     make(chan decodePkt, 1024),
 		ackCh:        make(chan []byte, 512),
+		doneCh:       make(chan struct{}),
 	}
 	go g.decodeLoop()
 	go g.writeLoop()
 	return g
 }
 
+// Close shuts down the GfxHandler's background goroutines.
+// Safe to call multiple times; subsequent calls are no-ops.
+func (g *GfxHandler) Close() {
+	g.closeOnce.Do(func() {
+		close(g.doneCh)
+		if g.h264dec != nil {
+			g.h264dec.Close()
+		}
+	})
+}
+
 // SetSendFunc sets the function used to send RDPGFX responses via DVC.
 func (g *GfxHandler) SetSendFunc(fn func([]byte)) {
 	g.sendFn = fn
-}
-
-// SetKeyframeNeededCallback registers a function that is called once when the
-// H.264 decoder resets to software mode and needs a fresh keyframe (IDR) from
-// the server.  The callback should send a screen-refresh request so the server
-// starts a new GOP and decoding can resume promptly.
-func (g *GfxHandler) SetKeyframeNeededCallback(fn func(force bool)) {
-	g.onKeyframeNeeded = fn
 }
 
 // SetDecoderBrokenCallback registers a function that is called once when the
@@ -542,19 +534,29 @@ func (g *GfxHandler) decompressMultipart(data []byte) ([]byte, bool) {
 // from decodeCh and dispatching all processing — including frame ACKs and
 // heavy decode work.  Keeping socket.Write calls off the read goroutine
 // avoids TCP deadlock (where both sides try to write while neither reads).
-// It automatically restarts on panic.
+// It automatically restarts on panic, unless Close() has been called.
 func (g *GfxHandler) decodeLoop() {
 	defer func() {
 		if r := recover(); r != nil {
 			slog.Error("RDPGFX: panic in decodeLoop, restarting", "err", r)
-			go g.decodeLoop()
+			select {
+			case <-g.doneCh:
+				// Shut down; do not restart.
+			default:
+				go g.decodeLoop()
+			}
 		}
 	}()
 	slog.Debug("RDPGFX: decodeLoop started")
-	for pkt := range g.decodeCh {
-		g.decodePDUs(pkt.data)
-		if pkt.pooled {
-			releaseBitmapBuf(pkt.data)
+	for {
+		select {
+		case <-g.doneCh:
+			return
+		case pkt := <-g.decodeCh:
+			g.decodePDUs(pkt.data)
+			if pkt.pooled {
+				releaseBitmapBuf(pkt.data)
+			}
 		}
 	}
 }
@@ -627,17 +629,28 @@ func (g *GfxHandler) dispatchDecode(cmdId uint16, data []byte, skipHeavy bool) {
 // writeLoop runs in a dedicated goroutine.  It reads serialized ACK
 // PDUs from ackCh and sends each one via sendFn.  Every ACK must reach
 // the server — the server tracks outstanding frames individually and
-// stops sending if ACKs are missing.  Automatically restarts on panic.
+// stops sending if ACKs are missing.  Automatically restarts on panic,
+// unless Close() has been called.
 func (g *GfxHandler) writeLoop() {
 	defer func() {
 		if r := recover(); r != nil {
 			slog.Error("RDPGFX: panic in writeLoop, restarting", "err", r)
-			go g.writeLoop()
+			select {
+			case <-g.doneCh:
+				// Shut down; do not restart.
+			default:
+				go g.writeLoop()
+			}
 		}
 	}()
-	for pdu := range g.ackCh {
-		if g.sendFn != nil {
-			g.sendFn(pdu)
+	for {
+		select {
+		case <-g.doneCh:
+			return
+		case pdu := <-g.ackCh:
+			if g.sendFn != nil {
+				g.sendFn(pdu)
+			}
 		}
 	}
 }

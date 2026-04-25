@@ -71,9 +71,10 @@ type RdpClient struct {
 	onPointerHideFn   func()
 	onPointerCachedFn func(uint16)
 	onPointerUpdateFn func(uint16, uint16, uint16, uint16, uint16, uint16, []byte, []byte)
-	onAudioFn         func(rdpsnd.AudioFormat, []byte)
-	onAudioResetFn    func()
-	onH264RawFn       func(destX, destY, w, h int, isKey bool, data []byte)
+	onAudioFn          func(rdpsnd.AudioFormat, []byte)
+	onAudioResetFn     func()
+	onH264RawFn        func(destX, destY, w, h int, isKey bool, data []byte)
+	onDecoderBrokenFn  func()
 
 	// clipboard callbacks and handler
 	onClipboardFn  func(text string) // remote → local
@@ -91,6 +92,14 @@ type RdpClient struct {
 	mouseY       int
 	mouseTimer   *time.Timer
 	mouseLastTx  time.Time
+
+	// reconnectMu serialises concurrent Reconnect() calls.
+	reconnectMu  sync.Mutex
+	reconnecting bool
+
+	// gfxHandler is the active RDPGFX handler; nil when not connected.
+	// Stored here so closeTransport() can stop its goroutines.
+	gfxHandler *rdpgfx.GfxHandler
 
 	dialer func(hostPort string) (net.Conn, error)
 }
@@ -356,15 +365,14 @@ func (g *RdpClient) doLogin(routingToken []byte) error {
 		}
 		g.onBitmapPaintFn(bs)
 	})
-	gfxHandler.SetKeyframeNeededCallback(func(force bool) {
-		if force {
-			g.pdu.SendForceRefresh(uint16(g.width), uint16(g.height))
-		} else {
-			g.pdu.SendRefreshRect(uint16(g.width), uint16(g.height))
-		}
-	})
 	gfxHandler.SetDecoderBrokenCallback(func() {
-		slog.Warn("H.264 decoder broken; reconnecting RDP session")
+		slog.Warn("H.264 decoder broken")
+		if g.onDecoderBrokenFn != nil {
+			g.onDecoderBrokenFn()
+			return
+		}
+		// Default: reconnect immediately (backward-compatible behaviour for
+		// callers that have not registered an OnDecoderBroken callback).
 		go func() {
 			if err := g.Reconnect(g.width, g.height); err != nil {
 				slog.Warn("Reconnect after decoder broken failed", "err", err)
@@ -374,6 +382,7 @@ func (g *RdpClient) doLogin(routingToken []byte) error {
 	if g.onH264RawFn != nil {
 		gfxHandler.SetH264RawCallback(g.onH264RawFn)
 	}
+	g.gfxHandler = gfxHandler
 	dvcClient.RegisterHandler(rdpgfx.ChannelName, gfxHandler)
 
 	// Reject Video Optimized Remoting (VOR) channels so the server keeps
@@ -539,7 +548,11 @@ func (g *RdpClient) OnError(f func(e error)) *RdpClient {
 func (g *RdpClient) OnClose(f func()) *RdpClient {
 	g.onCloseFn = f
 	if g.pdu != nil {
-		g.pdu.On("close", f)
+		g.pdu.On("close", func() {
+			if !g.redirecting && !g.reconnecting {
+				f()
+			}
+		})
 	}
 	return g
 }
@@ -713,6 +726,17 @@ func (g *RdpClient) OnAudioReset(f func()) *RdpClient {
 // The caller owns data and may retain it beyond the callback.
 func (g *RdpClient) OnH264Raw(fn func(destX, destY, w, h int, isKey bool, data []byte)) *RdpClient {
 	g.onH264RawFn = fn
+	return g
+}
+
+// OnDecoderBroken registers a callback that is invoked when the H.264 decoder
+// enters an unrecoverable state (all hard-reset attempts exhausted).  When
+// this callback is set, grdp does NOT automatically call Reconnect; the
+// application is responsible for deciding when to reconnect (e.g. via its
+// own stall watchdog).  If no callback is registered, grdp falls back to
+// the previous behaviour of reconnecting immediately.
+func (g *RdpClient) OnDecoderBroken(f func()) *RdpClient {
+	g.onDecoderBrokenFn = f
 	return g
 }
 
@@ -905,6 +929,12 @@ func (g *RdpClient) Reconnect(width, height int) error {
 		return fmt.Errorf("client is closed")
 	}
 
+	g.reconnectMu.Lock()
+	defer g.reconnectMu.Unlock()
+
+	g.reconnecting = true
+	defer func() { g.reconnecting = false }()
+
 	slog.Debug("Reconnect", "width", width, "height", height)
 	g.closeTransport()
 	g.width = width
@@ -929,7 +959,6 @@ func (g *RdpClient) Reconnect(width, height int) error {
 			return fmt.Errorf("[reconnect err] %v", err)
 		}
 
-		g.reregisterCallbacks()
 		slog.Debug("Reconnect: succeeded", "attempt", attempt)
 		return nil
 	}
@@ -965,10 +994,17 @@ func (g *RdpClient) reregisterCallbacks() {
 	if g.onAudioResetFn != nil {
 		g.OnAudioReset(g.onAudioResetFn)
 	}
+	if g.onDecoderBrokenFn != nil {
+		g.OnDecoderBroken(g.onDecoderBrokenFn)
+	}
 }
 
-// closeTransport closes the underlying transport.
+// closeTransport closes the underlying transport and stops any active GFX handler.
 func (g *RdpClient) closeTransport() {
+	if g.gfxHandler != nil {
+		g.gfxHandler.Close()
+		g.gfxHandler = nil
+	}
 	if g.tpkt != nil {
 		g.tpkt.Close()
 	}
