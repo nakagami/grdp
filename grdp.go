@@ -130,39 +130,33 @@ func (bm *Bitmap) RGBA() *image.RGBA {
 		if len(data) < n*2 {
 			n = len(data) / 2
 		}
-		for i := 0; i < n; i++ {
-			d := uint16(data[i*2])<<8 | uint16(data[i*2+1])
-			pix[i*4] = uint8((d & 0x7C00) >> 7)
-			pix[i*4+1] = uint8((d & 0x03E0) >> 2)
-			pix[i*4+2] = uint8((d & 0x001F) << 3)
-			pix[i*4+3] = 0xFF
-		}
+		rgb555BatchToRGBA(pix, data, n)
 	case 2:
 		// 16-bit RGB565 stored big-endian in two bytes.
 		n := len(pix) >> 2
 		if len(data) < n*2 {
 			n = len(data) / 2
 		}
-		for i := 0; i < n; i++ {
-			d := uint16(data[i*2])<<8 | uint16(data[i*2+1])
-			pix[i*4] = uint8((d & 0xF800) >> 8)
-			pix[i*4+1] = uint8((d & 0x07E0) >> 3)
-			pix[i*4+2] = uint8((d & 0x001F) << 3)
-			pix[i*4+3] = 0xFF
-		}
+		rgb565BatchToRGBA(pix, data, n)
 	default:
 		// 24/32-bit BGR(A) → RGBA with stride = bm.BitsPerPixel.
-		// Write each pixel as a single 32-bit store to let the compiler
-		// vectorise the loop (avoids 4 separate byte stores per pixel).
 		stride := bm.BitsPerPixel
 		n := len(pix) >> 2
 		if len(data) < n*stride {
 			n = len(data) / stride
 		}
-		for i := 0; i < n; i++ {
-			s := i * stride
-			*(*uint32)(unsafe.Pointer(&pix[i*4])) =
-				uint32(data[s+2]) | uint32(data[s+1])<<8 | uint32(data[s])<<16 | 0xFF000000
+		if stride == 4 {
+			// BGRA32 is the common case; use the SIMD-accelerated path.
+			bgr32BatchToRGBA(pix, data, n)
+		} else {
+			// BGR24 (stride==3) and any other depth: scalar fallback.
+			// Write each pixel as a single 32-bit store to let the compiler
+			// vectorise the loop (avoids 4 separate byte stores per pixel).
+			for i := 0; i < n; i++ {
+				s := i * stride
+				*(*uint32)(unsafe.Pointer(&pix[i*4])) =
+					uint32(data[s+2]) | uint32(data[s+1])<<8 | uint32(data[s])<<16 | 0xFF000000
+			}
 		}
 	}
 	return m
@@ -643,7 +637,54 @@ func (g *RdpClient) OnPointerUpdate(f func(uint16, uint16, uint16, uint16, uint1
 	g.onPointerUpdateFn = f
 	if g.pdu != nil {
 		g.pdu.On("pointer_update", func(p *pdu.FastPathUpdatePointerPDU) {
-			f(p.CacheIdx, p.XorBpp, p.X, p.Y, p.Width, p.Height, p.Mask, p.Data)
+			w := int(p.Width)
+			h := int(p.Height)
+
+			// XOR mask data is stored bottom-up per MS-RDPBCGR spec; flip to top-down.
+			// Stride is padded to a 2-byte boundary.
+			var xorData []byte
+			if len(p.Data) > 0 && h > 0 && w > 0 {
+				xorBpp := int(p.XorBpp)
+				if xorBpp == 0 {
+					xorBpp = 1
+				}
+				xorStride := ((w*xorBpp + 15) / 16) * 2
+				xorData = make([]byte, len(p.Data))
+				copy(xorData, p.Data)
+				for y := 0; y < h/2; y++ {
+					top := y * xorStride
+					bot := (h - 1 - y) * xorStride
+					if top+xorStride <= len(xorData) && bot+xorStride <= len(xorData) {
+						for i := 0; i < xorStride; i++ {
+							xorData[top+i], xorData[bot+i] = xorData[bot+i], xorData[top+i]
+						}
+					}
+				}
+			} else {
+				xorData = p.Data
+			}
+
+			// AND mask data is also bottom-up; flip to top-down.
+			// Stride is 1-bpp padded to a 2-byte boundary.
+			var andMask []byte
+			if len(p.Mask) > 0 && h > 0 && w > 0 {
+				andStride := ((w + 15) / 16) * 2
+				andMask = make([]byte, len(p.Mask))
+				copy(andMask, p.Mask)
+				for y := 0; y < h/2; y++ {
+					top := y * andStride
+					bot := (h - 1 - y) * andStride
+					if top+andStride <= len(andMask) && bot+andStride <= len(andMask) {
+						for i := 0; i < andStride; i++ {
+							andMask[top+i], andMask[bot+i] = andMask[bot+i], andMask[top+i]
+						}
+					}
+				}
+			} else {
+				andMask = p.Mask
+			}
+
+			f(p.CacheIdx, p.XorBpp, p.X, p.Y, p.Width, p.Height, andMask, xorData)
 		})
 	}
 	return g

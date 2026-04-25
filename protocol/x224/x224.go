@@ -5,12 +5,17 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 
 	"github.com/lunixbochs/struc"
 	"github.com/nakagami/grdp/core"
 	"github.com/nakagami/grdp/emission"
 	"github.com/nakagami/grdp/protocol/tpkt"
 )
+
+var x224WritePool = sync.Pool{
+	New: func() any { return &bytes.Buffer{} },
+}
 
 // take idea from https://github.com/Madnikulin50/gordp
 
@@ -207,14 +212,17 @@ func (x *X224) Read(b []byte) (n int, err error) {
 }
 
 func (x *X224) Write(b []byte) (n int, err error) {
-	buff := &bytes.Buffer{}
+	buff := x224WritePool.Get().(*bytes.Buffer)
+	buff.Reset()
 	err = struc.Pack(buff, x.dataHeader)
 	if err != nil {
+		x224WritePool.Put(buff)
 		return 0, err
 	}
 	buff.Write(b)
-
-	return x.transport.Write(buff.Bytes())
+	n, err = x.transport.Write(buff.Bytes())
+	x224WritePool.Put(buff)
+	return
 }
 
 func (x *X224) Close() error {
