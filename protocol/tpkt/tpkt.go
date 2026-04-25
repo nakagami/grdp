@@ -1,7 +1,6 @@
 package tpkt
 
 import (
-	"bytes"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -185,15 +184,18 @@ func (t *TPKT) recvHeader(s []byte, err error) {
 		t.Emit("error", err)
 		return
 	}
-	r := bytes.NewReader(s)
-	version, _ := core.ReadUInt8(r)
+	if len(s) < 2 {
+		t.Emit("error", fmt.Errorf("TPKT recvHeader: short read %d", len(s)))
+		return
+	}
+	version := s[0]
 	slog.Debug("TPKT recvHeader", "version", version, "raw", core.Hex(s))
 	if version == FASTPATH_ACTION_X224 {
 		core.StartReadBytes(2, t.Conn, t.recvExtendedHeader)
 	} else {
 		t.secFlag = (version >> 6) & 0x3
-		length, _ := core.ReadUInt8(r)
-		t.lastShortLength = int(length)
+		length := int(s[1])
+		t.lastShortLength = length
 		slog.Debug("TPKT FastPath", "secFlag", t.secFlag, "length", t.lastShortLength)
 		if t.lastShortLength&0x80 != 0 {
 			core.StartReadBytes(1, t.Conn, t.recvExtendedFastPathHeader)
@@ -207,8 +209,10 @@ func (t *TPKT) recvExtendedHeader(s []byte, err error) {
 	if err != nil {
 		return
 	}
-	r := bytes.NewReader(s)
-	size, _ := core.ReadUint16BE(r)
+	if len(s) < 2 {
+		return
+	}
+	size := uint16(s[0])<<8 | uint16(s[1])
 	core.StartReadBytes(int(size-4), t.Conn, t.recvData)
 }
 
@@ -221,15 +225,16 @@ func (t *TPKT) recvData(s []byte, err error) {
 }
 
 func (t *TPKT) recvExtendedFastPathHeader(s []byte, err error) {
-	r := bytes.NewReader(s)
-	rightPart, err := core.ReadUInt8(r)
 	if err != nil {
 		slog.Error("TPTK recvExtendedFastPathHeader", "err", err)
 		return
 	}
-
+	if len(s) < 1 {
+		return
+	}
+	rightPart := int(s[0])
 	leftPart := t.lastShortLength & ^0x80
-	packetSize := (leftPart << 8) + int(rightPart)
+	packetSize := (leftPart << 8) + rightPart
 	core.StartReadBytes(packetSize-3, t.Conn, t.recvFastPath)
 }
 

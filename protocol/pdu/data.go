@@ -1285,59 +1285,119 @@ func decodeNSCodec(data []byte, width, height int) []byte {
 		coRowWidth = tempWidth >> 1
 	}
 
-	for py := 0; py < height; py++ {
-		yRowOff := py * yRowWidth
-		var coRowOff, cgRowOff int
-		if chromaSubsamplingLevel > 0 {
-			coRowOff = (py >> 1) * coRowWidth
-			cgRowOff = coRowOff
-		} else {
-			coRowOff = py * coRowWidth
-			cgRowOff = coRowOff
-		}
+	if chromaSubsamplingLevel == 0 && aPlane == nil {
+		// Fast path: no chroma subsampling, no alpha override.
+		// ycoCgToBGRANoSub has SIMD implementations on amd64/arm64.
+		ycoCgToBGRANoSub(pixels, yPlane, coPlane, cgPlane, width*height, shift)
+		return pixels
+	}
 
-		coIdx := coRowOff
-		cgIdx := cgRowOff
+	if chromaSubsamplingLevel > 0 {
+		// 2:1 horizontal chroma subsampling: each Co/Cg sample covers 2 pixels.
+		// Process 2 pixels per iteration to eliminate the px%2 modulo.
+		for py := 0; py < height; py++ {
+			yRowOff := py * yRowWidth
+			coIdx := (py >> 1) * coRowWidth
+			cgIdx := coIdx
+			outBase := py * width
 
-		for px := 0; px < width; px++ {
-			outIdx := py*width + px
-			yIdx := yRowOff + px
-
-			yVal := int16(0)
-			if yIdx < len(yPlane) {
-				yVal = int16(yPlane[yIdx])
-			}
-
-			coVal := int16(0)
-			cgVal := int16(0)
-			if coIdx < len(coPlane) {
-				coVal = int16(int8(byte(int16(coPlane[coIdx]) << shift)))
-			}
-			if cgIdx < len(cgPlane) {
-				cgVal = int16(int8(byte(int16(cgPlane[cgIdx]) << shift)))
-			}
-
-			rv := yVal + coVal - cgVal
-			gv := yVal + cgVal
-			bv := yVal - coVal - cgVal
-
-			off := outIdx * 4
-			pixels[off+0] = clampByte(bv)
-			pixels[off+1] = clampByte(gv)
-			pixels[off+2] = clampByte(rv)
-			if aPlane != nil && outIdx < len(aPlane) {
-				pixels[off+3] = aPlane[outIdx]
-			} else {
-				pixels[off+3] = 0xFF
-			}
-
-			// Advance chroma pointer (FreeRDP: coplane += chromaSub ? x%2 : 1)
-			if chromaSubsamplingLevel > 0 {
-				coIdx += px % 2
-				cgIdx += px % 2
-			} else {
+			px := 0
+			for ; px+1 < width; px += 2 {
+				coVal, cgVal := int16(0), int16(0)
+				if coIdx < len(coPlane) {
+					coVal = int16(int8(byte(int16(coPlane[coIdx]) << shift)))
+				}
+				if cgIdx < len(cgPlane) {
+					cgVal = int16(int8(byte(int16(cgPlane[cgIdx]) << shift)))
+				}
 				coIdx++
 				cgIdx++
+
+				// Pixel px
+				off0 := (outBase + px) * 4
+				yVal := int16(0)
+				if yIdx := yRowOff + px; yIdx < len(yPlane) {
+					yVal = int16(yPlane[yIdx])
+				}
+				pixels[off0] = clampByte(yVal - coVal - cgVal)
+				pixels[off0+1] = clampByte(yVal + cgVal)
+				pixels[off0+2] = clampByte(yVal + coVal - cgVal)
+				if aPlane != nil && outBase+px < len(aPlane) {
+					pixels[off0+3] = aPlane[outBase+px]
+				} else {
+					pixels[off0+3] = 0xFF
+				}
+
+				// Pixel px+1 (shares same Co/Cg sample)
+				off1 := off0 + 4
+				yVal = int16(0)
+				if yIdx := yRowOff + px + 1; yIdx < len(yPlane) {
+					yVal = int16(yPlane[yIdx])
+				}
+				pixels[off1] = clampByte(yVal - coVal - cgVal)
+				pixels[off1+1] = clampByte(yVal + cgVal)
+				pixels[off1+2] = clampByte(yVal + coVal - cgVal)
+				if aPlane != nil && outBase+px+1 < len(aPlane) {
+					pixels[off1+3] = aPlane[outBase+px+1]
+				} else {
+					pixels[off1+3] = 0xFF
+				}
+			}
+			// Handle odd width remainder
+			if px < width {
+				off := (outBase + px) * 4
+				coVal, cgVal := int16(0), int16(0)
+				if coIdx < len(coPlane) {
+					coVal = int16(int8(byte(int16(coPlane[coIdx]) << shift)))
+				}
+				if cgIdx < len(cgPlane) {
+					cgVal = int16(int8(byte(int16(cgPlane[cgIdx]) << shift)))
+				}
+				yVal := int16(0)
+				if yIdx := yRowOff + px; yIdx < len(yPlane) {
+					yVal = int16(yPlane[yIdx])
+				}
+				pixels[off] = clampByte(yVal - coVal - cgVal)
+				pixels[off+1] = clampByte(yVal + cgVal)
+				pixels[off+2] = clampByte(yVal + coVal - cgVal)
+				if aPlane != nil && outBase+px < len(aPlane) {
+					pixels[off+3] = aPlane[outBase+px]
+				} else {
+					pixels[off+3] = 0xFF
+				}
+			}
+		}
+	} else {
+		// No subsampling, but with alpha plane.
+		for py := 0; py < height; py++ {
+			yRowOff := py * yRowWidth
+			coIdx := py * coRowWidth
+			cgIdx := coIdx
+			outBase := py * width
+
+			for px := 0; px < width; px++ {
+				yVal, coVal, cgVal := int16(0), int16(0), int16(0)
+				if yIdx := yRowOff + px; yIdx < len(yPlane) {
+					yVal = int16(yPlane[yIdx])
+				}
+				if coIdx < len(coPlane) {
+					coVal = int16(int8(byte(int16(coPlane[coIdx]) << shift)))
+				}
+				if cgIdx < len(cgPlane) {
+					cgVal = int16(int8(byte(int16(cgPlane[cgIdx]) << shift)))
+				}
+				coIdx++
+				cgIdx++
+
+				off := (outBase + px) * 4
+				pixels[off] = clampByte(yVal - coVal - cgVal)
+				pixels[off+1] = clampByte(yVal + cgVal)
+				pixels[off+2] = clampByte(yVal + coVal - cgVal)
+				if outBase+px < len(aPlane) {
+					pixels[off+3] = aPlane[outBase+px]
+				} else {
+					pixels[off+3] = 0xFF
+				}
 			}
 		}
 	}
@@ -1417,10 +1477,22 @@ func nrleDecode(input []byte, originalSize int) []byte {
 			if runLen > left {
 				runLen = left
 			}
-			for i := 0; i < runLen && outPos < originalSize; i++ {
-				output[outPos] = value
-				outPos++
+			// Exponential-doubling copy for large runs is O(log n) instead of O(n).
+			n := runLen
+			if n > originalSize-outPos {
+				n = originalSize - outPos
 			}
+			output[outPos] = value
+			wrote := 1
+			for wrote < n {
+				step := wrote
+				if wrote+step > n {
+					step = n - wrote
+				}
+				copy(output[outPos+wrote:outPos+wrote+step], output[outPos:outPos+wrote])
+				wrote += step
+			}
+			outPos += n
 			left -= runLen
 		} else {
 			// Single byte

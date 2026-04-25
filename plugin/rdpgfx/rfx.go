@@ -203,7 +203,7 @@ func (d *rfxDecoder) decodeTileset(data []byte, left, top int, surfData []byte, 
 	// 64×64 region of the output buffer so no locking is needed. For small
 	// tile counts the goroutine + channel + WaitGroup overhead exceeds the
 	// per-tile work, so fall back to serial decoding below the threshold.
-	const parallelTileThreshold = 4
+	const parallelTileThreshold = 12
 	if len(tiles) >= parallelTileThreshold {
 		workers := runtime.NumCPU()
 		if workers > len(tiles) {
