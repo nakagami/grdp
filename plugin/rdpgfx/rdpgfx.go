@@ -208,10 +208,17 @@ type GfxHandler struct {
 	doneCh    chan struct{}
 	closeOnce sync.Once
 	// onDecoderBroken is called once when the H.264 decoder becomes permanently
-	// unrecoverable.  The caller should reconnect the RDP session to create a
-	// fresh decoder.
+	// unrecoverable (all soft resets exhausted).  The caller should reconnect
+	// the RDP session to create a fresh decoder.
 	onDecoderBroken       func()
 	decoderBrokenNotified bool
+	// onKeyframeRequest is called after each soft decoder reset to ask the
+	// server to send a fresh IDR keyframe.  Optional: if nil, the decoder
+	// will wait for the next server-initiated keyframe.
+	onKeyframeRequest func()
+	// softResetCount tracks how many in-place decoder resets have been
+	// attempted since the last server-triggered RESET_GRAPHICS.
+	softResetCount int
 	// onH264Raw is called with raw H.264 NAL unit data when h264dec is nil
 	// (e.g. WASM builds without CGo).  The caller can forward the data to a
 	// JavaScript WebCodecs VideoDecoder instead.
@@ -256,11 +263,20 @@ func (g *GfxHandler) SetSendFunc(fn func([]byte)) {
 }
 
 // SetDecoderBrokenCallback registers a function that is called once when the
-// H.264 decoder becomes permanently unrecoverable (all hard-reset retries
-// exhausted).  The callback should reconnect the RDP session so a fresh
-// decoder can be created from scratch.
+// H.264 decoder becomes permanently unrecoverable (all soft resets exhausted).
+// The callback should reconnect the RDP session so a fresh decoder can be
+// created from scratch.
 func (g *GfxHandler) SetDecoderBrokenCallback(fn func()) {
 	g.onDecoderBroken = fn
+}
+
+// SetKeyframeRequestFunc registers a function that is called after each
+// soft decoder reset to ask the server for a fresh IDR keyframe.  This
+// speeds up recovery: without it the decoder waits for the server to
+// spontaneously send a keyframe.  A typical implementation calls
+// pdu.SendRefreshRect with the current screen dimensions.
+func (g *GfxHandler) SetKeyframeRequestFunc(fn func()) {
+	g.onKeyframeRequest = fn
 }
 
 // SetH264RawCallback registers a function that receives raw H.264 NAL unit
@@ -713,6 +729,8 @@ func (g *GfxHandler) onResetGraphics(data []byte) {
 	g.surfaces = make(map[uint16]*surface)
 	g.clearCtx = newClearCodecCtx()
 	g.framesDecoded.Store(0)
+	g.softResetCount = 0
+	g.decoderBrokenNotified = false
 	if g.h264dec != nil {
 		g.h264dec.Close()
 		g.h264dec = newH264Decoder()
