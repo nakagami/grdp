@@ -223,22 +223,38 @@ func (g *GfxHandler) decodeAVC444(data []byte, destX, destY, destW, destH int) (
 	return decoded, stream.regions, pooled
 }
 
-// maybeNotifyDecoderBroken calls onDecoderBroken (if set) once when the H.264
-// decoder reports it is permanently unrecoverable.  The callback is fired at
-// most once per GfxHandler so the caller can initiate a reconnect without
-// repeated calls.
+// softResetLimit is the number of in-place decoder recreations attempted
+// before escalating to a full RDP reconnect.
+const softResetLimit = 3
+
+// maybeNotifyDecoderBroken is called whenever the H.264 decoder returns a
+// nil frame.  It first tries up to softResetLimit in-place decoder resets
+// (cheap: just recreate the FFmpeg/VideoToolbox context and ask the server
+// for a fresh IDR).  Only after all soft resets are exhausted does it call
+// onDecoderBroken, which triggers a full RDP reconnect.
 func (g *GfxHandler) maybeNotifyDecoderBroken() {
-	if g.onDecoderBroken == nil {
-		return
-	}
 	if g.decoderBrokenNotified {
 		return
 	}
 	if g.h264dec == nil || !g.h264dec.IsBroken() {
 		return
 	}
+	if g.softResetCount < softResetLimit {
+		g.softResetCount++
+		slog.Debug("H.264: soft decoder reset",
+			"attempt", g.softResetCount, "limit", softResetLimit)
+		g.h264dec.Close()
+		g.h264dec = newH264Decoder()
+		if g.onKeyframeRequest != nil {
+			go g.onKeyframeRequest()
+		}
+		return
+	}
+	// All soft resets exhausted — escalate to full reconnect.
 	g.decoderBrokenNotified = true
-	go g.onDecoderBroken()
+	if g.onDecoderBroken != nil {
+		go g.onDecoderBroken()
+	}
 }
 
 // cropBGRA crops or pads BGRA pixel data to the target dimensions.

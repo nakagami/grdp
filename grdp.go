@@ -379,6 +379,12 @@ func (g *RdpClient) doLogin(routingToken []byte) error {
 			}
 		}()
 	})
+	gfxHandler.SetKeyframeRequestFunc(func() {
+		slog.Debug("H.264: requesting keyframe after soft decoder reset")
+		if g.pdu != nil {
+			g.pdu.SendRefreshRect(uint16(g.width), uint16(g.height))
+		}
+	})
 	if g.onH264RawFn != nil {
 		gfxHandler.SetH264RawCallback(g.onH264RawFn)
 	}
