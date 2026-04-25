@@ -95,7 +95,10 @@ VAAPI on Linux) is automatically used when available, with a software fallback.
 This example uses gxui.
 Since gxui is no longer being updated, I hope to have some kind of cross-platform GUI example.
 
-See also https://github.com/nakagami/grdpsdl2
+## Related Projects
+
+- https://github.com/nakagami/grdpsdl2
+- https://github.com/nakagami/grdpwasm
 
 ## Take ideas from
 
