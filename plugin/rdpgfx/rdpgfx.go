@@ -22,6 +22,11 @@ const (
 	ChannelName = plugin.RDPGFX_DVC_CHANNEL_NAME
 )
 
+// suspendFrameAcknowledge is the queueDepth value defined in MS-RDPEGFX
+// 2.2.2.8 that instructs the server to suspend sending new frames until
+// the client sends a subsequent FRAME_ACKNOWLEDGE with a different value.
+const suspendFrameAcknowledge uint32 = 0xFFFFFFFF
+
 // RDPGFX Command IDs (MS-RDPEGFX 2.2.2)
 const (
 	cmdidWireToSurface1           uint16 = 0x0001
@@ -448,6 +453,11 @@ func (g *GfxHandler) Process(data []byte) {
 // is full and the message is being dropped.  Without this, dropped
 // EndFrames would leave the server's outstanding-frame count stuck,
 // eventually causing it to stop sending entirely.
+//
+// queueDepth is set to suspendFrameAcknowledge (0xFFFFFFFF) so the
+// server suspends sending new frames.  As the decodeLoop drains the
+// existing queue and sends ACKs with lower queueDepth values, the server
+// will automatically resume (MS-RDPEGFX 2.2.2.8).
 func (g *GfxHandler) ackDroppedFrames(pkt decodePkt) {
 	data := pkt.data
 	defer func() {
@@ -464,7 +474,7 @@ func (g *GfxHandler) ackDroppedFrames(pkt decodePkt) {
 		if cmdId == cmdidEndFrame {
 			pduData := data[offset+headerSize : offset+int(pduLength)]
 			if len(pduData) >= 4 {
-				g.sendFrameAck(binary.LittleEndian.Uint32(pduData))
+				g.sendFrameAck(binary.LittleEndian.Uint32(pduData), suspendFrameAcknowledge)
 			}
 		}
 		offset += int(pduLength)
@@ -801,14 +811,19 @@ func (g *GfxHandler) onMapSurfaceToScaledOutput(data []byte) {
 // Safe to call from any goroutine (uses atomic framesDecoded).
 // The PDU is serialized directly into a 20-byte slice to avoid
 // the two bytes.Buffer allocations the previous implementation required.
-func (g *GfxHandler) sendFrameAck(frameId uint32) {
+//
+// queueDepth is reported to the server so it can adjust encoding quality
+// and frame rate based on the client's decode backlog.  Pass
+// suspendFrameAcknowledge (0xFFFFFFFF) to ask the server to suspend new
+// frames until a subsequent ACK with a lower value is received.
+func (g *GfxHandler) sendFrameAck(frameId uint32, queueDepth uint32) {
 	decoded := g.framesDecoded.Add(1)
 	// 8-byte RDPGFX header + 12-byte FRAME_ACKNOWLEDGE payload = 20 bytes.
 	pdu := make([]byte, 20)
 	binary.LittleEndian.PutUint16(pdu[0:], cmdidFrameAcknowledge)
 	// pdu[2:4] = flags (0) — zero value
 	binary.LittleEndian.PutUint32(pdu[4:], 20) // total PDU length
-	// pdu[8:12] = queue (0) — zero value
+	binary.LittleEndian.PutUint32(pdu[8:], queueDepth)
 	binary.LittleEndian.PutUint32(pdu[12:], frameId)
 	binary.LittleEndian.PutUint32(pdu[16:], decoded)
 	select {
@@ -822,7 +837,7 @@ func (g *GfxHandler) onEndFrame(data []byte) {
 	if len(data) < 4 {
 		return
 	}
-	g.sendFrameAck(binary.LittleEndian.Uint32(data))
+	g.sendFrameAck(binary.LittleEndian.Uint32(data), uint32(len(g.decodeCh)))
 }
 
 // onWireToSurface1Decode handles RDPGFX_WIRE_TO_SURFACE_PDU_1 (MS-RDPEGFX 2.2.2.1).
