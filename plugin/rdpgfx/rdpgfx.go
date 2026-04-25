@@ -224,6 +224,11 @@ type GfxHandler struct {
 	// After a hard reset the decoder wants a fresh IDR urgently; we must
 	// not wait up to 3 s for the rate-limit window to expire.
 	lastHardResetCount int
+	// onH264Raw is called with raw H.264 NAL unit data when h264dec is nil
+	// (e.g. WASM builds without CGo).  The caller can forward the data to a
+	// JavaScript WebCodecs VideoDecoder instead.
+	// destX, destY are the top-left canvas coordinates.
+	onH264Raw func(destX, destY, w, h int, isKey bool, data []byte)
 }
 
 // NewGfxHandler creates a new RDPGFX handler.
@@ -264,6 +269,17 @@ func (g *GfxHandler) SetKeyframeNeededCallback(fn func(force bool)) {
 // decoder can be created from scratch.
 func (g *GfxHandler) SetDecoderBrokenCallback(fn func()) {
 	g.onDecoderBroken = fn
+}
+
+// SetH264RawCallback registers a function that receives raw H.264 NAL unit
+// data when the built-in decoder is unavailable (h264dec == nil).  This
+// allows the caller to hand off decoding to an external engine such as the
+// browser WebCodecs VideoDecoder API.
+//
+// destX and destY are the top-left canvas coordinates of the decoded frame.
+// isKey is true when the NAL data starts a new GOP (IDR frame).
+func (g *GfxHandler) SetH264RawCallback(fn func(destX, destY, w, h int, isKey bool, data []byte)) {
+	g.onH264Raw = fn
 }
 
 // OnChannelCreated is called after the DVC CREATE_RSP has been sent.
@@ -861,11 +877,11 @@ func (g *GfxHandler) onWireToSurface1Decode(data []byte, skipHeavy bool) {
 		owned = true
 	case codecAVC420:
 		var ownedAVC bool
-		decoded, avcRegions, ownedAVC = g.decodeAVC420(bmpData, w, h)
+		decoded, avcRegions, ownedAVC = g.decodeAVC420(bmpData, int(s.outputX)+int(left), int(s.outputY)+int(top), w, h)
 		owned = ownedAVC
 	case codecAVC444, codecAVC444v2:
 		var ownedAVC bool
-		decoded, avcRegions, ownedAVC = g.decodeAVC444(bmpData, w, h)
+		decoded, avcRegions, ownedAVC = g.decodeAVC444(bmpData, int(s.outputX)+int(left), int(s.outputY)+int(top), w, h)
 		owned = ownedAVC
 	default:
 		slog.Warn("RDPGFX: unsupported codec in WTS1", "codecId", fmt.Sprintf("0x%04X", codecId), "surfId", surfId, "w", w, "h", h, "bmpLen", bmpLen)
@@ -961,7 +977,7 @@ func (g *GfxHandler) onWireToSurface2Decode(data []byte, skipHeavy bool) {
 			g.emitAndReleaseUpdates(updates)
 		}
 	case codecAVC420:
-		decoded, avcRegions, ownedAVC := g.decodeAVC420(bmpData, w, h)
+		decoded, avcRegions, ownedAVC := g.decodeAVC420(bmpData, int(s.outputX), int(s.outputY), w, h)
 		if decoded != nil {
 			if len(avcRegions) > 0 && shouldUseAVCRegions(avcRegions, w, h) {
 				g.blitAndEmitAVCRegions(s, 0, 0, w, h, decoded, avcRegions)
@@ -978,7 +994,7 @@ func (g *GfxHandler) onWireToSurface2Decode(data []byte, skipHeavy bool) {
 			}
 		}
 	case codecAVC444, codecAVC444v2:
-		decoded, avcRegions, ownedAVC := g.decodeAVC444(bmpData, w, h)
+		decoded, avcRegions, ownedAVC := g.decodeAVC444(bmpData, int(s.outputX), int(s.outputY), w, h)
 		if decoded != nil {
 			if len(avcRegions) > 0 && shouldUseAVCRegions(avcRegions, w, h) {
 				g.blitAndEmitAVCRegions(s, 0, 0, w, h, decoded, avcRegions)
