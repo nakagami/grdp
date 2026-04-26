@@ -386,6 +386,20 @@ const avcFreezeThreshold = 4 * time.Second
 // codecs like VideoToolbox cannot recover without a proper IDR).
 const keyframeWaitLimit = 900
 
+// hwStallKeyframeThreshold is how long the HW decoder (e.g. VideoToolbox)
+// must be silent before we ask the server for a fresh IDR.  VideoToolbox
+// occasionally accepts packets but stalls its internal pipeline, producing
+// no output until the next IDR arrives — naturally every 15-25 s.  Asking
+// for an IDR early shortens the visible freeze.  At 30 fps, 250 ms is
+// roughly seven missed frames, well beyond any natural jitter, while still
+// safely below keyframeRequestInterval (2 s).
+const hwStallKeyframeThreshold = 250 * time.Millisecond
+
+// profileWindow is the number of HW frames over which Decode aggregates
+// timing measurements before logging an INFO summary.  At 30 fps this is
+// roughly one log line every ~10 s.
+const profileWindow = 300
+
 type ffmpegDecoder struct {
 	codecCtx  *C.AVCodecContext
 	packet    *C.AVPacket
@@ -407,6 +421,19 @@ type ffmpegDecoder struct {
 	swFrameCount      int       // frames decoded by SW decoder (for diagnostics)
 	broken            bool      // decoder is unrecoverable; stop producing frames so the app reconnects
 	proceededWithoutKeyframe bool // "proceed without keyframe" path was taken; AVERROR here means broken
+
+	// Profiling: aggregated timing stats over the last profileWindow frames
+	// for the HW path.  Helps determine whether convertFrame
+	// (av_hwframe_transfer_data + colour conversion) is the bottleneck that
+	// causes VideoToolbox to stall by holding GPU frames too long.
+	profFrames     int
+	profSendNs     int64 // total ns in avcodec_send_packet
+	profRecvNs     int64 // total ns in avcodec_receive_frame loop (excluding convert)
+	profConvertNs  int64 // total ns in convertFrame (transfer + colour conversion)
+	profTransferNs int64 // total ns in av_hwframe_transfer_data only
+	profMaxConvNs  int64 // worst-case convertFrame duration in window
+	profMaxSendNs  int64 // worst-case avcodec_send_packet duration in window
+	profMaxRecvNs  int64 // worst-case avcodec_receive_frame duration in window
 
 	// outRing holds two recyclable BGRA destination buffers.  convertFrame
 	// rotates between them so each Decode() avoids allocating a fresh
@@ -506,7 +533,18 @@ func newH264Decoder() h264Decoder {
 }
 
 func (d *ffmpegDecoder) NeedsKeyframe() bool {
-	return d.needsKeyFrame
+	if d.needsKeyFrame {
+		return true
+	}
+	// While the HW decoder is stalled, ask the server for a fresh IDR so
+	// VideoToolbox's pipeline gets reset.  lastSuccessTime is updated on
+	// every output frame, so this flag clears automatically once decoding
+	// resumes.
+	if d.useHW && d.hwReady && !d.lastSuccessTime.IsZero() &&
+		time.Since(d.lastSuccessTime) >= hwStallKeyframeThreshold {
+		return true
+	}
+	return false
 }
 
 func (d *ffmpegDecoder) IsBroken() bool {
@@ -606,7 +644,9 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 		}
 	}
 
+	sendStart := time.Now()
 	ret := C.avcodec_send_packet(d.codecCtx, d.packet)
+	sendNs := time.Since(sendStart).Nanoseconds()
 	// Make sure the Go-managed h264Data backing array is not collected or
 	// moved while FFmpeg is reading from it inside the C call above.
 	runtime.KeepAlive(h264Data)
@@ -643,12 +683,22 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 
 	// Receive decoded frame(s); keep the last one.
 	var result *h264Frame
+	var recvNs, convertNs, transferNs, maxConvNs int64
 	for {
+		recvStart := time.Now()
 		ret = C.avcodec_receive_frame(d.codecCtx, d.frame)
+		recvNs += time.Since(recvStart).Nanoseconds()
 		if ret < 0 {
 			break // EAGAIN (need more input) or EOF
 		}
-		f, err := d.convertFrame()
+		convStart := time.Now()
+		f, tNs, err := d.convertFrame()
+		dur := time.Since(convStart).Nanoseconds()
+		convertNs += dur
+		transferNs += tNs
+		if dur > maxConvNs {
+			maxConvNs = dur
+		}
 		C.av_frame_unref(d.frame)
 		if err != nil {
 			return nil, err
@@ -664,24 +714,64 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 					"hwSentCount", d.hwSentCount)
 			}
 			d.hwReady = true
+
+			// Aggregate per-frame timing for the HW path.
+			d.profFrames++
+			d.profSendNs += sendNs
+			d.profRecvNs += recvNs
+			d.profConvertNs += convertNs
+			d.profTransferNs += transferNs
+			if maxConvNs > d.profMaxConvNs {
+				d.profMaxConvNs = maxConvNs
+			}
+			if sendNs > d.profMaxSendNs {
+				d.profMaxSendNs = sendNs
+			}
+			if recvNs > d.profMaxRecvNs {
+				d.profMaxRecvNs = recvNs
+			}
+			if d.profFrames >= profileWindow {
+				n := int64(d.profFrames)
+				slog.Info("H.264: HW decode timing",
+					"frames", d.profFrames,
+					"avgSendUs", d.profSendNs/n/1000,
+					"avgRecvUs", d.profRecvNs/n/1000,
+					"avgConvertUs", d.profConvertNs/n/1000,
+					"avgTransferUs", d.profTransferNs/n/1000,
+					"maxSendUs", d.profMaxSendNs/1000,
+					"maxRecvUs", d.profMaxRecvNs/1000,
+					"maxConvertUs", d.profMaxConvNs/1000)
+				d.profFrames = 0
+				d.profSendNs = 0
+				d.profRecvNs = 0
+				d.profConvertNs = 0
+				d.profTransferNs = 0
+				d.profMaxConvNs = 0
+				d.profMaxSendNs = 0
+				d.profMaxRecvNs = 0
+			}
 		}
 	} else {
 		if d.useHW && d.hwReady {
-			slog.Debug("H.264: HW null frame", "frozenFor", time.Since(d.lastSuccessTime),
+			stalledFor := time.Since(d.lastSuccessTime)
+			slog.Debug("H.264: HW null frame", "frozenFor", stalledFor,
 				"hwSentCount", d.hwSentCount)
 		}
 	}
 	return result, nil
 }
 
-func (d *ffmpegDecoder) convertFrame() (*h264Frame, error) {
+func (d *ffmpegDecoder) convertFrame() (*h264Frame, int64, error) {
 	srcFrame := d.frame
+	var transferNs int64
 
 	// Transfer from GPU to CPU memory if using hardware acceleration.
 	if d.useHW && d.frame.format == C.int(d.hwPixFmt) {
+		tStart := time.Now()
 		ret := C.av_hwframe_transfer_data(d.swFrame, d.frame, 0)
+		transferNs = time.Since(tStart).Nanoseconds()
 		if ret < 0 {
-			return nil, fmt.Errorf("av_hwframe_transfer_data: error %d", int(ret))
+			return nil, transferNs, fmt.Errorf("av_hwframe_transfer_data: error %d", int(ret))
 		}
 		srcFrame = d.swFrame
 	}
@@ -732,7 +822,7 @@ func (d *ffmpegDecoder) convertFrame() (*h264Frame, error) {
 		if srcFrame == d.swFrame {
 			C.av_frame_unref(d.swFrame)
 		}
-		return &h264Frame{Data: out, Width: int(w), Height: int(h)}, nil
+		return &h264Frame{Data: out, Width: int(w), Height: int(h)}, transferNs, nil
 	}
 
 	// For NV12 (VideoToolbox HW transfer output) on ARM64, bypass swscale for
@@ -748,7 +838,7 @@ func (d *ffmpegDecoder) convertFrame() (*h264Frame, error) {
 		if srcFrame == d.swFrame {
 			C.av_frame_unref(d.swFrame)
 		}
-		return &h264Frame{Data: out, Width: int(w), Height: int(h)}, nil
+		return &h264Frame{Data: out, Width: int(w), Height: int(h)}, transferNs, nil
 	}
 
 	// For other formats (e.g. NV12 from VideoToolbox HW transfer), use swscale.
@@ -768,7 +858,7 @@ func (d *ffmpegDecoder) convertFrame() (*h264Frame, error) {
 			C.SWS_BILINEAR, nil, nil, nil,
 		)
 		if d.swsCtx == nil {
-			return nil, fmt.Errorf("sws_getContext failed for %dx%d fmt=%d", w, h, srcFmt)
+			return nil, transferNs, fmt.Errorf("sws_getContext failed for %dx%d fmt=%d", w, h, srcFmt)
 		}
 		C.grdp_sws_set_src_range(d.swsCtx, fullRange)
 		d.lastW = w
@@ -788,7 +878,7 @@ func (d *ffmpegDecoder) convertFrame() (*h264Frame, error) {
 		Data:   out,
 		Width:  int(w),
 		Height: int(h),
-	}, nil
+	}, transferNs, nil
 }
 
 // scanResult holds the IDR-presence flag and SPS/PPS NAL boundaries (offsets
