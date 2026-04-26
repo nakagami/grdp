@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/nakagami/grdp/core"
 	"github.com/nakagami/grdp/plugin"
@@ -217,10 +218,13 @@ type GfxHandler struct {
 	// the RDP session to create a fresh decoder.
 	onDecoderBroken       func()
 	decoderBrokenNotified bool
-	// onKeyframeRequest is called after each soft decoder reset to ask the
-	// server to send a fresh IDR keyframe.  Optional: if nil, the decoder
-	// will wait for the next server-initiated keyframe.
+	// onKeyframeRequest is called to ask the server to send a fresh IDR
+	// keyframe.  Optional: if nil, the decoder will wait for the next
+	// server-initiated keyframe.
 	onKeyframeRequest func()
+	// lastKeyframeRequest is the wall-clock time of the most recent keyframe
+	// request sent to the server.  Used to rate-limit repeat requests.
+	lastKeyframeRequest time.Time
 	// softResetCount tracks how many in-place decoder resets have been
 	// attempted since the last server-triggered RESET_GRAPHICS.
 	softResetCount int
@@ -253,12 +257,14 @@ func NewGfxHandler(onBitmap func([]BitmapUpdate)) *GfxHandler {
 
 // Close shuts down the GfxHandler's background goroutines.
 // Safe to call multiple times; subsequent calls are no-ops.
+//
+// h264dec is intentionally NOT freed here: decodeLoop (goroutine 21) may be
+// in the middle of avcodec_send_packet when Close is called from the transport
+// goroutine, which would cause a use-after-free SIGSEGV.  Instead, decodeLoop
+// defers cleanup of h264dec so it always runs after the last Decode call.
 func (g *GfxHandler) Close() {
 	g.closeOnce.Do(func() {
 		close(g.doneCh)
-		if g.h264dec != nil {
-			g.h264dec.Close()
-		}
 	})
 }
 
@@ -561,16 +567,31 @@ func (g *GfxHandler) decompressMultipart(data []byte) ([]byte, bool) {
 // heavy decode work.  Keeping socket.Write calls off the read goroutine
 // avoids TCP deadlock (where both sides try to write while neither reads).
 // It automatically restarts on panic, unless Close() has been called.
+//
+// decodeLoop owns the h264dec lifecycle: it is the sole caller of Decode()
+// and it frees h264dec on final exit (when doneCh is closed) to avoid a
+// use-after-free race with Close() freeing the AVCodecContext from a
+// different goroutine while Decode() holds it.
 func (g *GfxHandler) decodeLoop() {
 	defer func() {
 		if r := recover(); r != nil {
 			slog.Error("RDPGFX: panic in decodeLoop, restarting", "err", r)
 			select {
 			case <-g.doneCh:
-				// Shut down; do not restart.
+				// Shutting down — free h264dec resources on this final exit.
+				if g.h264dec != nil {
+					g.h264dec.Close()
+					g.h264dec = nil
+				}
 			default:
 				go g.decodeLoop()
 			}
+			return
+		}
+		// Normal exit triggered by doneCh being closed.
+		if g.h264dec != nil {
+			g.h264dec.Close()
+			g.h264dec = nil
 		}
 	}()
 	slog.Debug("RDPGFX: decodeLoop started")
@@ -741,6 +762,7 @@ func (g *GfxHandler) onResetGraphics(data []byte) {
 	g.framesDecoded.Store(0)
 	g.softResetCount = 0
 	g.decoderBrokenNotified = false
+	g.lastKeyframeRequest = time.Time{}
 	if g.h264dec != nil {
 		g.h264dec.Close()
 		g.h264dec = newH264Decoder()
