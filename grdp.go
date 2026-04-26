@@ -380,9 +380,13 @@ func (g *RdpClient) doLogin(routingToken []byte) error {
 		}()
 	})
 	gfxHandler.SetKeyframeRequestFunc(func() {
-		slog.Debug("H.264: requesting keyframe after soft decoder reset")
+		slog.Debug("H.264: requesting keyframe via force refresh")
 		if g.pdu != nil {
-			g.pdu.SendRefreshRect(uint16(g.width), uint16(g.height))
+			// SendRefreshRect is silently ignored by Windows servers while
+			// an H.264 video stream is active.  Use the suppress→allow
+			// toggle (SendForceRefresh) which mstsc/FreeRDP rely on to
+			// reliably trigger a fresh IDR.  See protocol/pdu/pdu.go.
+			g.pdu.SendForceRefresh(uint16(g.width), uint16(g.height))
 		}
 	})
 	if g.onH264RawFn != nil {
