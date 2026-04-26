@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log/slog"
+	"time"
 )
 
 type avcRect struct {
@@ -169,6 +170,7 @@ func (g *GfxHandler) decodeAVC420(data []byte, destX, destY, destW, destH int) (
 		return nil, nil, false
 	}
 	if frame == nil {
+		g.maybeRequestKeyframe()
 		g.maybeNotifyDecoderBroken()
 		slog.Debug("RDPGFX: H.264 decode returned nil frame (buffering?)")
 		return nil, nil, false
@@ -214,6 +216,7 @@ func (g *GfxHandler) decodeAVC444(data []byte, destX, destY, destW, destH int) (
 		return nil, nil, false
 	}
 	if frame == nil {
+		g.maybeRequestKeyframe()
 		g.maybeNotifyDecoderBroken()
 		return nil, nil, false
 	}
@@ -226,6 +229,24 @@ func (g *GfxHandler) decodeAVC444(data []byte, destX, destY, destW, destH int) (
 // softResetLimit is the number of in-place decoder recreations attempted
 // before escalating to a full RDP reconnect.
 const softResetLimit = 3
+
+// maybeRequestKeyframe sends a keyframe request to the server when the
+// decoder needs a fresh IDR.  Requests are rate-limited to once per 2 seconds
+// so that repeated nil-frame callbacks (e.g. while waiting for the IDR) don't
+// flood the server.  This covers both post-flush and post-soft-reset cases.
+func (g *GfxHandler) maybeRequestKeyframe() {
+	if g.h264dec == nil || !g.h264dec.NeedsKeyframe() {
+		return
+	}
+	const keyframeRequestInterval = 2 * time.Second
+	if time.Since(g.lastKeyframeRequest) < keyframeRequestInterval {
+		return
+	}
+	g.lastKeyframeRequest = time.Now()
+	if g.onKeyframeRequest != nil {
+		go g.onKeyframeRequest()
+	}
+}
 
 // maybeNotifyDecoderBroken is called whenever the H.264 decoder returns a
 // nil frame.  It first tries up to softResetLimit in-place decoder resets
@@ -245,9 +266,9 @@ func (g *GfxHandler) maybeNotifyDecoderBroken() {
 			"attempt", g.softResetCount, "limit", softResetLimit)
 		g.h264dec.Close()
 		g.h264dec = newH264Decoder()
-		if g.onKeyframeRequest != nil {
-			go g.onKeyframeRequest()
-		}
+		// Reset rate-limiter so keyframe request fires immediately after reset.
+		g.lastKeyframeRequest = time.Time{}
+		g.maybeRequestKeyframe()
 		return
 	}
 	// All soft resets exhausted — escalate to full reconnect.

@@ -370,15 +370,21 @@ var avLogOnce sync.Once
 
 // avcFreezeThreshold is the duration of no decoded output from the HW decoder
 // after which it is marked broken.  The application-level watchdog then
-// reconnects the RDP session.  FreeRDP takes a similar passive approach: it
-// drops failed frames without hard resets or IDR requests and waits for the
-// server to resume naturally.  grdp mirrors this — no hard resets, no IDR
-// requests — and relies on a clean reconnect instead.
-const avcFreezeThreshold = 2 * time.Second
+// reconnects the RDP session.  VideoToolbox (macOS) can stall for 2-3 seconds
+// while processing a new IDR/SPS frame; 4 seconds gives it enough headroom to
+// recover naturally before we declare it broken.  FreeRDP takes a similar
+// passive approach: it drops failed frames without hard resets or IDR requests
+// and waits for the server to resume naturally.
+const avcFreezeThreshold = 4 * time.Second
 
 // keyframeWaitLimit is the maximum number of non-IDR packets we drop while
-// waiting for a keyframe after a SW decoder flush.
-const keyframeWaitLimit = 150
+// waiting for a keyframe after a decoder reset or flush.  gnome-remote-desktop
+// and similar servers send an IDR approximately every 15-25 seconds; using 900
+// frames (~30s at 30 fps) ensures we catch the next natural IDR even under
+// variable server GOP intervals.  After this limit the SW decoder attempts
+// error-concealment decode; the HW decoder marks itself broken instead (HW
+// codecs like VideoToolbox cannot recover without a proper IDR).
+const keyframeWaitLimit = 900
 
 type ffmpegDecoder struct {
 	codecCtx  *C.AVCodecContext
@@ -400,6 +406,7 @@ type ffmpegDecoder struct {
 	hwSentCount       int       // packets sent to HW decoder (for diagnostics)
 	swFrameCount      int       // frames decoded by SW decoder (for diagnostics)
 	broken            bool      // decoder is unrecoverable; stop producing frames so the app reconnects
+	proceededWithoutKeyframe bool // "proceed without keyframe" path was taken; AVERROR here means broken
 
 	// outRing holds two recyclable BGRA destination buffers.  convertFrame
 	// rotates between them so each Decode() avoids allocating a fresh
@@ -429,9 +436,10 @@ func newH264Decoder() h264Decoder {
 	}
 
 	d := &ffmpegDecoder{
-		codecCtx: codecCtx,
-		hwPixFmt: C.AV_PIX_FMT_NONE,
-		lastFmt:  C.AV_PIX_FMT_NONE,
+		codecCtx:      codecCtx,
+		hwPixFmt:      C.AV_PIX_FMT_NONE,
+		lastFmt:       C.AV_PIX_FMT_NONE,
+		needsKeyFrame: true, // always wait for a clean IDR before feeding packets
 	}
 
 	// Always enable LOW_DELAY: RDP H.264 streams are transmitted in display
@@ -535,10 +543,20 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 		if !scan.hasKeyFrame {
 			d.keyframeWaitCount++
 			if d.keyframeWaitCount >= keyframeWaitLimit {
+				if d.useHW {
+					// HW decoders (e.g. VideoToolbox) cannot recover without a
+					// proper IDR.  Mark broken so the recovery chain can
+					// escalate to a reconnect rather than looping forever.
+					slog.Warn("H.264: HW decoder: no IDR after wait limit, marking broken",
+						"waited", d.keyframeWaitCount)
+					d.broken = true
+					return nil, nil
+				}
 				slog.Debug("H.264: no IDR received, proceeding without keyframe",
 					"waited", d.keyframeWaitCount)
 				d.needsKeyFrame = false
 				d.keyframeWaitCount = 0
+				d.proceededWithoutKeyframe = true
 				// fall through and attempt SW error-concealment decode
 			} else {
 				return nil, nil // drop P-frames while waiting
@@ -550,28 +568,25 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 	}
 
 	// Time-based stall detection for the HW decoder.
-	// Once it has proven it can produce frames (hwReady=true), if no frame
-	// arrives for avcFreezeThreshold we mark it broken.
-	// Also, if the decoder has never produced a frame (hwReady=false) but has
-	// been receiving packets for avcFreezeThreshold, it failed to initialise —
-	// mark it broken so the soft-reset / reconnect path can proceed.
-	// No hard reset, no IDR request — like FreeRDP, we rely on a clean
-	// application-level reconnect instead.
-	if d.useHW {
-		if d.hwReady && !d.lastSuccessTime.IsZero() {
-			if frozenFor := time.Since(d.lastSuccessTime); frozenFor >= avcFreezeThreshold {
-				slog.Warn("H.264: HW decoder frozen, marking broken",
-					"frozenFor", frozenFor)
-				d.broken = true
-				return nil, nil
-			}
-		} else if !d.hwReady && !d.hwFirstSendTime.IsZero() {
-			if stalledFor := time.Since(d.hwFirstSendTime); stalledFor >= avcFreezeThreshold {
-				slog.Warn("H.264: HW decoder failed to produce first frame, marking broken",
-					"stalledFor", stalledFor, "hwSentCount", d.hwSentCount)
-				d.broken = true
-				return nil, nil
-			}
+	//
+	// hwReady=false: decoder has never produced a frame. If it keeps receiving
+	// packets without ever outputting anything, the VideoToolbox session failed
+	// to initialise — mark broken so the soft-reset/reconnect path fires.
+	//
+	// hwReady=true: decoder was working. VideoToolbox legitimately stalls for
+	// several seconds when processing an IDR / scene-change keyframe (it must
+	// flush its internal reference pipeline before it can resume output).
+	// Firing broken on these stalls causes unnecessary soft-reset loops.  We
+	// do NOT apply a time-based threshold here; the decoder will resume
+	// naturally once VideoToolbox finishes processing the IDR.  avcodec_send_packet
+	// failures (AVERROR_INVALIDDATA etc.) are still caught below and lead to a
+	// flush + broken if they happen after the keyframe-wait path.
+	if d.useHW && !d.hwReady && !d.hwFirstSendTime.IsZero() {
+		if stalledFor := time.Since(d.hwFirstSendTime); stalledFor >= avcFreezeThreshold {
+			slog.Warn("H.264: HW decoder failed to produce first frame, marking broken",
+				"stalledFor", stalledFor, "hwSentCount", d.hwSentCount)
+			d.broken = true
+			return nil, nil
 		}
 	}
 
@@ -600,20 +615,29 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 	d.packet.data = nil
 	d.packet.size = 0
 	if ret < 0 {
-		if d.useHW {
-			// Drop the packet silently — like FreeRDP, no hard reset, no IDR
-			// request.  The time-based stall detector above will mark broken
-			// if the freeze persists past avcFreezeThreshold.
-			slog.Debug("H.264: HW avcodec_send_packet failed, dropping packet",
-				"err", int(ret))
-			return nil, nil
-		}
-		// SW decoder: flush and wait for a new IDR.
+		// Both HW and SW: flush the decoder pipeline and wait for a fresh IDR.
+		// Reset the HW stall-timer so it starts fresh after the IDR arrives,
+		// not from before this failed send attempt.
 		slog.Debug("H.264: avcodec_send_packet failed, flushing decoder to recover",
-			"err", int(ret))
+			"hw", d.useHW, "err", int(ret))
 		C.avcodec_flush_buffers(d.codecCtx)
+		prev := d.proceededWithoutKeyframe
 		d.needsKeyFrame = true
 		d.keyframeWaitCount = 0
+		d.proceededWithoutKeyframe = false
+		if d.useHW {
+			d.hwFirstSendTime = time.Time{} // restart stall clock after IDR
+			d.hwSentCount = 0
+			if !d.hwReady && prev {
+				// We gave up waiting for an IDR and tried a P-frame anyway, and
+				// VideoToolbox rejected it.  There is no further recovery possible
+				// for this decoder context — mark broken so the soft-reset /
+				// reconnect chain can proceed.
+				slog.Warn("H.264: HW decoder rejected packet after keyframe wait exhaustion, marking broken",
+					"err", int(ret))
+				d.broken = true
+			}
+		}
 		return nil, nil
 	}
 
