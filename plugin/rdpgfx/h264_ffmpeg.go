@@ -732,7 +732,7 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 			}
 			if d.profFrames >= profileWindow {
 				n := int64(d.profFrames)
-				slog.Info("H.264: HW decode timing",
+				slog.Debug("H.264: HW decode timing",
 					"frames", d.profFrames,
 					"avgSendUs", d.profSendNs/n/1000,
 					"avgRecvUs", d.profRecvNs/n/1000,
@@ -809,7 +809,7 @@ func (d *ffmpegDecoder) convertFrame() (*h264Frame, int64, error) {
 		if !d.useHW && d.swFrameCount < 3 {
 			var sy, su, sv C.uint8_t
 			C.grdp_sample_yuv(srcFrame, &sy, &su, &sv)
-			slog.Info("H.264: SW frame sample",
+			slog.Debug("H.264: SW frame sample",
 				"frame", d.swFrameCount,
 				"fmt", int(srcFmt),
 				"fullRange", int(fullRange),

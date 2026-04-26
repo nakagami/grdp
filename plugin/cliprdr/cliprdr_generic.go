@@ -36,7 +36,7 @@ func GetFormatList() []CliprdrFormat {
 
 // ClipWatcher is a no-op in generic mode
 func ClipWatcher(c *CliprdrClient) {
-	slog.Info("Generic clipboard watcher (text-only mode) started")
+	slog.Debug("Generic clipboard watcher (text-only mode) started")
 	// In generic mode, we don't actively monitor system clipboard
 	// Format list is provided statically
 	select {} // Block indefinitely
