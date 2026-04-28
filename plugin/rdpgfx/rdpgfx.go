@@ -313,7 +313,12 @@ func (g *GfxHandler) OnChannelCreated() {
 func (g *GfxHandler) sendCapsAdvertise() {
 	p := &bytes.Buffer{}
 
-	if g.h264dec != nil {
+	// AVC capsets are advertised when we can deliver decoded frames either
+	// in-process (h264dec) or by handing the raw NALs off to the embedder
+	// (onH264Raw, used by the WASM build to forward to WebCodecs). Without
+	// either, the v8.0+AVCDisabled fallback below forces the server to
+	// reject RDPGFX and use legacy bitmap PDUs.
+	if g.h264dec != nil || g.onH264Raw != nil {
 		// Advertise capsets in ascending order (v8.0 → v10.7), matching
 		// rdpyqt / FreeRDP layout so servers pick the highest common version.
 		core.WriteUInt16LE(11, p) // capsSetCount
