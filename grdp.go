@@ -71,10 +71,11 @@ type RdpClient struct {
 	onPointerHideFn   func()
 	onPointerCachedFn func(uint16)
 	onPointerUpdateFn func(uint16, uint16, uint16, uint16, uint16, uint16, []byte, []byte)
-	onAudioFn          func(rdpsnd.AudioFormat, []byte)
-	onAudioResetFn     func()
-	onH264RawFn        func(destX, destY, w, h int, isKey bool, data []byte)
-	onDecoderBrokenFn  func()
+	onAudioFn         func(rdpsnd.AudioFormat, []byte)
+	onAudioResetFn    func()
+	onH264RawFn       func(destX, destY, w, h int, isKey bool, data []byte)
+	onH264I420Fn      func(destX, destY, w, h int, y []byte, yStride int, u []byte, uStride int, v []byte, vStride int)
+	onDecoderBrokenFn func()
 
 	// clipboard callbacks and handler
 	onClipboardFn  func(text string) // remote → local
@@ -391,6 +392,9 @@ func (g *RdpClient) doLogin(routingToken []byte) error {
 	})
 	if g.onH264RawFn != nil {
 		gfxHandler.SetH264RawCallback(g.onH264RawFn)
+	}
+	if g.onH264I420Fn != nil {
+		gfxHandler.SetI420Callback(g.onH264I420Fn)
 	}
 	g.gfxHandler = gfxHandler
 	dvcClient.RegisterHandler(rdpgfx.ChannelName, gfxHandler)
@@ -736,6 +740,20 @@ func (g *RdpClient) OnAudioReset(f func()) *RdpClient {
 // The caller owns data and may retain it beyond the callback.
 func (g *RdpClient) OnH264Raw(fn func(destX, destY, w, h int, isKey bool, data []byte)) *RdpClient {
 	g.onH264RawFn = fn
+	return g
+}
+
+// OnH264I420 registers a callback that receives decoded H.264 frames in I420
+// planar format (Y, U, V planes with associated strides).  When set, the
+// decoded frame is NOT delivered via OnBitmap; the caller is responsible for
+// rendering it directly (e.g. via an SDL2 IYUV texture for GPU-accelerated
+// YUV→RGB conversion).  When I420 extraction is unavailable for a frame
+// (e.g. non-YUV420P/NV12 formats), grdp falls back to OnBitmap delivery.
+// destX, destY are top-left canvas coordinates; w, h are frame dimensions.
+// The plane slices are only valid for the duration of the callback; copy them
+// if they need to be retained beyond the callback's return.
+func (g *RdpClient) OnH264I420(fn func(destX, destY, w, h int, y []byte, yStride int, u []byte, uStride int, v []byte, vStride int)) *RdpClient {
+	g.onH264I420Fn = fn
 	return g
 }
 

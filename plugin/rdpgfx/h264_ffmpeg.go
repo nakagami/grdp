@@ -10,6 +10,7 @@ package rdpgfx
 #include <libavutil/log.h>
 #include <libswscale/swscale.h>
 #include <stdlib.h>
+#include <string.h>
 #include <stdint.h>
 #ifdef __ARM_NEON__
 #include <arm_neon.h>
@@ -336,6 +337,44 @@ static void grdp_sws_set_src_range(struct SwsContext *sws, int full_range) {
             brightness, contrast, saturation);
     }
 }
+
+// grdp_copy_yuv420p_to_i420 copies an AVFrame in YUV420P or YUVJ420P format
+// to tightly-packed I420 planes (stride = width for Y, stride = (width+1)/2 for U/V).
+// ydst, udst, vdst must be pre-allocated by the caller.
+static void grdp_copy_yuv420p_to_i420(
+    const AVFrame *f,
+    uint8_t *ydst, uint8_t *udst, uint8_t *vdst,
+    int w, int h)
+{
+    int pw = (w + 1) / 2;
+    int ph = (h + 1) / 2;
+    for (int y = 0; y < h; y++)
+        memcpy(ydst + y * w, f->data[0] + y * f->linesize[0], w);
+    for (int y = 0; y < ph; y++)
+        memcpy(udst + y * pw, f->data[1] + y * f->linesize[1], pw);
+    for (int y = 0; y < ph; y++)
+        memcpy(vdst + y * pw, f->data[2] + y * f->linesize[2], pw);
+}
+
+// grdp_copy_nv12_to_i420 copies an AVFrame in NV12 format (Y plane + interleaved UV)
+// to tightly-packed I420 planes.
+static void grdp_copy_nv12_to_i420(
+    const AVFrame *f,
+    uint8_t *ydst, uint8_t *udst, uint8_t *vdst,
+    int w, int h)
+{
+    int pw = (w + 1) / 2;
+    int ph = (h + 1) / 2;
+    for (int y = 0; y < h; y++)
+        memcpy(ydst + y * w, f->data[0] + y * f->linesize[0], w);
+    for (int y = 0; y < ph; y++) {
+        const uint8_t *row = f->data[1] + y * f->linesize[1];
+        for (int x = 0; x < pw; x++) {
+            udst[y * pw + x] = row[x * 2];
+            vdst[y * pw + x] = row[x * 2 + 1];
+        }
+    }
+}
 */
 import "C"
 
@@ -401,26 +440,26 @@ const hwStallKeyframeThreshold = 250 * time.Millisecond
 const profileWindow = 300
 
 type ffmpegDecoder struct {
-	codecCtx  *C.AVCodecContext
-	packet    *C.AVPacket
-	frame     *C.AVFrame
-	swFrame   *C.AVFrame
-	swsCtx    *C.struct_SwsContext
-	useHW     bool
-	hwPixFmt  C.enum_AVPixelFormat
-	lastW     C.int
-	lastH     C.int
-	lastFmt   C.enum_AVPixelFormat
-	lastFullRange C.int // tracks fullRange used when swsCtx was last configured
-	lastSuccessTime   time.Time // wall-clock time of the last successfully decoded frame
-	hwFirstSendTime   time.Time // wall-clock time of the first packet sent to the HW decoder
-	needsKeyFrame     bool      // drop packets until an IDR/SPS is received
-	keyframeWaitCount int       // P-frames dropped so far while needsKeyFrame=true
-	hwReady           bool      // HW decoder has produced at least one frame
-	hwSentCount       int       // packets sent to HW decoder (for diagnostics)
-	swFrameCount      int       // frames decoded by SW decoder (for diagnostics)
-	broken            bool      // decoder is unrecoverable; stop producing frames so the app reconnects
-	proceededWithoutKeyframe bool // "proceed without keyframe" path was taken; AVERROR here means broken
+	codecCtx                 *C.AVCodecContext
+	packet                   *C.AVPacket
+	frame                    *C.AVFrame
+	swFrame                  *C.AVFrame
+	swsCtx                   *C.struct_SwsContext
+	useHW                    bool
+	hwPixFmt                 C.enum_AVPixelFormat
+	lastW                    C.int
+	lastH                    C.int
+	lastFmt                  C.enum_AVPixelFormat
+	lastFullRange            C.int     // tracks fullRange used when swsCtx was last configured
+	lastSuccessTime          time.Time // wall-clock time of the last successfully decoded frame
+	hwFirstSendTime          time.Time // wall-clock time of the first packet sent to the HW decoder
+	needsKeyFrame            bool      // drop packets until an IDR/SPS is received
+	keyframeWaitCount        int       // P-frames dropped so far while needsKeyFrame=true
+	hwReady                  bool      // HW decoder has produced at least one frame
+	hwSentCount              int       // packets sent to HW decoder (for diagnostics)
+	swFrameCount             int       // frames decoded by SW decoder (for diagnostics)
+	broken                   bool      // decoder is unrecoverable; stop producing frames so the app reconnects
+	proceededWithoutKeyframe bool      // "proceed without keyframe" path was taken; AVERROR here means broken
 
 	// Profiling: aggregated timing stats over the last profileWindow frames
 	// for the HW path.  Helps determine whether convertFrame
@@ -444,6 +483,75 @@ type ffmpegDecoder struct {
 	// Decode runs.  outRingIdx selects the slot to use *next*.
 	outRing    [2][]byte
 	outRingIdx int
+
+	// outI420Ring holds two recyclable I420 frame slots for GPU-accelerated
+	// rendering via SDL2 IYUV textures.  Same ring/lifecycle pattern as outRing.
+	// outI420Enabled gates I420 extraction (set by DecodeWithI420); lastI420
+	// is the result from the most recent convertFrame call.
+	outI420Ring    [2]h264FrameI420
+	outI420RingIdx int
+	outI420Enabled bool
+	lastI420       *h264FrameI420
+}
+
+// extractI420fromSrc extracts I420 planar data from srcFrame into the ring
+// buffer and stores a pointer in d.lastI420.  Called from convertFrame() when
+// outI420Enabled is true, before av_frame_unref(d.swFrame).
+// Sets d.lastI420 = nil when the pixel format is not directly supported.
+func (d *ffmpegDecoder) extractI420fromSrc(srcFrame *C.AVFrame) {
+	srcFmt := C.enum_AVPixelFormat(srcFrame.format)
+	if srcFmt != C.AV_PIX_FMT_YUV420P && srcFmt != C.AV_PIX_FMT_YUVJ420P &&
+		srcFmt != C.AV_PIX_FMT_NV12 {
+		d.lastI420 = nil
+		return
+	}
+
+	w := int(srcFrame.width)
+	h := int(srcFrame.height)
+	pw := (w + 1) / 2
+	ph := (h + 1) / 2
+	ySize := w * h
+	uvSize := pw * ph
+
+	slot := &d.outI420Ring[d.outI420RingIdx]
+	d.outI420RingIdx ^= 1
+
+	if cap(slot.Y) < ySize {
+		slot.Y = make([]byte, ySize)
+	} else {
+		slot.Y = slot.Y[:ySize]
+	}
+	if cap(slot.U) < uvSize {
+		slot.U = make([]byte, uvSize)
+	} else {
+		slot.U = slot.U[:uvSize]
+	}
+	if cap(slot.V) < uvSize {
+		slot.V = make([]byte, uvSize)
+	} else {
+		slot.V = slot.V[:uvSize]
+	}
+	slot.YStride = w
+	slot.UStride = pw
+	slot.VStride = pw
+	slot.Width = w
+	slot.Height = h
+
+	if srcFmt == C.AV_PIX_FMT_YUV420P || srcFmt == C.AV_PIX_FMT_YUVJ420P {
+		C.grdp_copy_yuv420p_to_i420(srcFrame,
+			(*C.uint8_t)(unsafe.Pointer(&slot.Y[0])),
+			(*C.uint8_t)(unsafe.Pointer(&slot.U[0])),
+			(*C.uint8_t)(unsafe.Pointer(&slot.V[0])),
+			C.int(w), C.int(h))
+	} else {
+		C.grdp_copy_nv12_to_i420(srcFrame,
+			(*C.uint8_t)(unsafe.Pointer(&slot.Y[0])),
+			(*C.uint8_t)(unsafe.Pointer(&slot.U[0])),
+			(*C.uint8_t)(unsafe.Pointer(&slot.V[0])),
+			C.int(w), C.int(h))
+	}
+
+	d.lastI420 = slot
 }
 
 func newH264Decoder() h264Decoder {
@@ -761,6 +869,22 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 	return result, nil
 }
 
+// DecodeWithI420 implements the i420Decoder interface.  It decodes H.264 NAL
+// data and returns both a BGRA frame (for the surface backing store) and an
+// optional I420 frame for GPU-accelerated rendering via SDL2 IYUV textures.
+// The I420 frame is nil when the decoder's pixel format is not directly
+// supported (e.g. swscale paths that have already consumed the source frame
+// before we could extract planar data, or hardware-decoded frames whose
+// transfer format is not YUV420P or NV12).  Callers must fall back to BGRA
+// rendering when I420 is nil.
+func (d *ffmpegDecoder) DecodeWithI420(h264Data []byte) (*h264Frame, *h264FrameI420, error) {
+	d.outI420Enabled = true
+	d.lastI420 = nil
+	frame, err := d.Decode(h264Data)
+	d.outI420Enabled = false
+	return frame, d.lastI420, err
+}
+
 func (d *ffmpegDecoder) convertFrame() (*h264Frame, int64, error) {
 	srcFrame := d.frame
 	var transferNs int64
@@ -819,6 +943,9 @@ func (d *ffmpegDecoder) convertFrame() (*h264Frame, int64, error) {
 		}
 		C.grdp_yuv420p_to_bgra(srcFrame,
 			(*C.uint8_t)(unsafe.Pointer(&out[0])), C.int(w*4), fullRange)
+		if d.outI420Enabled {
+			d.extractI420fromSrc(srcFrame)
+		}
 		if srcFrame == d.swFrame {
 			C.av_frame_unref(d.swFrame)
 		}
@@ -835,6 +962,9 @@ func (d *ffmpegDecoder) convertFrame() (*h264Frame, int64, error) {
 		}
 		C.grdp_nv12_to_bgra(srcFrame,
 			(*C.uint8_t)(unsafe.Pointer(&out[0])), C.int(w*4), fullRange)
+		if d.outI420Enabled {
+			d.extractI420fromSrc(srcFrame)
+		}
 		if srcFrame == d.swFrame {
 			C.av_frame_unref(d.swFrame)
 		}
@@ -869,7 +999,9 @@ func (d *ffmpegDecoder) convertFrame() (*h264Frame, int64, error) {
 
 	C.grdp_frame_to_bgra(d.swsCtx, srcFrame,
 		(*C.uint8_t)(unsafe.Pointer(&out[0])), C.int(w*4))
-
+	if d.outI420Enabled {
+		d.extractI420fromSrc(srcFrame)
+	}
 	if srcFrame == d.swFrame {
 		C.av_frame_unref(d.swFrame)
 	}
@@ -886,7 +1018,7 @@ func (d *ffmpegDecoder) convertFrame() (*h264Frame, int64, error) {
 // single linear walk of an Annex B H.264 packet.  Use scanH264Packet to
 // produce one.
 type scanResult struct {
-	hasKeyFrame                          bool
+	hasKeyFrame                        bool
 	spsStart, spsEnd, ppsStart, ppsEnd int
 }
 
@@ -960,7 +1092,6 @@ func scanH264Packet(data []byte) scanResult {
 	}
 	return r
 }
-
 
 func (d *ffmpegDecoder) Close() {
 	if d.swsCtx != nil {

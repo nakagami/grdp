@@ -30,29 +30,29 @@ const suspendFrameAcknowledge uint32 = 0xFFFFFFFF
 
 // RDPGFX Command IDs (MS-RDPEGFX 2.2.2)
 const (
-	cmdidWireToSurface1           uint16 = 0x0001
-	cmdidWireToSurface2           uint16 = 0x0002
-	cmdidDeleteEncodingContext    uint16 = 0x0003
-	cmdidSolidFill                uint16 = 0x0004
-	cmdidSurfaceToSurface         uint16 = 0x0005
-	cmdidSurfaceToCache           uint16 = 0x0006
-	cmdidCacheToSurface           uint16 = 0x0007
-	cmdidEvictCacheEntry          uint16 = 0x0008
-	cmdidCreateSurface            uint16 = 0x0009
-	cmdidDeleteSurface            uint16 = 0x000A
-	cmdidStartFrame               uint16 = 0x000B
-	cmdidEndFrame                 uint16 = 0x000C
-	cmdidFrameAcknowledge         uint16 = 0x000D
-	cmdidResetGraphics            uint16 = 0x000E
-	cmdidMapSurfaceToOutput       uint16 = 0x000F
-	cmdidCacheImportOffer         uint16 = 0x0010
-	cmdidCacheImportReply         uint16 = 0x0011
-	cmdidCapsAdvertise            uint16 = 0x0012
-	cmdidCapsConfirm              uint16 = 0x0013
-	cmdidMapSurfaceToScaledOutput  uint16 = 0x0015
-	cmdidMapSurfaceToScaledWindow  uint16 = 0x0016
+	cmdidWireToSurface1             uint16 = 0x0001
+	cmdidWireToSurface2             uint16 = 0x0002
+	cmdidDeleteEncodingContext      uint16 = 0x0003
+	cmdidSolidFill                  uint16 = 0x0004
+	cmdidSurfaceToSurface           uint16 = 0x0005
+	cmdidSurfaceToCache             uint16 = 0x0006
+	cmdidCacheToSurface             uint16 = 0x0007
+	cmdidEvictCacheEntry            uint16 = 0x0008
+	cmdidCreateSurface              uint16 = 0x0009
+	cmdidDeleteSurface              uint16 = 0x000A
+	cmdidStartFrame                 uint16 = 0x000B
+	cmdidEndFrame                   uint16 = 0x000C
+	cmdidFrameAcknowledge           uint16 = 0x000D
+	cmdidResetGraphics              uint16 = 0x000E
+	cmdidMapSurfaceToOutput         uint16 = 0x000F
+	cmdidCacheImportOffer           uint16 = 0x0010
+	cmdidCacheImportReply           uint16 = 0x0011
+	cmdidCapsAdvertise              uint16 = 0x0012
+	cmdidCapsConfirm                uint16 = 0x0013
+	cmdidMapSurfaceToScaledOutput   uint16 = 0x0015
+	cmdidMapSurfaceToScaledWindow   uint16 = 0x0016
 	cmdidMapSurfaceToScaledOutputV2 uint16 = 0x0017 // v10.6+
-	cmdidMapSurfaceToWindow        uint16 = 0x0018
+	cmdidMapSurfaceToWindow         uint16 = 0x0018
 )
 
 // Pixel Formats
@@ -233,6 +233,13 @@ type GfxHandler struct {
 	// JavaScript WebCodecs VideoDecoder instead.
 	// destX, destY are the top-left canvas coordinates.
 	onH264Raw func(destX, destY, w, h int, isKey bool, data []byte)
+	// onI420 is called after a successful H.264 decode when I420 planar data
+	// is available.  The caller can upload the planes to an SDL2 IYUV texture
+	// for GPU-accelerated YUV→RGB conversion, bypassing the CPU colour path.
+	// blitToSurface is still called with BGRA data before onI420 so the surface
+	// backing store remains correct for non-H264 RDPGFX operations.
+	// destX, destY are absolute canvas coordinates.
+	onI420 func(destX, destY, w, h int, y []byte, yStride int, u []byte, uStride int, v []byte, vStride int)
 }
 
 // NewGfxHandler creates a new RDPGFX handler.
@@ -299,6 +306,17 @@ func (g *GfxHandler) SetKeyframeRequestFunc(fn func()) {
 // isKey is true when the NAL data starts a new GOP (IDR frame).
 func (g *GfxHandler) SetH264RawCallback(fn func(destX, destY, w, h int, isKey bool, data []byte)) {
 	g.onH264Raw = fn
+}
+
+// SetI420Callback registers a callback that receives I420 planar data when an
+// H.264 frame is decoded and the underlying decoder supports I420 extraction.
+// When set, H264 frames are NOT emitted via the normal OnBitmap path; the
+// caller is responsible for rendering the I420 data directly (e.g. via an
+// SDL2 IYUV texture).  blitToSurface is still called so the BGRA surface
+// backing store remains correct for subsequent RDPGFX operations.
+// Set fn to nil to disable and revert to normal OnBitmap delivery.
+func (g *GfxHandler) SetI420Callback(fn func(destX, destY, w, h int, y []byte, yStride int, u []byte, uStride int, v []byte, vStride int)) {
+	g.onI420 = fn
 }
 
 // OnChannelCreated is called after the DVC CREATE_RSP has been sent.
@@ -949,13 +967,48 @@ func (g *GfxHandler) onWireToSurface1Decode(data []byte, skipHeavy bool) {
 		decoded = decodePlanar(bmpData, w, h)
 		owned = true
 	case codecAVC420:
-		var ownedAVC bool
-		decoded, avcRegions, ownedAVC = g.decodeAVC420(bmpData, int(s.outputX)+int(left), int(s.outputY)+int(top), w, h)
-		owned = ownedAVC
+		destX := int(s.outputX) + int(left)
+		destY := int(s.outputY) + int(top)
+		if g.onI420 != nil {
+			var ownedAVC bool
+			var i420 *h264FrameI420
+			decoded, i420, avcRegions, ownedAVC = g.decodeAVC420WithI420(bmpData, destX, destY, w, h)
+			owned = ownedAVC
+			if decoded != nil && i420 != nil {
+				blitToSurface(s, int(left), int(top), w, h, decoded)
+				g.onI420(destX, destY, w, h, i420.Y, i420.YStride, i420.U, i420.UStride, i420.V, i420.VStride)
+				if owned {
+					releaseBitmapBuf(decoded)
+				}
+				return
+			}
+			// I420 unavailable (nil frame or unsupported format); fall through to BGRA emit.
+		} else {
+			var ownedAVC bool
+			decoded, avcRegions, ownedAVC = g.decodeAVC420(bmpData, destX, destY, w, h)
+			owned = ownedAVC
+		}
 	case codecAVC444, codecAVC444v2:
-		var ownedAVC bool
-		decoded, avcRegions, ownedAVC = g.decodeAVC444(bmpData, int(s.outputX)+int(left), int(s.outputY)+int(top), w, h)
-		owned = ownedAVC
+		destX := int(s.outputX) + int(left)
+		destY := int(s.outputY) + int(top)
+		if g.onI420 != nil {
+			var ownedAVC bool
+			var i420 *h264FrameI420
+			decoded, i420, avcRegions, ownedAVC = g.decodeAVC444WithI420(bmpData, destX, destY, w, h)
+			owned = ownedAVC
+			if decoded != nil && i420 != nil {
+				blitToSurface(s, int(left), int(top), w, h, decoded)
+				g.onI420(destX, destY, w, h, i420.Y, i420.YStride, i420.U, i420.UStride, i420.V, i420.VStride)
+				if owned {
+					releaseBitmapBuf(decoded)
+				}
+				return
+			}
+		} else {
+			var ownedAVC bool
+			decoded, avcRegions, ownedAVC = g.decodeAVC444(bmpData, destX, destY, w, h)
+			owned = ownedAVC
+		}
 	default:
 		slog.Warn("RDPGFX: unsupported codec in WTS1", "codecId", fmt.Sprintf("0x%04X", codecId), "surfId", surfId, "w", w, "h", h, "bmpLen", bmpLen)
 		return
@@ -1050,36 +1103,95 @@ func (g *GfxHandler) onWireToSurface2Decode(data []byte, skipHeavy bool) {
 			g.emitAndReleaseUpdates(updates)
 		}
 	case codecAVC420:
-		decoded, avcRegions, ownedAVC := g.decodeAVC420(bmpData, int(s.outputX), int(s.outputY), w, h)
-		if decoded != nil {
-			if len(avcRegions) > 0 && shouldUseAVCRegions(avcRegions, w, h) {
-				g.blitAndEmitAVCRegions(s, 0, 0, w, h, decoded, avcRegions)
-				if ownedAVC {
-					releaseBitmapBuf(decoded)
-				}
-			} else {
-				blitToSurface(s, 0, 0, w, h, decoded)
-				if ownedAVC {
-					g.emitBitmapPooled(s, 0, 0, w, h, decoded)
+		destX := int(s.outputX)
+		destY := int(s.outputY)
+		if g.onI420 != nil {
+			decoded, i420, avcRegions, ownedAVC := g.decodeAVC420WithI420(bmpData, destX, destY, w, h)
+			if decoded != nil {
+				if i420 != nil {
+					blitToSurface(s, 0, 0, w, h, decoded)
+					g.onI420(destX, destY, w, h, i420.Y, i420.YStride, i420.U, i420.UStride, i420.V, i420.VStride)
+					if ownedAVC {
+						releaseBitmapBuf(decoded)
+					}
 				} else {
-					g.emitBitmap(s, 0, 0, w, h, decoded)
+					// I420 unavailable; fall back to BGRA emit.
+					if len(avcRegions) > 0 && shouldUseAVCRegions(avcRegions, w, h) {
+						g.blitAndEmitAVCRegions(s, 0, 0, w, h, decoded, avcRegions)
+						if ownedAVC {
+							releaseBitmapBuf(decoded)
+						}
+					} else {
+						blitToSurface(s, 0, 0, w, h, decoded)
+						if ownedAVC {
+							g.emitBitmapPooled(s, 0, 0, w, h, decoded)
+						} else {
+							g.emitBitmap(s, 0, 0, w, h, decoded)
+						}
+					}
+				}
+			}
+		} else {
+			decoded, avcRegions, ownedAVC := g.decodeAVC420(bmpData, destX, destY, w, h)
+			if decoded != nil {
+				if len(avcRegions) > 0 && shouldUseAVCRegions(avcRegions, w, h) {
+					g.blitAndEmitAVCRegions(s, 0, 0, w, h, decoded, avcRegions)
+					if ownedAVC {
+						releaseBitmapBuf(decoded)
+					}
+				} else {
+					blitToSurface(s, 0, 0, w, h, decoded)
+					if ownedAVC {
+						g.emitBitmapPooled(s, 0, 0, w, h, decoded)
+					} else {
+						g.emitBitmap(s, 0, 0, w, h, decoded)
+					}
 				}
 			}
 		}
 	case codecAVC444, codecAVC444v2:
-		decoded, avcRegions, ownedAVC := g.decodeAVC444(bmpData, int(s.outputX), int(s.outputY), w, h)
-		if decoded != nil {
-			if len(avcRegions) > 0 && shouldUseAVCRegions(avcRegions, w, h) {
-				g.blitAndEmitAVCRegions(s, 0, 0, w, h, decoded, avcRegions)
-				if ownedAVC {
-					releaseBitmapBuf(decoded)
-				}
-			} else {
-				blitToSurface(s, 0, 0, w, h, decoded)
-				if ownedAVC {
-					g.emitBitmapPooled(s, 0, 0, w, h, decoded)
+		destX := int(s.outputX)
+		destY := int(s.outputY)
+		if g.onI420 != nil {
+			decoded, i420, avcRegions, ownedAVC := g.decodeAVC444WithI420(bmpData, destX, destY, w, h)
+			if decoded != nil {
+				if i420 != nil {
+					blitToSurface(s, 0, 0, w, h, decoded)
+					g.onI420(destX, destY, w, h, i420.Y, i420.YStride, i420.U, i420.UStride, i420.V, i420.VStride)
+					if ownedAVC {
+						releaseBitmapBuf(decoded)
+					}
 				} else {
-					g.emitBitmap(s, 0, 0, w, h, decoded)
+					if len(avcRegions) > 0 && shouldUseAVCRegions(avcRegions, w, h) {
+						g.blitAndEmitAVCRegions(s, 0, 0, w, h, decoded, avcRegions)
+						if ownedAVC {
+							releaseBitmapBuf(decoded)
+						}
+					} else {
+						blitToSurface(s, 0, 0, w, h, decoded)
+						if ownedAVC {
+							g.emitBitmapPooled(s, 0, 0, w, h, decoded)
+						} else {
+							g.emitBitmap(s, 0, 0, w, h, decoded)
+						}
+					}
+				}
+			}
+		} else {
+			decoded, avcRegions, ownedAVC := g.decodeAVC444(bmpData, destX, destY, w, h)
+			if decoded != nil {
+				if len(avcRegions) > 0 && shouldUseAVCRegions(avcRegions, w, h) {
+					g.blitAndEmitAVCRegions(s, 0, 0, w, h, decoded, avcRegions)
+					if ownedAVC {
+						releaseBitmapBuf(decoded)
+					}
+				} else {
+					blitToSurface(s, 0, 0, w, h, decoded)
+					if ownedAVC {
+						g.emitBitmapPooled(s, 0, 0, w, h, decoded)
+					} else {
+						g.emitBitmap(s, 0, 0, w, h, decoded)
+					}
 				}
 			}
 		}

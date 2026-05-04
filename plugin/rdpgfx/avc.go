@@ -226,6 +226,113 @@ func (g *GfxHandler) decodeAVC444(data []byte, destX, destY, destW, destH int) (
 	return decoded, stream.regions, pooled
 }
 
+// decodeAVC420WithI420 decodes AVC420 bitmap data, returning BGRA pixels for
+// the surface backing store and, when the underlying decoder supports I420
+// output, an optional h264FrameI420 for GPU-accelerated IYUV texture upload.
+// i420 is nil when I420 extraction is unsupported or the frame dimensions are
+// smaller than destW×destH.  Callers must fall back to BGRA rendering when
+// i420 is nil.
+func (g *GfxHandler) decodeAVC420WithI420(data []byte, destX, destY, destW, destH int) (decoded []byte, i420 *h264FrameI420, regions []avcRect, pooled bool) {
+	stream, err := parseAVC420Stream(data)
+	if err != nil {
+		slog.Warn("RDPGFX: AVC420 parse error", "err", err)
+		return
+	}
+	if g.onH264Raw != nil && len(stream.h264Data) > 0 {
+		nalData := make([]byte, len(stream.h264Data))
+		copy(nalData, stream.h264Data)
+		g.onH264Raw(destX, destY, destW, destH, isH264Keyframe(nalData), nalData)
+	}
+	if g.h264dec == nil || len(stream.h264Data) == 0 {
+		return
+	}
+	var frame *h264Frame
+	i420dec, hasI420 := g.h264dec.(i420Decoder)
+	if hasI420 {
+		var i420out *h264FrameI420
+		frame, i420out, err = i420dec.DecodeWithI420(stream.h264Data)
+		if err != nil {
+			slog.Warn("RDPGFX: H.264 decode error", "err", err)
+			return
+		}
+		if i420out != nil && i420out.Width >= destW && i420out.Height >= destH {
+			i420 = i420out
+		}
+	} else {
+		frame, err = g.h264dec.Decode(stream.h264Data)
+		if err != nil {
+			slog.Warn("RDPGFX: H.264 decode error", "err", err)
+			return
+		}
+	}
+	if frame == nil {
+		g.maybeRequestKeyframe()
+		g.maybeNotifyDecoderBroken()
+		slog.Debug("RDPGFX: H.264 decode returned nil frame (buffering?)")
+		return
+	}
+	slog.Debug("RDPGFX: AVC420 decoded (WithI420)", "frameW", frame.Width, "frameH", frame.Height,
+		"destW", destW, "destH", destH, "hasI420", i420 != nil,
+		"regions", len(stream.regions), "h264Len", len(stream.h264Data))
+	decoded, pooled = cropBGRA(frame.Data, frame.Width, frame.Height, destW, destH)
+	regions = stream.regions
+	return
+}
+
+// decodeAVC444WithI420 decodes AVC444 bitmap data, returning BGRA pixels and
+// an optional I420 frame.  Only the main YUV420 stream (LC=0,1) is decoded;
+// i420 follows the same contract as decodeAVC420WithI420.
+func (g *GfxHandler) decodeAVC444WithI420(data []byte, destX, destY, destW, destH int) (decoded []byte, i420 *h264FrameI420, regions []avcRect, pooled bool) {
+	stream, lc, err := parseAVC444Stream(data)
+	if g.onH264Raw != nil && stream != nil && len(stream.h264Data) > 0 {
+		nalData := make([]byte, len(stream.h264Data))
+		copy(nalData, stream.h264Data)
+		g.onH264Raw(destX, destY, destW, destH, isH264Keyframe(nalData), nalData)
+	}
+	if err != nil {
+		slog.Warn("RDPGFX: AVC444 parse error", "err", err)
+		return
+	}
+	if stream == nil {
+		if lc == 2 {
+			slog.Debug("RDPGFX: AVC444 LC=2 (chroma upgrade) skipped")
+		}
+		return
+	}
+	if g.h264dec == nil || len(stream.h264Data) == 0 {
+		return
+	}
+	var frame *h264Frame
+	i420dec, hasI420 := g.h264dec.(i420Decoder)
+	if hasI420 {
+		var i420out *h264FrameI420
+		frame, i420out, err = i420dec.DecodeWithI420(stream.h264Data)
+		if err != nil {
+			slog.Warn("RDPGFX: H.264 decode error (AVC444)", "err", err)
+			return
+		}
+		if i420out != nil && i420out.Width >= destW && i420out.Height >= destH {
+			i420 = i420out
+		}
+	} else {
+		frame, err = g.h264dec.Decode(stream.h264Data)
+		if err != nil {
+			slog.Warn("RDPGFX: H.264 decode error (AVC444)", "err", err)
+			return
+		}
+	}
+	if frame == nil {
+		g.maybeRequestKeyframe()
+		g.maybeNotifyDecoderBroken()
+		return
+	}
+	slog.Debug("RDPGFX: AVC444 decoded (WithI420)", "frameW", frame.Width, "frameH", frame.Height,
+		"destW", destW, "destH", destH, "hasI420", i420 != nil, "h264Len", len(stream.h264Data))
+	decoded, pooled = cropBGRA(frame.Data, frame.Width, frame.Height, destW, destH)
+	regions = stream.regions
+	return
+}
+
 // softResetLimit is the number of in-place decoder recreations attempted
 // before escalating to a full RDP reconnect.
 const softResetLimit = 3
