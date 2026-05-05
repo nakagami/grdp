@@ -414,7 +414,23 @@ var avLogOnce sync.Once
 // recover naturally before we declare it broken.  FreeRDP takes a similar
 // passive approach: it drops failed frames without hard resets or IDR requests
 // and waits for the server to resume naturally.
+// This threshold applies to the initial-stall case (hwReady=false).
 const avcFreezeThreshold = 4 * time.Second
+
+// avcHWReadyFreezeThreshold is the maximum tolerated stall duration for a
+// previously-working HW decoder (hwReady=true).  VideoToolbox can legitimately
+// pause for 2-3 seconds when processing an IDR keyframe; the shorter
+// avcFreezeThreshold is intentionally not applied here to avoid spurious
+// soft-reset loops.  However, if VideoToolbox never resumes even after a fresh
+// IDR has been delivered (a genuine stuck state observed in practice), the
+// decoder must be marked broken so the soft-reset / full-reconnect chain fires.
+//
+// 5 s is chosen because the CGo call (avcodec_send_packet) itself permanently
+// blocks after ~5.75 s of null-frame stall on macOS VideoToolbox.  The
+// pre-flight stall check at the start of Decode() uses this same constant to
+// bail out *before* the CGo call, preventing the decodeLoop goroutine from
+// being permanently blocked inside CGo.
+const avcHWReadyFreezeThreshold = 5 * time.Second
 
 // keyframeWaitLimit is the maximum number of non-IDR packets we drop while
 // waiting for a keyframe after a decoder reset or flush.  gnome-remote-desktop
@@ -723,14 +739,23 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 	// several seconds when processing an IDR / scene-change keyframe (it must
 	// flush its internal reference pipeline before it can resume output).
 	// Firing broken on these stalls causes unnecessary soft-reset loops.  We
-	// do NOT apply a time-based threshold here; the decoder will resume
-	// naturally once VideoToolbox finishes processing the IDR.  avcodec_send_packet
-	// failures (AVERROR_INVALIDDATA etc.) are still caught below and lead to a
-	// flush + broken if they happen after the keyframe-wait path.
+	// apply avcHWReadyFreezeThreshold here as a pre-flight guard: if the
+	// decoder has been silent for longer than the threshold we mark it broken
+	// and return *without* calling avcodec_send_packet.  This is critical
+	// because on macOS VideoToolbox the CGo call itself permanently blocks
+	// after ~5.75 s of stall, permanently hanging the decodeLoop goroutine.
 	if d.useHW && !d.hwReady && !d.hwFirstSendTime.IsZero() {
 		if stalledFor := time.Since(d.hwFirstSendTime); stalledFor >= avcFreezeThreshold {
 			slog.Warn("H.264: HW decoder failed to produce first frame, marking broken",
 				"stalledFor", stalledFor, "hwSentCount", d.hwSentCount)
+			d.broken = true
+			return nil, nil
+		}
+	}
+	if d.useHW && d.hwReady && !d.lastSuccessTime.IsZero() {
+		if stalledFor := time.Since(d.lastSuccessTime); stalledFor >= avcHWReadyFreezeThreshold {
+			slog.Warn("H.264: HW decoder pre-flight stall timeout, marking broken",
+				"frozenFor", stalledFor, "hwSentCount", d.hwSentCount)
 			d.broken = true
 			return nil, nil
 		}
@@ -864,6 +889,15 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 			stalledFor := time.Since(d.lastSuccessTime)
 			slog.Debug("H.264: HW null frame", "frozenFor", stalledFor,
 				"hwSentCount", d.hwSentCount)
+			// Safety valve: if the decoder has been silent for longer than
+			// avcHWReadyFreezeThreshold, VideoToolbox is genuinely stuck and
+			// will not recover on its own.  Mark broken so the soft-reset /
+			// full-reconnect chain fires rather than freezing indefinitely.
+			if stalledFor >= avcHWReadyFreezeThreshold {
+				slog.Warn("H.264: HW decoder stall timeout, marking broken",
+					"frozenFor", stalledFor, "hwSentCount", d.hwSentCount)
+				d.broken = true
+			}
 		}
 	}
 	return result, nil

@@ -94,6 +94,14 @@ type RdpClient struct {
 	mouseTimer   *time.Timer
 	mouseLastTx  time.Time
 
+	// Wheel-scroll coalescing.  Rapid scroll events are accumulated over
+	// mouseCoalesceInterval and sent as a single PDU whose rotation value
+	// is the sum of all deltas received in that window.
+	wheelMu     sync.Mutex
+	wheelAccum  int
+	wheelTimer  *time.Timer
+	wheelLastTx time.Time
+
 	// reconnectMu serialises concurrent Reconnect() calls.
 	reconnectMu  sync.Mutex
 	reconnecting bool
@@ -797,6 +805,7 @@ func (g *RdpClient) KeyUp(sc int) {
 	}
 	slog.Debug("KeyUp", "sc", sc)
 	g.flushMouseMove()
+	g.flushWheel()
 
 	p := &pdu.ScancodeKeyEvent{}
 	p.KeyCode = uint16(sc)
@@ -810,6 +819,7 @@ func (g *RdpClient) KeyDown(sc int) {
 	}
 	slog.Debug("KeyDown", "sc", sc)
 	g.flushMouseMove()
+	g.flushWheel()
 
 	p := &pdu.ScancodeKeyEvent{}
 	p.KeyCode = uint16(sc)
@@ -889,16 +899,78 @@ func (g *RdpClient) MouseWheel(scroll int) {
 	if !g.eventReady {
 		return
 	}
-	slog.Debug("MouseWheel")
+	slog.Debug("MouseWheel", "scroll", scroll)
 	g.flushMouseMove()
 
+	g.wheelMu.Lock()
+	g.wheelAccum += scroll
+	if g.wheelAccum == 0 {
+		// Opposite deltas cancelled out; nothing to send.
+		g.wheelMu.Unlock()
+		return
+	}
+
+	now := time.Now()
+	since := now.Sub(g.wheelLastTx)
+	if since >= mouseCoalesceInterval {
+		g.sendWheelLocked(now)
+		g.wheelMu.Unlock()
+		return
+	}
+
+	if g.wheelTimer == nil {
+		delay := mouseCoalesceInterval - since
+		g.wheelTimer = time.AfterFunc(delay, g.flushWheelTimer)
+	}
+	g.wheelMu.Unlock()
+}
+
+// flushWheel sends any pending wheel event synchronously.  Called before any
+// non-wheel input event to preserve server-side ordering.
+func (g *RdpClient) flushWheel() {
+	g.wheelMu.Lock()
+	if g.wheelTimer != nil {
+		g.wheelTimer.Stop()
+		g.wheelTimer = nil
+	}
+	if g.wheelAccum != 0 {
+		g.sendWheelLocked(time.Now())
+	}
+	g.wheelMu.Unlock()
+}
+
+// flushWheelTimer is the time.AfterFunc callback for wheel coalescing.
+func (g *RdpClient) flushWheelTimer() {
+	g.wheelMu.Lock()
+	g.wheelTimer = nil
+	if g.wheelAccum != 0 && g.eventReady {
+		g.sendWheelLocked(time.Now())
+	}
+	g.wheelMu.Unlock()
+}
+
+// sendWheelLocked must be called with wheelMu held.
+func (g *RdpClient) sendWheelLocked(now time.Time) {
+	accum := g.wheelAccum
+	g.wheelAccum = 0
+	g.wheelLastTx = now
+
+	// The RDP wheel rotation field is 9 bits (WheelRotationMask = 0x01FF).
+	// If the accumulated delta exceeds 0x1FF, clamp it.
+	const maxWheel = int(pdu.WheelRotationMask)
 	p := &pdu.PointerEvent{}
 	p.PointerFlags |= pdu.PTRFLAGS_WHEEL
-	if scroll < 0 {
+	if accum < 0 {
 		p.PointerFlags |= pdu.PTRFLAGS_WHEEL_NEGATIVE
+		if -accum > maxWheel {
+			accum = -maxWheel
+		} else {
+			accum = -accum
+		}
+	} else if accum > maxWheel {
+		accum = maxWheel
 	}
-	var ts uint8 = uint8(scroll)
-	p.PointerFlags |= pdu.WheelRotationMask & uint16(ts)
+	p.PointerFlags |= pdu.WheelRotationMask & uint16(accum)
 	g.pdu.SendInputEvents(pdu.INPUT_EVENT_MOUSE, []pdu.InputEventsInterface{p})
 }
 
@@ -908,6 +980,7 @@ func (g *RdpClient) MouseUp(button int, x, y int) {
 	}
 	slog.Debug("MouseUp", "x", x, "y", y, "button", button)
 	g.flushMouseMove()
+	g.flushWheel()
 	p := &pdu.PointerEvent{}
 
 	switch button {
@@ -932,6 +1005,7 @@ func (g *RdpClient) MouseDown(button int, x, y int) {
 	}
 	slog.Debug("MouseDown", "x", x, "y", y, "button", button)
 	g.flushMouseMove()
+	g.flushWheel()
 	p := &pdu.PointerEvent{}
 
 	p.PointerFlags |= pdu.PTRFLAGS_DOWN
