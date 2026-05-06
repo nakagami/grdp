@@ -131,8 +131,11 @@ func parseAVC444Stream(data []byte) (stream1, stream2 *avc420Stream, lc uint8, e
 // most recently decoded AVC444 main stream.  It is used to combine with the
 // auxiliary chroma stream when LC=2 frames arrive.
 type avc444YPlane struct {
-	data      []byte
-	stride    int
+	data      []byte // luma Y, tight-packed, stride = w
+	u         []byte // Cb (U) plane from stream1, half-res, stride = (w+1)/2
+	v         []byte // Cr (V) plane from stream1, half-res, stride = (w+1)/2
+	stride    int    // = w
+	uvStride  int    // = (w+1)/2
 	w, h      int
 	fullRange bool
 }
@@ -397,25 +400,159 @@ func (g *GfxHandler) decodeAVC444WithI420(data []byte, destX, destY, destW, dest
 	return
 }
 
-// updateAVC444YCache copies the Y (luma) plane from i420 into g.avc444YPlane
-// for use when combining with an LC=2 auxiliary chroma frame.
+// updateAVC444YCache copies the Y, U, and V planes from stream1's i420 into
+// g.avc444YPlane for use when combining with an LC=2 auxiliary chroma frame.
+// The U/V planes are stored half-res (stride = (w+1)/2) and provide the B2/B3
+// chroma values (even column, even row positions) that stream2 does not cover.
 func (g *GfxHandler) updateAVC444YCache(i420 *h264FrameI420) {
 	w, h := i420.Width, i420.Height
-	needed := w * h // tight-packed, YStride == w
-	if cap(g.avc444YPlane.data) < needed {
-		g.avc444YPlane.data = make([]byte, needed)
+	uvStride := (w + 1) / 2
+	uvH := (h + 1) / 2
+	neededY := w * h
+	neededUV := uvStride * uvH
+	if cap(g.avc444YPlane.data) < neededY {
+		g.avc444YPlane.data = make([]byte, neededY)
 	} else {
-		g.avc444YPlane.data = g.avc444YPlane.data[:needed]
+		g.avc444YPlane.data = g.avc444YPlane.data[:neededY]
 	}
-	// i420.Y is already tight-packed (YStride == w from extractI420fromSrc).
+	if cap(g.avc444YPlane.u) < neededUV {
+		g.avc444YPlane.u = make([]byte, neededUV)
+	} else {
+		g.avc444YPlane.u = g.avc444YPlane.u[:neededUV]
+	}
+	if cap(g.avc444YPlane.v) < neededUV {
+		g.avc444YPlane.v = make([]byte, neededUV)
+	} else {
+		g.avc444YPlane.v = g.avc444YPlane.v[:neededUV]
+	}
+	// i420 planes are already tight-packed (strides == width/height from extractI420fromSrc).
 	copy(g.avc444YPlane.data, i420.Y)
+	copy(g.avc444YPlane.u, i420.U)
+	copy(g.avc444YPlane.v, i420.V)
 	g.avc444YPlane.stride = w
+	g.avc444YPlane.uvStride = uvStride
 	g.avc444YPlane.w = w
 	g.avc444YPlane.h = h
 	g.avc444YPlane.fullRange = i420.FullRange
 }
 
-// primeAuxDecoder feeds h264Data to h264dec2 to keep it synchronised with the
+// combineAVC444v2BGRA implements the AVC444v2 chroma reconstruction defined in
+// [MS-RDPEGFX 3.3.8.3.3] ("YUV420p Stream Combination for YUV444v2 mode").
+//
+// Stream2 encodes the missing chroma positions that stream1's 4:2:0 quantiser
+// discards, split across three "Bx areas" of the auxiliary I420 frame:
+//
+//   B4/B5 — stream2 Y plane, each row:
+//     bytes [0,   w/2)  = Cb at all odd-x columns  (U444[2k+1, y]  for k=0..w/2-1)
+//     bytes [w/2, w)    = Cr at all odd-x columns  (V444[2k+1, y]  for k=0..w/2-1)
+//
+//   B6/B7 — stream2 U plane, each half-height row j:
+//     bytes [0,    w/4) = Cb at even-x multiples of 4  (U444[4k,   2j+1])
+//     bytes [w/4,  w/2) = Cr at even-x multiples of 4  (V444[4k,   2j+1])
+//
+//   B8/B9 — stream2 V plane, each half-height row j:
+//     bytes [0,    w/4) = Cb at even-x offset-2 cols   (U444[4k+2, 2j+1])
+//     bytes [w/4,  w/2) = Cr at even-x offset-2 cols   (V444[4k+2, 2j+1])
+//
+// Positions not covered by stream2 (even-x, even-y) use stream1's half-res
+// B2/B3 chroma values from the cached cachedU/cachedV planes.
+//
+// Parameters:
+//
+//	yPlane/yStride       – luma Y from stream1, tight-packed (stride=w)
+//	cachedU/cachedV      – Cb/Cr from stream1, half-res (stride=uvStride=(w+1)/2)
+//	i420aux              – I420 output from decoding stream2
+//	fullRange            – true for PC-range [0-255], false for video [16-235]
+func combineAVC444v2BGRA(
+	yPlane []byte, yStride int,
+	cachedU, cachedV []byte, uvStride int,
+	i420aux *h264FrameI420,
+	fullRange bool,
+	w, h int,
+) (out []byte, pooled bool) {
+	if len(yPlane) == 0 || len(cachedU) == 0 || len(cachedV) == 0 || w <= 0 || h <= 0 {
+		return nil, false
+	}
+	if i420aux == nil || len(i420aux.Y) == 0 || len(i420aux.U) == 0 || len(i420aux.V) == 0 {
+		return nil, false
+	}
+	out = acquireBitmapBuf(w * h * 4)
+	halfW := w / 2
+	quarterW := w / 4
+	auxYStride := i420aux.YStride
+	auxUStride := i420aux.UStride
+	auxVStride := i420aux.VStride
+	for row := 0; row < h; row++ {
+		yRow := yPlane[row*yStride:]
+		outRow := out[row*w*4:]
+		auxYRow := i420aux.Y[row*auxYStride:]
+		uvRow := row >> 1
+		for col := 0; col < w; col++ {
+			Y := yRow[col]
+			var Cb, Cr byte
+			if col&1 == 1 {
+				// Odd column: B4/B5 — both even and odd rows.
+				k := col >> 1
+				Cb = auxYRow[k]
+				Cr = auxYRow[halfW+k]
+			} else if row&1 == 0 {
+				// Even column, even row: B2/B3 from stream1 cached chroma.
+				Cb = cachedU[uvRow*uvStride+(col>>1)]
+				Cr = cachedV[uvRow*uvStride+(col>>1)]
+			} else {
+				// Even column, odd row: B6-B9.
+				k := col >> 2
+				if col&2 == 0 {
+					// col % 4 == 0: B6/B7 from stream2 U plane.
+					Cb = i420aux.U[uvRow*auxUStride+k]
+					Cr = i420aux.U[uvRow*auxUStride+quarterW+k]
+				} else {
+					// col % 4 == 2: B8/B9 from stream2 V plane.
+					Cb = i420aux.V[uvRow*auxVStride+k]
+					Cr = i420aux.V[uvRow*auxVStride+quarterW+k]
+				}
+			}
+			avc444bt601BGRA(Y, Cb, Cr, fullRange, outRow[col*4:])
+		}
+	}
+	return out, true
+}
+
+// avc444bt601BGRA converts one YCbCr pixel to BGRA using BT.601 coefficients.
+// Cb and Cr are raw (0-255); the function subtracts 128 internally.
+func avc444bt601BGRA(Y, Cb, Cr byte, fullRange bool, dst []byte) {
+	u := int(Cb) - 128
+	v := int(Cr) - 128
+	var r, g, b int
+	if fullRange {
+		y := int(Y)
+		r = (256*y + 359*v + 128) >> 8
+		g = (256*y - 88*u - 183*v + 128) >> 8
+		b = (256*y + 454*u + 128) >> 8
+	} else {
+		c := int(Y) - 16
+		r = (298*c + 409*v + 128) >> 8
+		g = (298*c - 100*u - 208*v + 128) >> 8
+		b = (298*c + 516*u + 128) >> 8
+	}
+	dst[0] = clampByte(b)
+	dst[1] = clampByte(g)
+	dst[2] = clampByte(r)
+	dst[3] = 255
+}
+
+// clampByte clamps an integer to [0, 255].
+func clampByte(v int) byte {
+	if v < 0 {
+		return 0
+	}
+	if v > 255 {
+		return 255
+	}
+	return byte(v)
+}
+
+
 // auxiliary H.264 sequence.  The IDR frame for the chroma-upgrade stream is
 // always carried in the LC=0 stream2; subsequent LC=2 standalone frames are
 // P-frames in the same sequence.  Decoding output is discarded — the only
@@ -478,15 +615,33 @@ func (g *GfxHandler) decodeAVC444LC2(stream2 *avc420Stream, destW, destH int) (d
 			"auxW", i420aux.Width, "auxH", i420aux.Height, "lumaW", w, "lumaH", h)
 		return
 	}
-	combined, _ := combineAVC444BGRA(
+	combined, _ := combineAVC444v2BGRA(
 		g.avc444YPlane.data, g.avc444YPlane.stride,
-		i420aux.Y, i420aux.YStride,
-		i420aux.U, i420aux.UStride,
+		g.avc444YPlane.u, g.avc444YPlane.v, g.avc444YPlane.uvStride,
+		i420aux,
 		g.avc444YPlane.fullRange,
 		w, h,
 	)
 	if combined == nil {
 		return
+	}
+	if g.lc2SampleLogged {
+		g.lc2SampleLogged = true
+		for _, p := range [][2]int{{100, 50}, {500, 50}, {960, 50}, {1400, 50}, {960, 200}} {
+			px, py := p[0], p[1]
+			if px >= w || py >= h {
+				continue
+			}
+			off := (py*w + px) * 4
+			if off+3 < len(combined) {
+				slog.Debug("H.264: pixel sample (LC=2 combine)",
+					"x", px, "y", py,
+					"Y1", g.avc444YPlane.data[py*g.avc444YPlane.stride+px],
+					"Cb", i420aux.Y[py*i420aux.YStride+px/2],
+					"Cr", i420aux.Y[py*i420aux.YStride+w/2+px/2],
+					"B", combined[off], "G", combined[off+1], "R", combined[off+2])
+			}
+		}
 	}
 	decoded, pooled = cropBGRA(combined, w, h, destW, destH)
 	if w == destW && h == destH {

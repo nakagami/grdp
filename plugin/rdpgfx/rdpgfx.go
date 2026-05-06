@@ -199,14 +199,18 @@ type GfxHandler struct {
 	rfx          *rfxDecoder
 	progressive  *rfxProgressiveDecoder
 	h264dec      h264Decoder
-	// h264dec2 is the auxiliary H.264 decoder used for AVC444 LC=2 chroma-upgrade
-	// frames.  It decodes stream2, whose Y plane carries the U (Cb) channel and
-	// whose U plane carries the V (Cr) channel; these are combined with the luma
-	// plane cached from the most recent LC=0/1 main-stream decode.
+	// h264dec2 is the auxiliary H.264 decoder used for AVC444v2 LC=2 chroma-upgrade
+	// frames.  It decodes stream2, which carries chroma values for positions not
+	// covered by stream1's 4:2:0 quantiser.  The decoded I420 planes are combined
+	// with the luma and chroma planes cached from the most recent LC=0/1 main-stream
+	// decode to reconstruct full 4:4:4 YUV before converting to BGRA.
 	h264dec2 h264Decoder
-	// avc444YPlane caches the luma (Y) plane from the last main-stream AVC444
-	// decode, for use when an LC=2 chroma-upgrade frame arrives.
+	// avc444YPlane caches the luma (Y) and half-res chroma (U/V) planes from the
+	// last main-stream AVC444 decode, for use when an LC=2 chroma-upgrade frame arrives.
 	avc444YPlane avc444YPlane
+	// lc2SampleLogged is set after the first LC=2 combine output has been
+	// sampled for green/pink colour diagnostics.
+	lc2SampleLogged bool
 	// framesDecoded is accessed from both read and decode goroutines.
 	framesDecoded atomic.Uint32
 	sendFn        func(data []byte)

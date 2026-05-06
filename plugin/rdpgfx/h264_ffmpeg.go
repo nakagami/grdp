@@ -324,6 +324,35 @@ static void grdp_sample_yuv(const AVFrame *f,
     *v_out = f->data[2][(cy / 2) * f->linesize[2] + (cx / 2)];
 }
 
+// grdp_sample_nv12 samples the centre pixel of a semi-planar NV12 frame
+// (Y plane + interleaved UV plane) for diagnostics.
+static void grdp_sample_nv12(const AVFrame *f,
+    uint8_t *y_out, uint8_t *u_out, uint8_t *v_out)
+{
+    int cx = f->width  / 2;
+    int cy = f->height / 2;
+    *y_out = f->data[0][cy * f->linesize[0] + cx];
+    int uvx = (cx / 2) * 2; // NV12: interleaved, U at even index, V at odd
+    int uvy = cy / 2;
+    *u_out = f->data[1][uvy * f->linesize[1] + uvx];
+    *v_out = f->data[1][uvy * f->linesize[1] + uvx + 1];
+}
+
+// grdp_sample_nv12_at samples a specific (x,y) pixel from an NV12 frame.
+static void grdp_sample_nv12_at(const AVFrame *f, int x, int y,
+    uint8_t *y_out, uint8_t *u_out, uint8_t *v_out)
+{
+    if (x < 0 || x >= f->width || y < 0 || y >= f->height) {
+        *y_out = *u_out = *v_out = 0;
+        return;
+    }
+    *y_out = f->data[0][y * f->linesize[0] + x];
+    int uvx = (x >> 1) * 2;
+    int uvy = y >> 1;
+    *u_out = f->data[1][uvy * f->linesize[1] + uvx];
+    *v_out = f->data[1][uvy * f->linesize[1] + uvx + 1];
+}
+
 static void grdp_sws_set_src_range(struct SwsContext *sws, int full_range) {
     const int *inv_table, *table;
     int src_range, dst_range, brightness, contrast, saturation;
@@ -372,41 +401,6 @@ static void grdp_copy_nv12_to_i420(
         for (int x = 0; x < pw; x++) {
             udst[y * pw + x] = row[x * 2];
             vdst[y * pw + x] = row[x * 2 + 1];
-        }
-    }
-}
-
-// grdp_avc444_combine_bgra combines an AVC444v2 main-stream luma plane with
-// auxiliary-stream chroma planes into a packed BGRA output buffer.
-//
-// In AVC444v2 (MS-RDPEGFX 2.2.4.7), stream2 encodes the original 4:4:4 chroma
-// signals as the Y and Cb channels of a YUV 4:2:0 H.264 stream:
-//   y2  (W×H, stride=w)          → Cb (U) channel at full horizontal resolution
-//   u2  (W/2×H/2, stride=(w+1)/2) → Cr (V) channel at half resolution
-//
-// Parameters:
-//   y1 / y1_stride : luma from the main stream (tight I420 packing, stride=w)
-//   y2 / y2_stride : Y plane from aux stream  (= U/Cb channel, stride=w)
-//   u2 / u2_stride : U plane from aux stream  (= V/Cr channel, stride=(w+1)/2)
-//   full_range     : 1 = full range [0-255], 0 = limited [16-235]
-//   dst / dst_stride : BGRA output
-static void grdp_avc444_combine_bgra(
-    const uint8_t *y1, int y1_stride,
-    const uint8_t *y2, int y2_stride,
-    const uint8_t *u2, int u2_stride,
-    int full_range,
-    uint8_t *dst, int dst_stride,
-    int w, int h)
-{
-    for (int row = 0; row < h; row++) {
-        const uint8_t *yr = y1 + row * y1_stride;
-        const uint8_t *ur = y2 + row * y2_stride;        // full-res U (Cb)
-        const uint8_t *vr = u2 + (row >> 1) * u2_stride; // half-res V (Cr)
-        uint8_t *dr = dst + row * dst_stride;
-        for (int col = 0; col < w; col++) {
-            int u = (int)ur[col] - 128;
-            int v = (int)vr[col >> 1] - 128;
-            grdp_bt601_pixel((int)yr[col], u, v, full_range, dr + col * 4);
         }
     }
 }
@@ -494,12 +488,14 @@ type ffmpegDecoder struct {
 	lastFmt                  C.enum_AVPixelFormat
 	lastFullRange            C.int     // tracks fullRange used when swsCtx was last configured
 	lastSuccessTime          time.Time // wall-clock time of the last successfully decoded frame
+	lastSendTime             time.Time // wall-clock time of the last avcodec_send_packet call
 	hwFirstSendTime          time.Time // wall-clock time of the first packet sent to the HW decoder
 	needsKeyFrame            bool      // drop packets until an IDR/SPS is received
 	keyframeWaitCount        int       // P-frames dropped so far while needsKeyFrame=true
 	hwReady                  bool      // HW decoder has produced at least one frame
 	hwSentCount              int       // packets sent to HW decoder (for diagnostics)
 	swFrameCount             int       // frames decoded by SW decoder (for diagnostics)
+	hwFrameCount             int       // frames decoded by HW decoder (for diagnostics)
 	broken                   bool      // decoder is unrecoverable; stop producing frames so the app reconnects
 	proceededWithoutKeyframe bool      // "proceed without keyframe" path was taken; AVERROR here means broken
 
@@ -771,6 +767,12 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 	// and return *without* calling avcodec_send_packet.  This is critical
 	// because on macOS VideoToolbox the CGo call itself permanently blocks
 	// after ~5.75 s of stall, permanently hanging the decodeLoop goroutine.
+	//
+	// False-positive guard: if the RDP server itself was idle (no packets sent
+	// for at least avcHWReadyFreezeThreshold), the elapsed time since
+	// lastSuccessTime reflects server silence, not a VideoToolbox deadlock.
+	// In that case we reset the stall clock so the threshold applies only to
+	// periods where packets were actually flowing into the decoder.
 	if d.useHW && !d.hwReady && !d.hwFirstSendTime.IsZero() {
 		if stalledFor := time.Since(d.hwFirstSendTime); stalledFor >= avcFreezeThreshold {
 			slog.Warn("H.264: HW decoder failed to produce first frame, marking broken",
@@ -781,10 +783,19 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 	}
 	if d.useHW && d.hwReady && !d.lastSuccessTime.IsZero() {
 		if stalledFor := time.Since(d.lastSuccessTime); stalledFor >= avcHWReadyFreezeThreshold {
-			slog.Warn("H.264: HW decoder pre-flight stall timeout, marking broken",
-				"frozenFor", stalledFor, "hwSentCount", d.hwSentCount)
-			d.broken = true
-			return nil, nil
+			// If no packet was sent to the decoder during the apparent stall,
+			// the server was simply idle.  Reset the stall clock so we don't
+			// misfire on the first packet after a server-side pause.
+			if d.lastSendTime.IsZero() || time.Since(d.lastSendTime) >= avcHWReadyFreezeThreshold {
+				slog.Debug("H.264: HW decoder stall clock reset (server was idle)",
+					"idleFor", stalledFor, "hwSentCount", d.hwSentCount)
+				d.lastSuccessTime = time.Now()
+			} else {
+				slog.Warn("H.264: HW decoder pre-flight stall timeout, marking broken",
+					"frozenFor", stalledFor, "hwSentCount", d.hwSentCount)
+				d.broken = true
+				return nil, nil
+			}
 		}
 	}
 
@@ -802,6 +813,7 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 		if d.hwSentCount == 1 {
 			d.hwFirstSendTime = time.Now()
 		}
+		d.lastSendTime = time.Now()
 	}
 
 	sendStart := time.Now()
@@ -946,40 +958,6 @@ func (d *ffmpegDecoder) DecodeWithI420(h264Data []byte) (*h264Frame, *h264FrameI
 	return frame, d.lastI420, err
 }
 
-// combineAVC444BGRA combines an AVC444v2 main-stream luma plane (y1) with
-// auxiliary-stream chroma planes (y2 = U/Cb channel, u2 = V/Cr channel) and
-// writes a packed BGRA frame into a buffer acquired from bitmapBufPool.
-// Returns (nil, false) on invalid input.  The caller must call
-// releaseBitmapBuf on the returned slice when pooled is true.
-func combineAVC444BGRA(
-	y1 []byte, y1Stride int,
-	y2 []byte, y2Stride int,
-	u2 []byte, u2Stride int,
-	fullRange bool,
-	w, h int,
-) (out []byte, pooled bool) {
-	if len(y1) == 0 || len(y2) == 0 || len(u2) == 0 || w <= 0 || h <= 0 {
-		return nil, false
-	}
-	out = acquireBitmapBuf(w * h * 4)
-	fr := C.int(0)
-	if fullRange {
-		fr = 1
-	}
-	C.grdp_avc444_combine_bgra(
-		(*C.uint8_t)(unsafe.Pointer(&y1[0])), C.int(y1Stride),
-		(*C.uint8_t)(unsafe.Pointer(&y2[0])), C.int(y2Stride),
-		(*C.uint8_t)(unsafe.Pointer(&u2[0])), C.int(u2Stride),
-		fr,
-		(*C.uint8_t)(unsafe.Pointer(&out[0])), C.int(w*4),
-		C.int(w), C.int(h),
-	)
-	runtime.KeepAlive(y1)
-	runtime.KeepAlive(y2)
-	runtime.KeepAlive(u2)
-	return out, true
-}
-
 func (d *ffmpegDecoder) convertFrame() (*h264Frame, int64, error) {
 	srcFrame := d.frame
 	var transferNs int64
@@ -1029,18 +1007,24 @@ func (d *ffmpegDecoder) convertFrame() (*h264Frame, int64, error) {
 		if srcFmt == C.AV_PIX_FMT_YUVJ420P || srcFrame.color_range == 2 {
 			fullRange = 1
 		}
-		// Log the centre-pixel YUV values for the first few SW frames so we
+		// Log the centre-pixel YUV values for the first few frames so we
 		// can distinguish H.264 decode corruption from colour-conversion bugs.
-		if !d.useHW && d.swFrameCount < 3 {
+		if d.hwFrameCount < 3 || (!d.useHW && d.swFrameCount < 3) {
 			var sy, su, sv C.uint8_t
 			C.grdp_sample_yuv(srcFrame, &sy, &su, &sv)
-			slog.Debug("H.264: SW frame sample",
-				"frame", d.swFrameCount,
+			slog.Debug("H.264: frame sample (yuv420p)",
+				"hw", d.useHW,
+				"frame", d.hwFrameCount,
 				"fmt", int(srcFmt),
+				"colorRange", int(srcFrame.color_range),
 				"fullRange", int(fullRange),
 				"Y", int(sy), "U", int(su), "V", int(sv),
 				"w", int(w), "h", int(h))
-			d.swFrameCount++
+			if d.useHW {
+				d.hwFrameCount++
+			} else {
+				d.swFrameCount++
+			}
 		}
 		C.grdp_yuv420p_to_bgra(srcFrame,
 			(*C.uint8_t)(unsafe.Pointer(&out[0])), C.int(w*4), fullRange)
@@ -1050,8 +1034,42 @@ func (d *ffmpegDecoder) convertFrame() (*h264Frame, int64, error) {
 		if srcFrame.color_range == 2 { // AVCOL_RANGE_JPEG
 			fullRange = 1
 		}
+		frameIdx := d.hwFrameCount
+		logThis := d.hwFrameCount < 3
+		if d.hwFrameCount < 3 {
+			var sy, su, sv C.uint8_t
+			C.grdp_sample_nv12(srcFrame, &sy, &su, &sv)
+			slog.Debug("H.264: frame sample (nv12)",
+				"hw", d.useHW,
+				"frame", d.hwFrameCount,
+				"fmt", int(srcFmt),
+				"colorRange", int(srcFrame.color_range),
+				"fullRange", int(fullRange),
+				"Y", int(sy), "U", int(su), "V", int(sv),
+				"w", int(w), "h", int(h))
+			d.hwFrameCount++
+		}
 		C.grdp_nv12_to_bgra(srcFrame,
 			(*C.uint8_t)(unsafe.Pointer(&out[0])), C.int(w*4), fullRange)
+		if logThis {
+			// Sample NV12 input and BGRA output at multiple positions for
+			// the first three frames to diagnose colour conversion.
+			for _, p := range [][2]int{{100, 50}, {500, 50}, {960, 50}, {1400, 50}, {960, 200}} {
+				px, py := p[0], p[1]
+				if px >= int(w) || py >= int(h) {
+					continue
+				}
+				var sy, su, sv C.uint8_t
+				C.grdp_sample_nv12_at(srcFrame, C.int(px), C.int(py), &sy, &su, &sv)
+				off := (py*int(w) + px) * 4
+				slog.Debug("H.264: pixel sample (nv12→bgra)",
+					"frame", frameIdx,
+					"hw", d.useHW,
+					"x", px, "y", py,
+					"Y", int(sy), "U", int(su), "V", int(sv),
+					"B", out[off], "G", out[off+1], "R", out[off+2])
+			}
+		}
 
 	default:
 		// For other formats, use swscale.
@@ -1059,6 +1077,16 @@ func (d *ffmpegDecoder) convertFrame() (*h264Frame, int64, error) {
 		fullRange := C.grdp_is_full_range_fmt(srcFmt)
 		if fullRange == 0 && srcFrame.color_range == 2 { // AVCOL_RANGE_JPEG
 			fullRange = 1
+		}
+		if d.hwFrameCount < 3 {
+			slog.Debug("H.264: frame sample (swscale)",
+				"hw", d.useHW,
+				"frame", d.hwFrameCount,
+				"fmt", int(srcFmt),
+				"colorRange", int(srcFrame.color_range),
+				"fullRange", int(fullRange),
+				"w", int(w), "h", int(h))
+			d.hwFrameCount++
 		}
 		if w != d.lastW || h != d.lastH || srcFmt != d.lastFmt || fullRange != d.lastFullRange {
 			if d.swsCtx != nil {
