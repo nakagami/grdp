@@ -917,7 +917,7 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 			// will not recover on its own.  Mark broken so the soft-reset /
 			// full-reconnect chain fires rather than freezing indefinitely.
 			if stalledFor >= avcHWReadyFreezeThreshold {
-				slog.Warn("H.264: HW decoder stall timeout, marking broken",
+				slog.Debug("H.264: HW decoder stall timeout, marking broken",
 					"frozenFor", stalledFor, "hwSentCount", d.hwSentCount)
 				d.broken = true
 			}
