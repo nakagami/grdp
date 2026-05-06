@@ -454,11 +454,14 @@ const avcFreezeThreshold = 4 * time.Second
 const avcHWReadyFreezeThreshold = 5 * time.Second
 
 // avcHWRecoveryWindow is how long Decode() probes for pending output after
-// avcHWReadyFreezeThreshold is crossed.  YouTube 1080p H.264 IDR frames
-// (GOP boundary ~every 8-15 s) can keep VideoToolbox silent for up to ~10 s
-// while it flushes the reference pipeline; 15 s gives enough headroom before
-// we give up and declare the decoder broken.
-const avcHWRecoveryWindow = 15 * time.Second
+// avcHWReadyFreezeThreshold is crossed.  VideoToolbox may legitimately stall
+// for 1-2 s at a GOP/IDR boundary while flushing its reference pipeline; a
+// 2 s probe window (added on top of the 5 s threshold) gives it up to 7 s
+// total before we declare the decoder broken and trigger a soft reset.
+// Keeping this window short minimises the visual freeze on genuine failures
+// since YouTube / gnome-remote-desktop sends a fresh IDR within 2 s of the
+// soft reset (either via ForceRefresh or a natural GOP boundary).
+const avcHWRecoveryWindow = 2 * time.Second
 
 // keyframeWaitLimit is the maximum number of non-IDR packets we drop while
 // waiting for a keyframe after a decoder reset or flush.  gnome-remote-desktop
@@ -845,11 +848,11 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 					// No output yet.  Enter / stay in recovery-probe window.
 					if d.stallProbeStart.IsZero() {
 						d.stallProbeStart = time.Now()
-						slog.Warn("H.264: HW decoder stall detected, probing for recovery",
+						slog.Debug("H.264: HW decoder stall detected, probing for recovery",
 							"frozenFor", stalledFor.Round(time.Millisecond),
 							"hwSentCount", d.hwSentCount)
 					} else if probedFor := time.Since(d.stallProbeStart); probedFor >= avcHWRecoveryWindow {
-						slog.Warn("H.264: HW decoder recovery probe timed out, marking broken",
+						slog.Debug("H.264: HW decoder recovery probe timed out, marking broken",
 							"totalFrozen", stalledFor.Round(time.Second),
 							"probedFor", probedFor.Round(time.Second),
 							"hwSentCount", d.hwSentCount)
