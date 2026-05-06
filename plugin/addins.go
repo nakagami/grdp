@@ -148,9 +148,6 @@ func RdpVirtualChannelInitEx(lpUserParam interface{}, clientContext interface{},
 		return CHANNEL_RC_ALREADY_CONNECTED
 	}
 
-	if versionRequested != VIRTUAL_CHANNEL_VERSION_WIN2000 {
-	}
-
 	for i := range pChannel {
 		pChannelDef := &pChannel[i]
 		if getChannelOpenDataByName(channels, pChannelDef.Name) == nil {
@@ -164,16 +161,11 @@ func RdpVirtualChannelInitEx(lpUserParam interface{}, clientContext interface{},
 	pChannelClientData.lpUserParam = lpUserParam
 	channels.clientDataCount++
 
-	//WINPR_ASSERT(channels->instance);
-	//WINPR_ASSERT(channels->instance->context);
-	//settings = channels.instance.context.settings
-	//WINPR_ASSERT(settings);
+	pChannelInitData.pInterface = clientContext
 
 	for i := range pChannel {
 		pChannelDef := &pChannel[i]
 		var pChannelOpenData ChannelOpenData
-
-		//WINPR_ASSERT(pChannelOpenData)
 
 		pChannelOpenData.OpenHandle = atomic.AddUint32(&openHandleSeq, 1)
 		pChannelOpenData.channels = channels
@@ -182,23 +174,11 @@ func RdpVirtualChannelInitEx(lpUserParam interface{}, clientContext interface{},
 			return CHANNEL_RC_INITIALIZATION_ERROR
 		}
 
-		pChannelInitData.pInterface = clientContext
-
 		pChannelOpenData.flags = 1
 		pChannelOpenData.name = pChannelDef.Name
 		pChannelOpenData.options = pChannelDef.Options
 		pChannelInitData.openDataMap[pChannelOpenData.OpenHandle] = &pChannelOpenData
 		channels.openDataList = append(channels.openDataList, pChannelOpenData)
-		channels.openDataCount++
-		/*
-			if settings.ChannelCount < 30 {
-				channel := freerdp_settings_get_pointer_array_writable(
-					settings, FreeRDP_ChannelDefArray, settings.ChannelCount)
-				channel.name = pChannelDef.Name
-				channel.options = pChannelDef.Options
-				settings.ChannelCount++
-			}*/
-
 		channels.openDataCount++
 	}
 

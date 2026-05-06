@@ -140,13 +140,12 @@ func OleIsCurrentClipboard(dataObject *IDataObject) bool {
 	return true
 }
 
+// GetFileNames and GetFileInfo are not supported in text-only generic mode.
 func GetFileNames() []string {
-	// Text-only mode doesn't support file transfer
 	return []string{}
 }
 
 func GetFileInfo(sys interface{}) (uint32, []byte, uint32, uint32) {
-	// Text-only mode doesn't support file transfer
 	return 0, []byte{}, 0, 0
 }
 
