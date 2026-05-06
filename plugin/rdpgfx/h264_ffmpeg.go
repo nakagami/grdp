@@ -496,6 +496,7 @@ type ffmpegDecoder struct {
 	lastFullRange            C.int     // tracks fullRange used when swsCtx was last configured
 	lastSuccessTime          time.Time // wall-clock time of the last successfully decoded frame
 	lastSendTime             time.Time // wall-clock time of the last avcodec_send_packet call
+	lastReceiveTime          time.Time // wall-clock time of the last Decode() call (updated on every call)
 	hwFirstSendTime          time.Time // wall-clock time of the first packet sent to the HW decoder
 	needsKeyFrame            bool      // drop packets until an IDR/SPS is received
 	keyframeWaitCount        int       // P-frames dropped so far while needsKeyFrame=true
@@ -715,6 +716,10 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 		// are produced; the application-level watchdog will reconnect.
 		return nil, nil
 	}
+	// Track every call, including those that return early (probe mode, keyframe
+	// wait, etc.).  Used for server-idle detection: if no packets have arrived
+	// for avcHWReadyFreezeThreshold, the server is genuinely quiet, not us.
+	d.lastReceiveTime = time.Now()
 
 	// After a decoder reset we must resync with a fresh IDR from the server.
 	// After a SW decoder flush, wait for an IDR before resuming decoding.
@@ -806,10 +811,13 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 	}
 	if d.useHW && d.hwReady && !d.lastSuccessTime.IsZero() {
 		if stalledFor := time.Since(d.lastSuccessTime); stalledFor >= avcHWReadyFreezeThreshold {
-			// If no packet was sent to the decoder during the apparent stall,
-			// the server was simply idle.  Reset the stall clock so we don't
-			// misfire on the first packet after a server-side pause.
-			if d.lastSendTime.IsZero() || time.Since(d.lastSendTime) >= avcHWReadyFreezeThreshold {
+			// If no packet has arrived at Decode() during the apparent stall,
+			// the server was simply idle (e.g. screen was static).  Reset the
+			// stall clock so we don't misfire on the first packet after a
+			// server-side pause.  Use lastReceiveTime (updated on every
+			// Decode() call, even in probe mode) rather than lastSendTime so
+			// that probe-mode early returns don't make us appear idle.
+			if d.lastReceiveTime.IsZero() || time.Since(d.lastReceiveTime) >= avcHWReadyFreezeThreshold {
 				slog.Debug("H.264: HW decoder stall clock reset (server was idle)",
 					"idleFor", stalledFor, "hwSentCount", d.hwSentCount)
 				d.lastSuccessTime = time.Now()
@@ -991,12 +999,13 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 			stalledFor := time.Since(d.lastSuccessTime)
 			slog.Debug("H.264: HW null frame", "frozenFor", stalledFor,
 				"hwSentCount", d.hwSentCount)
-			// Safety valve: if the decoder has been silent for longer than
-			// avcHWReadyFreezeThreshold, VideoToolbox is genuinely stuck and
-			// will not recover on its own.  Mark broken so the soft-reset /
-			// full-reconnect chain fires rather than freezing indefinitely.
-			if stalledFor >= avcHWReadyFreezeThreshold {
-				slog.Debug("H.264: HW decoder stall timeout, marking broken",
+			// Safety valve: if the pre-flight probe window is NOT active and
+			// the decoder has been silent past the threshold, VideoToolbox is
+			// genuinely stuck.  In probe mode the pre-flight block (above) is
+			// responsible for declaring the decoder broken — the safety valve
+			// must not interfere with the probe window countdown.
+			if d.stallProbeStart.IsZero() && stalledFor >= avcHWReadyFreezeThreshold {
+				slog.Warn("H.264: HW decoder stall timeout (safety valve), marking broken",
 					"frozenFor", stalledFor, "hwSentCount", d.hwSentCount)
 				d.broken = true
 			}
