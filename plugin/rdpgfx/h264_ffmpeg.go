@@ -423,21 +423,12 @@ import (
 	"unsafe"
 )
 
-// useSwscaleForYUV420 controls whether YUV420P/YUVJ420P frames are converted
-// to BGRA via swscale (SIMD-accelerated on x86_64) or via grdp_yuv420p_to_bgra
-// (a portable scalar C loop).  swscale is preferred where it is both correct
-// and fast; on ARM64 its non-accelerated yuv420p→bgra fallback ignores
-// sws_setColorspaceDetails and produces a strong green cast, so we fall back
-// to the hand-written loop there.
-var useSwscaleForYUV420 = runtime.GOARCH != "arm64"
-
-// useSwscaleForNV12 mirrors useSwscaleForYUV420 for NV12 (VideoToolbox HW
-// output).  The same ARM64 swscale defect applies: the non-accelerated
-// nv12→bgra path ignores sws_setColorspaceDetails, so a zero-filled NV12
-// frame (e.g. produced by VideoToolbox during codec initialisation) is
-// converted as full-range and renders as solid green instead of black.
-// On x86_64, swscale's SSSE3/AVX2 NV12→BGRA path is both correct and fast.
-var useSwscaleForNV12 = runtime.GOARCH != "arm64"
+// useSwscale controls whether YUV420P/YUVJ420P and NV12 frames are converted
+// to BGRA via swscale (SIMD-accelerated on x86_64) or via hand-written C loops.
+// On ARM64, swscale's non-accelerated paths ignore sws_setColorspaceDetails,
+// producing a strong green cast; the hand-written BT.601 loops are used instead.
+// On x86_64, swscale is both correct and significantly faster (SSSE3/AVX2).
+var useSwscale = runtime.GOARCH != "arm64"
 
 // avLogOnce ensures grdp_suppress_av_log is called only once per process.
 var avLogOnce sync.Once
@@ -1027,7 +1018,13 @@ func (d *ffmpegDecoder) convertFrame() (*h264Frame, int64, error) {
 	// producing a strong green cast.  On x86_64 swscale is both correct and
 	// significantly faster (SIMD-accelerated), so we route through swscale
 	// there and only fall back to the hand-written loop on ARM64.
-	if (srcFmt == C.AV_PIX_FMT_YUV420P || srcFmt == C.AV_PIX_FMT_YUVJ420P) && !useSwscaleForYUV420 {
+	//
+	// For NV12 (VideoToolbox HW transfer output) on ARM64, bypass swscale for
+	// the same reason: the non-accelerated ARM64 path ignores
+	// sws_setColorspaceDetails and produces a green cast on zero-filled frames.
+	var convErr error
+	switch {
+	case (srcFmt == C.AV_PIX_FMT_YUV420P || srcFmt == C.AV_PIX_FMT_YUVJ420P) && !useSwscale:
 		fullRange := C.int(0)
 		if srcFmt == C.AV_PIX_FMT_YUVJ420P || srcFrame.color_range == 2 {
 			fullRange = 1
@@ -1047,74 +1044,55 @@ func (d *ffmpegDecoder) convertFrame() (*h264Frame, int64, error) {
 		}
 		C.grdp_yuv420p_to_bgra(srcFrame,
 			(*C.uint8_t)(unsafe.Pointer(&out[0])), C.int(w*4), fullRange)
-		if d.outI420Enabled {
-			d.extractI420fromSrc(srcFrame)
-		}
-		if srcFrame == d.swFrame {
-			C.av_frame_unref(d.swFrame)
-		}
-		return &h264Frame{Data: out, Width: int(w), Height: int(h)}, transferNs, nil
-	}
 
-	// For NV12 (VideoToolbox HW transfer output) on ARM64, bypass swscale for
-	// the same reason as YUV420P: the non-accelerated ARM64 path ignores
-	// sws_setColorspaceDetails and produces a green cast on zero-filled frames.
-	if srcFmt == C.AV_PIX_FMT_NV12 && !useSwscaleForNV12 {
+	case srcFmt == C.AV_PIX_FMT_NV12 && !useSwscale:
 		fullRange := C.int(0)
 		if srcFrame.color_range == 2 { // AVCOL_RANGE_JPEG
 			fullRange = 1
 		}
 		C.grdp_nv12_to_bgra(srcFrame,
 			(*C.uint8_t)(unsafe.Pointer(&out[0])), C.int(w*4), fullRange)
-		if d.outI420Enabled {
-			d.extractI420fromSrc(srcFrame)
+
+	default:
+		// For other formats, use swscale.
+		swsFmt := C.grdp_yuvj_to_yuv(srcFmt)
+		fullRange := C.grdp_is_full_range_fmt(srcFmt)
+		if fullRange == 0 && srcFrame.color_range == 2 { // AVCOL_RANGE_JPEG
+			fullRange = 1
 		}
-		if srcFrame == d.swFrame {
-			C.av_frame_unref(d.swFrame)
+		if w != d.lastW || h != d.lastH || srcFmt != d.lastFmt || fullRange != d.lastFullRange {
+			if d.swsCtx != nil {
+				C.sws_freeContext(d.swsCtx)
+			}
+			d.swsCtx = C.sws_getContext(
+				w, h, swsFmt,
+				w, h, C.AV_PIX_FMT_BGRA,
+				C.SWS_BILINEAR, nil, nil, nil,
+			)
+			if d.swsCtx == nil {
+				convErr = fmt.Errorf("sws_getContext failed for %dx%d fmt=%d", w, h, srcFmt)
+				break
+			}
+			C.grdp_sws_set_src_range(d.swsCtx, fullRange)
+			d.lastW = w
+			d.lastH = h
+			d.lastFmt = srcFmt
+			d.lastFullRange = fullRange
 		}
-		return &h264Frame{Data: out, Width: int(w), Height: int(h)}, transferNs, nil
+		C.grdp_frame_to_bgra(d.swsCtx, srcFrame,
+			(*C.uint8_t)(unsafe.Pointer(&out[0])), C.int(w*4))
 	}
 
-	// For other formats (e.g. NV12 from VideoToolbox HW transfer), use swscale.
-	swsFmt := C.grdp_yuvj_to_yuv(srcFmt)
-	fullRange := C.grdp_is_full_range_fmt(srcFmt)
-	if fullRange == 0 && srcFrame.color_range == 2 { // AVCOL_RANGE_JPEG
-		fullRange = 1
-	}
-
-	if w != d.lastW || h != d.lastH || srcFmt != d.lastFmt || fullRange != d.lastFullRange {
-		if d.swsCtx != nil {
-			C.sws_freeContext(d.swsCtx)
-		}
-		d.swsCtx = C.sws_getContext(
-			w, h, swsFmt,
-			w, h, C.AV_PIX_FMT_BGRA,
-			C.SWS_BILINEAR, nil, nil, nil,
-		)
-		if d.swsCtx == nil {
-			return nil, transferNs, fmt.Errorf("sws_getContext failed for %dx%d fmt=%d", w, h, srcFmt)
-		}
-		C.grdp_sws_set_src_range(d.swsCtx, fullRange)
-		d.lastW = w
-		d.lastH = h
-		d.lastFmt = srcFmt
-		d.lastFullRange = fullRange
-	}
-
-	C.grdp_frame_to_bgra(d.swsCtx, srcFrame,
-		(*C.uint8_t)(unsafe.Pointer(&out[0])), C.int(w*4))
-	if d.outI420Enabled {
+	if convErr == nil && d.outI420Enabled {
 		d.extractI420fromSrc(srcFrame)
 	}
 	if srcFrame == d.swFrame {
 		C.av_frame_unref(d.swFrame)
 	}
-
-	return &h264Frame{
-		Data:   out,
-		Width:  int(w),
-		Height: int(h),
-	}, transferNs, nil
+	if convErr != nil {
+		return nil, transferNs, convErr
+	}
+	return &h264Frame{Data: out, Width: int(w), Height: int(h)}, transferNs, nil
 }
 
 // scanResult holds the IDR-presence flag and SPS/PPS NAL boundaries (offsets
@@ -1126,12 +1104,6 @@ type scanResult struct {
 	spsStart, spsEnd, ppsStart, ppsEnd int
 }
 
-// scanH264Packet walks an Annex B H.264 packet exactly once, returning
-// whether it contains any IDR slice (NAL type 5) or SPS (NAL type 7) NAL
-// unit and recording the byte ranges for the most recent SPS/PPS NALs found
-// (start offset includes the Annex B start code).  Replaces what used to be
-// three separate linear scans (h264ContainsKeyFrame ×2 + scanAndCacheParamSets)
-// performed per-packet.
 // scanH264Packet walks an Annex B H.264 packet exactly once, returning
 // whether it contains any IDR slice (NAL type 5) or SPS (NAL type 7) NAL
 // unit and recording the byte ranges for the most recent SPS/PPS NALs found
