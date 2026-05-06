@@ -694,7 +694,11 @@ const softResetLimit = 3
 // including the case where h264dec2 was reset independently of h264dec.
 func (g *GfxHandler) maybeRequestKeyframe() {
 	dec1NeedsKF := g.h264dec != nil && g.h264dec.NeedsKeyframe()
-	dec2NeedsKF := g.h264dec2 != nil && g.h264dec2.NeedsKeyframe()
+	// For h264dec2 use NeedsIDR (not NeedsKeyframe) to avoid triggering
+	// ForceRefresh on the hwStall heuristic: LC=2 frames are sparse so
+	// h264dec2 routinely goes >250ms without output, which would cause
+	// constant ForceRefresh requests and audio/video desync.
+	dec2NeedsKF := g.h264dec2 != nil && g.h264dec2.NeedsIDR()
 	if !dec1NeedsKF && !dec2NeedsKF {
 		return
 	}

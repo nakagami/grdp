@@ -694,6 +694,10 @@ func (d *ffmpegDecoder) NeedsKeyframe() bool {
 	return false
 }
 
+func (d *ffmpegDecoder) NeedsIDR() bool {
+	return d.needsKeyFrame
+}
+
 func (d *ffmpegDecoder) IsBroken() bool {
 	return d.broken
 }

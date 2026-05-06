@@ -36,9 +36,17 @@ type h264Decoder interface {
 	// Returns nil frame (no error) when the decoder needs more input data.
 	Decode(h264Data []byte) (*h264Frame, error)
 	// NeedsKeyframe reports whether the decoder is waiting for a keyframe
-	// (IDR) before it can produce output.  This happens after a decoder
+	// (IDR) before it can produce output, or is otherwise stalling and
+	// needs the server to send a refresh.  This happens after a decoder
 	// reset; the caller should request a refresh from the server.
+	// For H/W decoders this also returns true when output has stalled
+	// beyond a threshold (hwStallKeyframeThreshold).
 	NeedsKeyframe() bool
+	// NeedsIDR reports whether the decoder is explicitly waiting for an
+	// IDR frame after a reset.  Unlike NeedsKeyframe it does NOT include
+	// the H/W stall heuristic, so it is safe to poll even for decoders
+	// that only receive frames infrequently (e.g. h264dec2 for LC=2).
+	NeedsIDR() bool
 	// IsBroken reports whether the decoder is permanently unrecoverable.
 	// When true, the application should reconnect the RDP session to
 	// create a fresh decoder.
