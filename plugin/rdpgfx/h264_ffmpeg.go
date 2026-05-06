@@ -461,6 +461,14 @@ const avcHWReadyFreezeThreshold = 5 * time.Second
 // codecs like VideoToolbox cannot recover without a proper IDR).
 const keyframeWaitLimit = 900
 
+// keyframeWaitTimeout is the maximum wall-clock time the HW decoder waits for
+// an IDR after entering needsKeyFrame=true.  ForceRefresh is sent every 2 s,
+// so the server should respond within a few seconds.  If no IDR arrives within
+// this window the decoder marks itself broken so the soft-reset / reconnect
+// chain escalates quickly rather than waiting the full keyframeWaitLimit
+// (~30 s) of dropped packets.
+const keyframeWaitTimeout = 10 * time.Second
+
 // profileWindow is the number of HW frames over which Decode aggregates
 // timing measurements before logging an INFO summary.  At 30 fps this is
 // roughly one log line every ~10 s.
@@ -483,6 +491,7 @@ type ffmpegDecoder struct {
 	hwFirstSendTime          time.Time // wall-clock time of the first packet sent to the HW decoder
 	needsKeyFrame            bool      // drop packets until an IDR/SPS is received
 	keyframeWaitCount        int       // P-frames dropped so far while needsKeyFrame=true
+	keyframeWaitStart        time.Time // wall-clock time of the first dropped P-frame while waiting for IDR
 	hwReady                  bool      // HW decoder has produced at least one frame
 	hwSentCount              int       // packets sent to HW decoder (for diagnostics)
 	swFrameCount             int       // frames decoded by SW decoder (for diagnostics)
@@ -711,13 +720,19 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 	if d.needsKeyFrame {
 		if !scan.hasKeyFrame {
 			d.keyframeWaitCount++
-			if d.keyframeWaitCount >= keyframeWaitLimit {
+			if d.keyframeWaitCount == 1 {
+				d.keyframeWaitStart = time.Now()
+			}
+			waitedTooLong := d.useHW && !d.keyframeWaitStart.IsZero() &&
+				time.Since(d.keyframeWaitStart) >= keyframeWaitTimeout
+			if d.keyframeWaitCount >= keyframeWaitLimit || waitedTooLong {
 				if d.useHW {
 					// HW decoders (e.g. VideoToolbox) cannot recover without a
 					// proper IDR.  Mark broken so the recovery chain can
 					// escalate to a reconnect rather than looping forever.
-					slog.Warn("H.264: HW decoder: no IDR after wait limit, marking broken",
-						"waited", d.keyframeWaitCount)
+					slog.Debug("H.264: HW decoder: no IDR received, marking broken",
+						"waited", d.keyframeWaitCount,
+						"waitedFor", time.Since(d.keyframeWaitStart).Round(time.Millisecond))
 					d.broken = true
 					return nil, nil
 				}
@@ -725,6 +740,7 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 					"waited", d.keyframeWaitCount)
 				d.needsKeyFrame = false
 				d.keyframeWaitCount = 0
+				d.keyframeWaitStart = time.Time{}
 				d.proceededWithoutKeyframe = true
 				// fall through and attempt SW error-concealment decode
 			} else {
@@ -733,6 +749,7 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 		} else {
 			d.needsKeyFrame = false
 			d.keyframeWaitCount = 0
+			d.keyframeWaitStart = time.Time{}
 		}
 	}
 
@@ -820,6 +837,7 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 		prev := d.proceededWithoutKeyframe
 		d.needsKeyFrame = true
 		d.keyframeWaitCount = 0
+		d.keyframeWaitStart = time.Time{}
 		d.proceededWithoutKeyframe = false
 		if d.useHW {
 			d.hwFirstSendTime = time.Time{} // restart stall clock after IDR

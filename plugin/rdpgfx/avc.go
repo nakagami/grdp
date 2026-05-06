@@ -607,6 +607,13 @@ func (g *GfxHandler) decodeAVC444LC2(stream2 *avc420Stream, destW, destH int) (d
 		slog.Debug("RDPGFX: AVC444 LC=2 skipped (empty aux stream)")
 		return
 	}
+	// If the main decoder is broken (e.g. HW stall or no IDR received), trigger
+	// soft reset so it can recover even when only LC=2 (chroma-only) frames are
+	// arriving and the LC=0/1 decode path never gets called.
+	if g.h264dec != nil && g.h264dec.IsBroken() {
+		g.maybeNotifyDecoderBroken()
+		return
+	}
 	if g.avc444YPlane.w == 0 {
 		slog.Debug("RDPGFX: AVC444 LC=2 skipped (no cached luma)")
 		g.maybeRequestKeyframe()
