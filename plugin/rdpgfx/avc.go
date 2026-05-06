@@ -687,12 +687,15 @@ func (g *GfxHandler) decodeAVC444LC2(stream2 *avc420Stream, destW, destH int) (d
 // before escalating to a full RDP reconnect.
 const softResetLimit = 3
 
-// maybeRequestKeyframe sends a keyframe request to the server when the
+// maybeRequestKeyframe sends a keyframe request to the server when either
 // decoder needs a fresh IDR.  Requests are rate-limited to once per 2 seconds
 // so that repeated nil-frame callbacks (e.g. while waiting for the IDR) don't
-// flood the server.  This covers both post-flush and post-soft-reset cases.
+// flood the server.  This covers both post-flush and post-soft-reset cases,
+// including the case where h264dec2 was reset independently of h264dec.
 func (g *GfxHandler) maybeRequestKeyframe() {
-	if g.h264dec == nil || !g.h264dec.NeedsKeyframe() {
+	dec1NeedsKF := g.h264dec != nil && g.h264dec.NeedsKeyframe()
+	dec2NeedsKF := g.h264dec2 != nil && g.h264dec2.NeedsKeyframe()
+	if !dec1NeedsKF && !dec2NeedsKF {
 		return
 	}
 	const keyframeRequestInterval = 2 * time.Second
