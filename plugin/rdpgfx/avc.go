@@ -583,10 +583,14 @@ func (g *GfxHandler) primeAuxDecoder(h264Data []byte) {
 	_, _, err := i420dec.DecodeWithI420(h264Data)
 	if err != nil {
 		slog.Debug("RDPGFX: AVC444 aux prime error", "err", err)
-		if g.h264dec2.IsBroken() {
-			g.h264dec2.Close()
-			g.h264dec2 = newH264Decoder()
-		}
+	}
+	// The pre-flight stall detector inside DecodeWithI420 can set broken=true
+	// and return nil,nil without an error (broken state invisible to caller).
+	// Check IsBroken() after the call to catch this case.
+	if g.h264dec2.IsBroken() {
+		slog.Debug("H.264: aux decoder broken after prime, resetting")
+		g.h264dec2.Close()
+		g.h264dec2 = newH264Decoder()
 	}
 }
 
@@ -631,7 +635,9 @@ func (g *GfxHandler) decodeAVC444LC2(stream2 *avc420Stream, destW, destH int) (d
 			slog.Debug("H.264: aux decoder broken during LC=2 decode, resetting")
 			g.h264dec2.Close()
 			g.h264dec2 = newH264Decoder()
-			g.maybeRequestKeyframe()
+			// Do NOT call maybeRequestKeyframe() here: ForceRefresh only delivers
+			// LC=1 luma IDR, not a stream2/chroma IDR.  h264dec2 will be re-primed
+			// naturally when the next LC=0 frame arrives via primeAuxDecoder.
 		}
 		return
 	}
@@ -694,12 +700,13 @@ const softResetLimit = 3
 // including the case where h264dec2 was reset independently of h264dec.
 func (g *GfxHandler) maybeRequestKeyframe() {
 	dec1NeedsKF := g.h264dec != nil && g.h264dec.NeedsKeyframe()
-	// For h264dec2 use NeedsIDR (not NeedsKeyframe) to avoid triggering
-	// ForceRefresh on the hwStall heuristic: LC=2 frames are sparse so
-	// h264dec2 routinely goes >250ms without output, which would cause
-	// constant ForceRefresh requests and audio/video desync.
-	dec2NeedsKF := g.h264dec2 != nil && g.h264dec2.NeedsIDR()
-	if !dec1NeedsKF && !dec2NeedsKF {
+	// Do NOT include h264dec2 here: ForceRefresh only triggers an LC=1 luma IDR
+	// from the server.  The stream2/chroma IDR is never delivered via
+	// ForceRefresh — it arrives naturally as an LC=0 frame via primeAuxDecoder.
+	// Requesting ForceRefresh because h264dec2.NeedsIDR()=true spams the server
+	// with keyframe requests, causes the server to repeatedly send LC=1 IDRs,
+	// and can deadlock the main VideoToolbox decoder.
+	if !dec1NeedsKF {
 		return
 	}
 	const keyframeRequestInterval = 2 * time.Second

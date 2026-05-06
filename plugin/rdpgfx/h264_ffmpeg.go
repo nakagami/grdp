@@ -461,15 +461,6 @@ const avcHWReadyFreezeThreshold = 5 * time.Second
 // codecs like VideoToolbox cannot recover without a proper IDR).
 const keyframeWaitLimit = 900
 
-// hwStallKeyframeThreshold is how long the HW decoder (e.g. VideoToolbox)
-// must be silent before we ask the server for a fresh IDR.  VideoToolbox
-// occasionally accepts packets but stalls its internal pipeline, producing
-// no output until the next IDR arrives — naturally every 15-25 s.  Asking
-// for an IDR early shortens the visible freeze.  At 30 fps, 250 ms is
-// roughly seven missed frames, well beyond any natural jitter, while still
-// safely below keyframeRequestInterval (2 s).
-const hwStallKeyframeThreshold = 250 * time.Millisecond
-
 // profileWindow is the number of HW frames over which Decode aggregates
 // timing measurements before logging an INFO summary.  At 30 fps this is
 // roughly one log line every ~10 s.
@@ -680,18 +671,7 @@ func newH264Decoder() h264Decoder {
 }
 
 func (d *ffmpegDecoder) NeedsKeyframe() bool {
-	if d.needsKeyFrame {
-		return true
-	}
-	// While the HW decoder is stalled, ask the server for a fresh IDR so
-	// VideoToolbox's pipeline gets reset.  lastSuccessTime is updated on
-	// every output frame, so this flag clears automatically once decoding
-	// resumes.
-	if d.useHW && d.hwReady && !d.lastSuccessTime.IsZero() &&
-		time.Since(d.lastSuccessTime) >= hwStallKeyframeThreshold {
-		return true
-	}
-	return false
+	return d.needsKeyFrame
 }
 
 func (d *ffmpegDecoder) NeedsIDR() bool {
