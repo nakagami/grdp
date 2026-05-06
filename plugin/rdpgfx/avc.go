@@ -74,40 +74,67 @@ func parseAVC420Stream(data []byte) (*avc420Stream, error) {
 }
 
 // parseAVC444Stream parses RDPGFX_AVC444_BITMAP_STREAM.
-// Returns the main AVC420 stream and the LC (luma-chroma) field.
+// Returns the main AVC420 stream, the auxiliary AVC420 stream, and the LC
+// (luma-chroma) field.
 //
-//	LC=0: both streams present; we decode the main (YUV420) stream.
-//	LC=1: main stream only.
-//	LC=2: auxiliary only (chroma upgrade); returns nil stream.
-func parseAVC444Stream(data []byte) (*avc420Stream, uint8, error) {
+//   LC=0: both streams present; stream1 = main (YUV420), stream2 = chroma upgrade.
+//   LC=1: main stream only; stream2 is nil.
+//   LC=2: auxiliary only (chroma upgrade); stream1 is nil.
+func parseAVC444Stream(data []byte) (stream1, stream2 *avc420Stream, lc uint8, err error) {
 	if len(data) < 4 {
-		return nil, 0, fmt.Errorf("avc444 stream too short")
+		return nil, nil, 0, fmt.Errorf("avc444 stream too short")
 	}
 
 	cbField := binary.LittleEndian.Uint32(data[:4])
-	lc := uint8((cbField >> 30) & 0x03)
+	lc = uint8((cbField >> 30) & 0x03)
 	cbStream1 := int(cbField & 0x3FFFFFFF)
 	rest := data[4:]
 
 	switch lc {
-	case 0: // Both streams; decode main
+	case 0: // Both streams present
 		if cbStream1 > len(rest) {
-			return nil, lc, fmt.Errorf("avc444: stream1 size %d exceeds data %d", cbStream1, len(rest))
+			return nil, nil, lc, fmt.Errorf("avc444: stream1 size %d exceeds data %d", cbStream1, len(rest))
 		}
-		s, err := parseAVC420Stream(rest[:cbStream1])
-		return s, lc, err
+		stream1, err = parseAVC420Stream(rest[:cbStream1])
+		if err != nil {
+			return nil, nil, lc, err
+		}
+		if cbStream1 < len(rest) {
+			stream2, err = parseAVC420Stream(rest[cbStream1:])
+			if err != nil {
+				slog.Debug("RDPGFX: AVC444 stream2 parse error (LC=0)", "err", err)
+				stream2 = nil
+				err = nil
+			}
+		}
+		return stream1, stream2, lc, nil
 	case 1: // Main stream only
 		streamData := rest
 		if cbStream1 > 0 && cbStream1 <= len(rest) {
 			streamData = rest[:cbStream1]
 		}
-		s, err := parseAVC420Stream(streamData)
-		return s, lc, err
-	case 2: // Auxiliary only (chroma upgrade) — not yet supported
-		return nil, lc, nil
+		stream1, err = parseAVC420Stream(streamData)
+		return stream1, nil, lc, err
+	case 2: // Auxiliary only (chroma upgrade)
+		streamData := rest
+		if cbStream1 > 0 && cbStream1 <= len(rest) {
+			streamData = rest[:cbStream1]
+		}
+		stream2, err = parseAVC420Stream(streamData)
+		return nil, stream2, lc, err
 	default:
-		return nil, lc, fmt.Errorf("avc444: invalid LC=%d", lc)
+		return nil, nil, lc, fmt.Errorf("avc444: invalid LC=%d", lc)
 	}
+}
+
+// avc444YPlane caches the tightly-packed luma plane (stride = Width) from the
+// most recently decoded AVC444 main stream.  It is used to combine with the
+// auxiliary chroma stream when LC=2 frames arrive.
+type avc444YPlane struct {
+	data      []byte
+	stride    int
+	w, h      int
+	fullRange bool
 }
 
 // isH264Keyframe returns true when data contains an IDR NAL unit (type 5),
@@ -181,36 +208,54 @@ func (g *GfxHandler) decodeAVC420(data []byte, destX, destY, destW, destH int) (
 }
 
 // decodeAVC444 decodes AVC444 bitmap data to BGRA pixels.
-// Currently decodes the main YUV420 stream only (LC=0,1).
+// LC=0 and LC=1 decode the main YUV420 stream and cache the luma plane for
+// potential LC=2 combine.  LC=2 combines the cached luma with the auxiliary
+// chroma stream decoded by the secondary decoder.
 // The pooled return value is true when the returned slice was acquired from
 // bitmapBufPool; the caller must then call releaseBitmapBuf on it.
 func (g *GfxHandler) decodeAVC444(data []byte, destX, destY, destW, destH int) ([]byte, []avcRect, bool) {
 	if g.onH264Raw != nil {
-		stream, _, err := parseAVC444Stream(data)
-		if err == nil && stream != nil && len(stream.h264Data) > 0 {
-			nalData := make([]byte, len(stream.h264Data))
-			copy(nalData, stream.h264Data)
+		stream1, _, _, err := parseAVC444Stream(data)
+		if err == nil && stream1 != nil && len(stream1.h264Data) > 0 {
+			nalData := make([]byte, len(stream1.h264Data))
+			copy(nalData, stream1.h264Data)
 			g.onH264Raw(destX, destY, destW, destH, isH264Keyframe(nalData), nalData)
 		}
 	}
 	if g.h264dec == nil {
 		return nil, nil, false
 	}
-	stream, lc, err := parseAVC444Stream(data)
+	stream1, stream2, lc, err := parseAVC444Stream(data)
 	if err != nil {
 		slog.Warn("RDPGFX: AVC444 parse error", "err", err)
 		return nil, nil, false
 	}
-	if stream == nil {
-		if lc == 2 {
-			slog.Debug("RDPGFX: AVC444 LC=2 (chroma upgrade) skipped")
+	if lc == 2 {
+		return g.decodeAVC444LC2(stream2, destW, destH)
+	}
+	if stream1 == nil || len(stream1.h264Data) == 0 {
+		return nil, nil, false
+	}
+
+	var frame *h264Frame
+	if g.h264dec2 != nil {
+		// Cache luma for future LC=2 combine.
+		if i420dec, ok := g.h264dec.(i420Decoder); ok {
+			var i420out *h264FrameI420
+			frame, i420out, err = i420dec.DecodeWithI420(stream1.h264Data)
+			if err != nil {
+				slog.Warn("RDPGFX: H.264 decode error (AVC444)", "err", err)
+				return nil, nil, false
+			}
+			if i420out != nil {
+				g.updateAVC444YCache(i420out)
+			}
+		} else {
+			frame, err = g.h264dec.Decode(stream1.h264Data)
 		}
-		return nil, nil, false
+	} else {
+		frame, err = g.h264dec.Decode(stream1.h264Data)
 	}
-	if len(stream.h264Data) == 0 {
-		return nil, nil, false
-	}
-	frame, err := g.h264dec.Decode(stream.h264Data)
 	if err != nil {
 		slog.Warn("RDPGFX: H.264 decode error (AVC444)", "err", err)
 		return nil, nil, false
@@ -221,9 +266,17 @@ func (g *GfxHandler) decodeAVC444(data []byte, destX, destY, destW, destH int) (
 		return nil, nil, false
 	}
 	slog.Debug("RDPGFX: AVC444 decoded", "frameW", frame.Width, "frameH", frame.Height,
-		"destW", destW, "destH", destH, "h264Len", len(stream.h264Data))
+		"destW", destW, "destH", destH, "h264Len", len(stream1.h264Data))
 	decoded, pooled := cropBGRA(frame.Data, frame.Width, frame.Height, destW, destH)
-	return decoded, stream.regions, pooled
+
+	// For LC=0 frames prime h264dec2 with the auxiliary (chroma-upgrade) stream2
+	// so that subsequent standalone LC=2 P-frames can be decoded.  The IDR frame
+	// for the auxiliary H.264 sequence is always carried in an LC=0 stream2.
+	if lc == 0 && stream2 != nil && len(stream2.h264Data) > 0 && g.h264dec2 != nil {
+		g.primeAuxDecoder(stream2.h264Data)
+	}
+
+	return decoded, stream1.regions, pooled
 }
 
 // decodeAVC420WithI420 decodes AVC420 bitmap data, returning BGRA pixels for
@@ -280,42 +333,47 @@ func (g *GfxHandler) decodeAVC420WithI420(data []byte, destX, destY, destW, dest
 }
 
 // decodeAVC444WithI420 decodes AVC444 bitmap data, returning BGRA pixels and
-// an optional I420 frame.  Only the main YUV420 stream (LC=0,1) is decoded;
-// i420 follows the same contract as decodeAVC420WithI420.
+// an optional I420 frame.  LC=0 and LC=1 decode the main stream and cache the
+// luma plane.  LC=2 decodes the auxiliary chroma stream and combines it with
+// the cached luma to produce BGRA; i420 is nil for LC=2 frames (GPU path falls
+// back to BGRA).
 func (g *GfxHandler) decodeAVC444WithI420(data []byte, destX, destY, destW, destH int) (decoded []byte, i420 *h264FrameI420, regions []avcRect, pooled bool) {
-	stream, lc, err := parseAVC444Stream(data)
-	if g.onH264Raw != nil && stream != nil && len(stream.h264Data) > 0 {
-		nalData := make([]byte, len(stream.h264Data))
-		copy(nalData, stream.h264Data)
+	stream1, stream2, lc, err := parseAVC444Stream(data)
+	if g.onH264Raw != nil && stream1 != nil && len(stream1.h264Data) > 0 {
+		nalData := make([]byte, len(stream1.h264Data))
+		copy(nalData, stream1.h264Data)
 		g.onH264Raw(destX, destY, destW, destH, isH264Keyframe(nalData), nalData)
 	}
 	if err != nil {
 		slog.Warn("RDPGFX: AVC444 parse error", "err", err)
 		return
 	}
-	if stream == nil {
-		if lc == 2 {
-			slog.Debug("RDPGFX: AVC444 LC=2 (chroma upgrade) skipped")
-		}
+	if lc == 2 {
+		decoded, regions, pooled = g.decodeAVC444LC2(stream2, destW, destH)
 		return
 	}
-	if g.h264dec == nil || len(stream.h264Data) == 0 {
+	if g.h264dec == nil || stream1 == nil || len(stream1.h264Data) == 0 {
 		return
 	}
 	var frame *h264Frame
 	i420dec, hasI420 := g.h264dec.(i420Decoder)
 	if hasI420 {
 		var i420out *h264FrameI420
-		frame, i420out, err = i420dec.DecodeWithI420(stream.h264Data)
+		frame, i420out, err = i420dec.DecodeWithI420(stream1.h264Data)
 		if err != nil {
 			slog.Warn("RDPGFX: H.264 decode error (AVC444)", "err", err)
 			return
 		}
-		if i420out != nil && i420out.Width >= destW && i420out.Height >= destH {
-			i420 = i420out
+		if i420out != nil {
+			if g.h264dec2 != nil {
+				g.updateAVC444YCache(i420out)
+			}
+			if i420out.Width >= destW && i420out.Height >= destH {
+				i420 = i420out
+			}
 		}
 	} else {
-		frame, err = g.h264dec.Decode(stream.h264Data)
+		frame, err = g.h264dec.Decode(stream1.h264Data)
 		if err != nil {
 			slog.Warn("RDPGFX: H.264 decode error (AVC444)", "err", err)
 			return
@@ -327,9 +385,120 @@ func (g *GfxHandler) decodeAVC444WithI420(data []byte, destX, destY, destW, dest
 		return
 	}
 	slog.Debug("RDPGFX: AVC444 decoded (WithI420)", "frameW", frame.Width, "frameH", frame.Height,
-		"destW", destW, "destH", destH, "hasI420", i420 != nil, "h264Len", len(stream.h264Data))
+		"destW", destW, "destH", destH, "hasI420", i420 != nil, "h264Len", len(stream1.h264Data))
 	decoded, pooled = cropBGRA(frame.Data, frame.Width, frame.Height, destW, destH)
-	regions = stream.regions
+	regions = stream1.regions
+
+	// For LC=0 frames prime h264dec2 with the auxiliary (chroma-upgrade) stream2.
+	if lc == 0 && stream2 != nil && len(stream2.h264Data) > 0 && g.h264dec2 != nil {
+		g.primeAuxDecoder(stream2.h264Data)
+	}
+
+	return
+}
+
+// updateAVC444YCache copies the Y (luma) plane from i420 into g.avc444YPlane
+// for use when combining with an LC=2 auxiliary chroma frame.
+func (g *GfxHandler) updateAVC444YCache(i420 *h264FrameI420) {
+	w, h := i420.Width, i420.Height
+	needed := w * h // tight-packed, YStride == w
+	if cap(g.avc444YPlane.data) < needed {
+		g.avc444YPlane.data = make([]byte, needed)
+	} else {
+		g.avc444YPlane.data = g.avc444YPlane.data[:needed]
+	}
+	// i420.Y is already tight-packed (YStride == w from extractI420fromSrc).
+	copy(g.avc444YPlane.data, i420.Y)
+	g.avc444YPlane.stride = w
+	g.avc444YPlane.w = w
+	g.avc444YPlane.h = h
+	g.avc444YPlane.fullRange = i420.FullRange
+}
+
+// primeAuxDecoder feeds h264Data to h264dec2 to keep it synchronised with the
+// auxiliary H.264 sequence.  The IDR frame for the chroma-upgrade stream is
+// always carried in the LC=0 stream2; subsequent LC=2 standalone frames are
+// P-frames in the same sequence.  Decoding output is discarded — the only
+// purpose is to advance h264dec2's internal state past the IDR/SPS/PPS so it
+// can decode the subsequent LC=2 P-frames without waiting forever for a
+// keyframe that already passed.
+func (g *GfxHandler) primeAuxDecoder(h264Data []byte) {
+	i420dec, ok := g.h264dec2.(i420Decoder)
+	if !ok {
+		return
+	}
+	_, _, err := i420dec.DecodeWithI420(h264Data)
+	if err != nil {
+		slog.Debug("RDPGFX: AVC444 aux prime error", "err", err)
+		if g.h264dec2.IsBroken() {
+			g.h264dec2.Close()
+			g.h264dec2 = newH264Decoder()
+		}
+	}
+}
+
+// decodeAVC444LC2 decodes an AVC444 LC=2 chroma-upgrade frame.
+// It decodes stream2 via the auxiliary decoder, then combines the cached luma
+// (Y plane) with the auxiliary chroma (Y2 = U/Cb channel, U2 = V/Cr channel)
+// to produce a BGRA frame.
+func (g *GfxHandler) decodeAVC444LC2(stream2 *avc420Stream, destW, destH int) (decoded []byte, regions []avcRect, pooled bool) {
+	if g.h264dec2 == nil {
+		slog.Debug("RDPGFX: AVC444 LC=2 skipped (no aux decoder)")
+		return
+	}
+	if stream2 == nil || len(stream2.h264Data) == 0 {
+		slog.Debug("RDPGFX: AVC444 LC=2 skipped (empty aux stream)")
+		return
+	}
+	if g.avc444YPlane.w == 0 {
+		slog.Debug("RDPGFX: AVC444 LC=2 skipped (no cached luma)")
+		return
+	}
+	i420dec, ok := g.h264dec2.(i420Decoder)
+	if !ok {
+		slog.Debug("RDPGFX: AVC444 LC=2 skipped (aux decoder lacks I420 support)")
+		return
+	}
+	_, i420aux, err := i420dec.DecodeWithI420(stream2.h264Data)
+	if err != nil {
+		slog.Warn("RDPGFX: AVC444 LC=2 aux decode error", "err", err)
+		if g.h264dec2.IsBroken() {
+			g.h264dec2.Close()
+			g.h264dec2 = newH264Decoder()
+		}
+		return
+	}
+	if i420aux == nil {
+		slog.Debug("RDPGFX: AVC444 LC=2 aux decode buffering")
+		return
+	}
+	w, h := g.avc444YPlane.w, g.avc444YPlane.h
+	if i420aux.Width < w || i420aux.Height < h {
+		slog.Debug("RDPGFX: AVC444 LC=2 aux frame too small",
+			"auxW", i420aux.Width, "auxH", i420aux.Height, "lumaW", w, "lumaH", h)
+		return
+	}
+	combined, _ := combineAVC444BGRA(
+		g.avc444YPlane.data, g.avc444YPlane.stride,
+		i420aux.Y, i420aux.YStride,
+		i420aux.U, i420aux.UStride,
+		g.avc444YPlane.fullRange,
+		w, h,
+	)
+	if combined == nil {
+		return
+	}
+	decoded, pooled = cropBGRA(combined, w, h, destW, destH)
+	if w == destW && h == destH {
+		// cropBGRA returned combined unchanged; mark as pooled so caller releases it.
+		pooled = true
+	} else {
+		// cropBGRA created a new buffer; release the intermediate combined buffer.
+		releaseBitmapBuf(combined)
+	}
+	regions = stream2.regions
+	slog.Debug("RDPGFX: AVC444 LC=2 decoded", "w", w, "h", h,
+		"destW", destW, "destH", destH, "h264Len", len(stream2.h264Data))
 	return
 }
 
@@ -373,6 +542,12 @@ func (g *GfxHandler) maybeNotifyDecoderBroken() {
 			"attempt", g.softResetCount, "limit", softResetLimit)
 		g.h264dec.Close()
 		g.h264dec = newH264Decoder()
+		if g.h264dec2 != nil {
+			g.h264dec2.Close()
+			g.h264dec2 = newH264Decoder()
+		}
+		// Invalidate luma cache so stale data is not combined with a new stream.
+		g.avc444YPlane = avc444YPlane{}
 		// Reset rate-limiter so keyframe request fires immediately after reset.
 		g.lastKeyframeRequest = time.Time{}
 		g.maybeRequestKeyframe()

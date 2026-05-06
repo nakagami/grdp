@@ -199,6 +199,14 @@ type GfxHandler struct {
 	rfx          *rfxDecoder
 	progressive  *rfxProgressiveDecoder
 	h264dec      h264Decoder
+	// h264dec2 is the auxiliary H.264 decoder used for AVC444 LC=2 chroma-upgrade
+	// frames.  It decodes stream2, whose Y plane carries the U (Cb) channel and
+	// whose U plane carries the V (Cr) channel; these are combined with the luma
+	// plane cached from the most recent LC=0/1 main-stream decode.
+	h264dec2 h264Decoder
+	// avc444YPlane caches the luma (Y) plane from the last main-stream AVC444
+	// decode, for use when an LC=2 chroma-upgrade frame arrives.
+	avc444YPlane avc444YPlane
 	// framesDecoded is accessed from both read and decode goroutines.
 	framesDecoded atomic.Uint32
 	sendFn        func(data []byte)
@@ -252,6 +260,7 @@ func NewGfxHandler(onBitmap func([]BitmapUpdate)) *GfxHandler {
 		rfx:          newRfxDecoder(),
 		progressive:  newRfxProgressiveDecoder(),
 		h264dec:      newH264Decoder(),
+		h264dec2:     newH264Decoder(),
 		onBitmap:     onBitmap,
 		decodeCh:     make(chan decodePkt, 1024),
 		ackCh:        make(chan []byte, 512),
@@ -606,6 +615,10 @@ func (g *GfxHandler) decodeLoop() {
 					g.h264dec.Close()
 					g.h264dec = nil
 				}
+				if g.h264dec2 != nil {
+					g.h264dec2.Close()
+					g.h264dec2 = nil
+				}
 			default:
 				go g.decodeLoop()
 			}
@@ -615,6 +628,10 @@ func (g *GfxHandler) decodeLoop() {
 		if g.h264dec != nil {
 			g.h264dec.Close()
 			g.h264dec = nil
+		}
+		if g.h264dec2 != nil {
+			g.h264dec2.Close()
+			g.h264dec2 = nil
 		}
 	}()
 	slog.Debug("RDPGFX: decodeLoop started")
@@ -790,6 +807,11 @@ func (g *GfxHandler) onResetGraphics(data []byte) {
 		g.h264dec.Close()
 		g.h264dec = newH264Decoder()
 	}
+	if g.h264dec2 != nil {
+		g.h264dec2.Close()
+		g.h264dec2 = newH264Decoder()
+	}
+	g.avc444YPlane = avc444YPlane{}
 }
 
 func (g *GfxHandler) onCreateSurface(data []byte) {

@@ -375,6 +375,41 @@ static void grdp_copy_nv12_to_i420(
         }
     }
 }
+
+// grdp_avc444_combine_bgra combines an AVC444v2 main-stream luma plane with
+// auxiliary-stream chroma planes into a packed BGRA output buffer.
+//
+// In AVC444v2 (MS-RDPEGFX 2.2.4.7), stream2 encodes the original 4:4:4 chroma
+// signals as the Y and Cb channels of a YUV 4:2:0 H.264 stream:
+//   y2  (W×H, stride=w)          → Cb (U) channel at full horizontal resolution
+//   u2  (W/2×H/2, stride=(w+1)/2) → Cr (V) channel at half resolution
+//
+// Parameters:
+//   y1 / y1_stride : luma from the main stream (tight I420 packing, stride=w)
+//   y2 / y2_stride : Y plane from aux stream  (= U/Cb channel, stride=w)
+//   u2 / u2_stride : U plane from aux stream  (= V/Cr channel, stride=(w+1)/2)
+//   full_range     : 1 = full range [0-255], 0 = limited [16-235]
+//   dst / dst_stride : BGRA output
+static void grdp_avc444_combine_bgra(
+    const uint8_t *y1, int y1_stride,
+    const uint8_t *y2, int y2_stride,
+    const uint8_t *u2, int u2_stride,
+    int full_range,
+    uint8_t *dst, int dst_stride,
+    int w, int h)
+{
+    for (int row = 0; row < h; row++) {
+        const uint8_t *yr = y1 + row * y1_stride;
+        const uint8_t *ur = y2 + row * y2_stride;        // full-res U (Cb)
+        const uint8_t *vr = u2 + (row >> 1) * u2_stride; // half-res V (Cr)
+        uint8_t *dr = dst + row * dst_stride;
+        for (int col = 0; col < w; col++) {
+            int u = (int)ur[col] - 128;
+            int v = (int)vr[col >> 1] - 128;
+            grdp_bt601_pixel((int)yr[col], u, v, full_range, dr + col * 4);
+        }
+    }
+}
 */
 import "C"
 
@@ -552,6 +587,7 @@ func (d *ffmpegDecoder) extractI420fromSrc(srcFrame *C.AVFrame) {
 	slot.VStride = pw
 	slot.Width = w
 	slot.Height = h
+	slot.FullRange = srcFmt == C.AV_PIX_FMT_YUVJ420P || srcFrame.color_range == 2
 
 	if srcFmt == C.AV_PIX_FMT_YUV420P || srcFmt == C.AV_PIX_FMT_YUVJ420P {
 		C.grdp_copy_yuv420p_to_i420(srcFrame,
@@ -917,6 +953,40 @@ func (d *ffmpegDecoder) DecodeWithI420(h264Data []byte) (*h264Frame, *h264FrameI
 	frame, err := d.Decode(h264Data)
 	d.outI420Enabled = false
 	return frame, d.lastI420, err
+}
+
+// combineAVC444BGRA combines an AVC444v2 main-stream luma plane (y1) with
+// auxiliary-stream chroma planes (y2 = U/Cb channel, u2 = V/Cr channel) and
+// writes a packed BGRA frame into a buffer acquired from bitmapBufPool.
+// Returns (nil, false) on invalid input.  The caller must call
+// releaseBitmapBuf on the returned slice when pooled is true.
+func combineAVC444BGRA(
+	y1 []byte, y1Stride int,
+	y2 []byte, y2Stride int,
+	u2 []byte, u2Stride int,
+	fullRange bool,
+	w, h int,
+) (out []byte, pooled bool) {
+	if len(y1) == 0 || len(y2) == 0 || len(u2) == 0 || w <= 0 || h <= 0 {
+		return nil, false
+	}
+	out = acquireBitmapBuf(w * h * 4)
+	fr := C.int(0)
+	if fullRange {
+		fr = 1
+	}
+	C.grdp_avc444_combine_bgra(
+		(*C.uint8_t)(unsafe.Pointer(&y1[0])), C.int(y1Stride),
+		(*C.uint8_t)(unsafe.Pointer(&y2[0])), C.int(y2Stride),
+		(*C.uint8_t)(unsafe.Pointer(&u2[0])), C.int(u2Stride),
+		fr,
+		(*C.uint8_t)(unsafe.Pointer(&out[0])), C.int(w*4),
+		C.int(w), C.int(h),
+	)
+	runtime.KeepAlive(y1)
+	runtime.KeepAlive(y2)
+	runtime.KeepAlive(u2)
+	return out, true
 }
 
 func (d *ffmpegDecoder) convertFrame() (*h264Frame, int64, error) {

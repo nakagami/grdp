@@ -15,6 +15,7 @@ type h264FrameI420 struct {
 	Y, U, V             []byte
 	YStride, UStride, VStride int
 	Width, Height       int
+	FullRange           bool // true when the source used full-range (JPEG/PC) YUV
 }
 
 // i420Decoder is an optional interface that an h264Decoder may implement to
