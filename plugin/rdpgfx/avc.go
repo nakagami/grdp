@@ -275,7 +275,9 @@ func (g *GfxHandler) decodeAVC444(data []byte, destX, destY, destW, destH int) (
 	// For LC=0 frames prime h264dec2 with the auxiliary (chroma-upgrade) stream2
 	// so that subsequent standalone LC=2 P-frames can be decoded.  The IDR frame
 	// for the auxiliary H.264 sequence is always carried in an LC=0 stream2.
-	if lc == 0 && stream2 != nil && len(stream2.h264Data) > 0 && g.h264dec2 != nil {
+	// Always call primeAuxDecoder even when h264dec2 is nil: the function
+	// gates recreation on an IDR being present in stream2.
+	if lc == 0 && stream2 != nil && len(stream2.h264Data) > 0 {
 		g.primeAuxDecoder(stream2.h264Data)
 	}
 
@@ -393,7 +395,9 @@ func (g *GfxHandler) decodeAVC444WithI420(data []byte, destX, destY, destW, dest
 	regions = stream1.regions
 
 	// For LC=0 frames prime h264dec2 with the auxiliary (chroma-upgrade) stream2.
-	if lc == 0 && stream2 != nil && len(stream2.h264Data) > 0 && g.h264dec2 != nil {
+	// Always call even when h264dec2 is nil: primeAuxDecoder gates recreation on
+	// an IDR being present in stream2.
+	if lc == 0 && stream2 != nil && len(stream2.h264Data) > 0 {
 		g.primeAuxDecoder(stream2.h264Data)
 	}
 
@@ -567,14 +571,25 @@ func clampByte(v int) byte {
 // keyframe that already passed.
 func (g *GfxHandler) primeAuxDecoder(h264Data []byte) {
 	if g.h264dec2 == nil {
-		return
+		// Aux decoder was torn down after a VT stall.  Recreate it only when
+		// the incoming stream2 carries an IDR so the new VT session starts with
+		// a clean reference frame.  This avoids the rapid create/destroy cycle
+		// that stresses macOS VideoToolbox and destabilises the main decoder.
+		if !h264PacketHasIDR(h264Data) {
+			return
+		}
+		slog.Debug("H.264: recreating aux decoder on stream2 IDR")
+		g.h264dec2 = newH264Decoder()
+		// Fall through to prime the freshly-created decoder with this IDR.
 	}
 	// If the aux decoder was already broken (e.g. from a prior pre-flight stall),
-	// reset it now so the incoming IDR can re-initialize it cleanly.
+	// tear it down and wait for the next IDR rather than immediately creating
+	// a new VT session.
 	if g.h264dec2.IsBroken() {
-		slog.Debug("H.264: aux decoder broken, resetting before prime")
+		slog.Debug("H.264: aux decoder broken, waiting for IDR to recreate")
 		g.h264dec2.Close()
-		g.h264dec2 = newH264Decoder()
+		g.h264dec2 = nil
+		return
 	}
 	i420dec, ok := g.h264dec2.(i420Decoder)
 	if !ok {
@@ -588,9 +603,9 @@ func (g *GfxHandler) primeAuxDecoder(h264Data []byte) {
 	// and return nil,nil without an error (broken state invisible to caller).
 	// Check IsBroken() after the call to catch this case.
 	if g.h264dec2.IsBroken() {
-		slog.Debug("H.264: aux decoder broken after prime, resetting")
+		slog.Debug("H.264: aux decoder broken after prime, waiting for IDR to recreate")
 		g.h264dec2.Close()
-		g.h264dec2 = newH264Decoder()
+		g.h264dec2 = nil
 	}
 }
 
@@ -629,19 +644,20 @@ func (g *GfxHandler) decodeAVC444LC2(stream2 *avc420Stream, destW, destH int) (d
 		slog.Warn("RDPGFX: AVC444 LC=2 aux decode error", "err", err)
 		if g.h264dec2.IsBroken() {
 			g.h264dec2.Close()
-			g.h264dec2 = newH264Decoder()
+			g.h264dec2 = nil
 		}
 		return
 	}
 	if i420aux == nil {
 		slog.Debug("RDPGFX: AVC444 LC=2 aux decode buffering")
 		// The pre-flight stall detector inside Decode() may have set broken=true
-		// and returned nil without an error.  Detect and reset here so the next
-		// LC=0 IDR can re-prime the aux decoder via primeAuxDecoder.
+		// and returned nil without an error.  Detect and tear down here; the
+		// decoder will be recreated by primeAuxDecoder when the next stream2
+		// IDR arrives, avoiding a rapid VT session create/destroy cycle.
 		if g.h264dec2 != nil && g.h264dec2.IsBroken() {
-			slog.Debug("H.264: aux decoder broken during LC=2 decode, resetting")
+			slog.Debug("H.264: aux decoder broken during LC=2 decode, waiting for IDR to recreate")
 			g.h264dec2.Close()
-			g.h264dec2 = newH264Decoder()
+			g.h264dec2 = nil
 			// Do NOT call maybeRequestKeyframe() here: ForceRefresh only delivers
 			// LC=1 luma IDR, not a stream2/chroma IDR.  h264dec2 will be re-primed
 			// naturally when the next LC=0 frame arrives via primeAuxDecoder.
@@ -744,14 +760,15 @@ func (g *GfxHandler) maybeNotifyDecoderBroken() {
 			"attempt", g.softResetCount, "limit", softResetLimit)
 		g.h264dec.Close()
 		g.h264dec = newH264Decoder()
-		// Keep h264dec2 if healthy; reset it if already broken so primeAuxDecoder
-		// can re-initialize it with the incoming IDR rather than silently discarding it.
+		// Keep h264dec2 if healthy; tear it down if already broken so
+		// primeAuxDecoder can recreate it when the next stream2 IDR arrives,
+		// rather than spinning up a new VT session only to have it break again.
 		// Always keep avc444YPlane so that LC=2 frames can continue to display
 		// stale-but-reasonable content during recovery.
 		if g.h264dec2 != nil && g.h264dec2.IsBroken() {
-			slog.Debug("H.264: aux decoder also broken, resetting on soft reset")
+			slog.Debug("H.264: aux decoder also broken on soft reset, waiting for IDR to recreate")
 			g.h264dec2.Close()
-			g.h264dec2 = newH264Decoder()
+			g.h264dec2 = nil
 		}
 		// Reset rate-limiter so keyframe request fires immediately after reset.
 		g.lastKeyframeRequest = time.Time{}

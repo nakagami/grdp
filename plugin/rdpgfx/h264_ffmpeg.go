@@ -437,20 +437,28 @@ var avLogOnce sync.Once
 // This threshold applies to the initial-stall case (hwReady=false).
 const avcFreezeThreshold = 4 * time.Second
 
-// avcHWReadyFreezeThreshold is the maximum tolerated stall duration for a
-// previously-working HW decoder (hwReady=true).  VideoToolbox can legitimately
-// pause for 2-3 seconds when processing an IDR keyframe; the shorter
-// avcFreezeThreshold is intentionally not applied here to avoid spurious
-// soft-reset loops.  However, if VideoToolbox never resumes even after a fresh
-// IDR has been delivered (a genuine stuck state observed in practice), the
-// decoder must be marked broken so the soft-reset / full-reconnect chain fires.
+// avcHWReadyFreezeThreshold is the point at which a stalled HW decoder stops
+// accepting new packets.  VideoToolbox can legitimately pause for several
+// seconds when flushing its internal reference pipeline at an IDR/GOP
+// boundary; 5 s is chosen because the CGo call (avcodec_send_packet) itself
+// permanently blocks after ~5.75 s of stall on macOS VideoToolbox.  The
+// pre-flight guard in Decode() bails out *before* the CGo call to prevent the
+// decodeLoop goroutine from hanging inside CGo.
 //
-// 5 s is chosen because the CGo call (avcodec_send_packet) itself permanently
-// blocks after ~5.75 s of null-frame stall on macOS VideoToolbox.  The
-// pre-flight stall check at the start of Decode() uses this same constant to
-// bail out *before* the CGo call, preventing the decodeLoop goroutine from
-// being permanently blocked inside CGo.
+// Crossing this threshold does NOT immediately mark the decoder broken.
+// Instead Decode() enters a recovery-probe window (avcHWRecoveryWindow) and
+// keeps probing avcodec_receive_frame without sending new packets.  If
+// VideoToolbox produces a frame during that window the stall clock is reset
+// and normal decoding resumes; only if the window is exhausted is the decoder
+// marked broken.
 const avcHWReadyFreezeThreshold = 5 * time.Second
+
+// avcHWRecoveryWindow is how long Decode() probes for pending output after
+// avcHWReadyFreezeThreshold is crossed.  YouTube 1080p H.264 IDR frames
+// (GOP boundary ~every 8-15 s) can keep VideoToolbox silent for up to ~10 s
+// while it flushes the reference pipeline; 15 s gives enough headroom before
+// we give up and declare the decoder broken.
+const avcHWRecoveryWindow = 15 * time.Second
 
 // keyframeWaitLimit is the maximum number of non-IDR packets we drop while
 // waiting for a keyframe after a decoder reset or flush.  gnome-remote-desktop
@@ -498,6 +506,7 @@ type ffmpegDecoder struct {
 	hwFrameCount             int       // frames decoded by HW decoder (for diagnostics)
 	broken                   bool      // decoder is unrecoverable; stop producing frames so the app reconnects
 	proceededWithoutKeyframe bool      // "proceed without keyframe" path was taken; AVERROR here means broken
+	stallProbeStart          time.Time // wall-clock time we entered the stall recovery-probe window
 
 	// Profiling: aggregated timing stats over the last profileWindow frames
 	// for the HW path.  Helps determine whether convertFrame
@@ -722,6 +731,13 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 			d.keyframeWaitCount++
 			if d.keyframeWaitCount == 1 {
 				d.keyframeWaitStart = time.Now()
+				if d.useHW {
+					slog.Debug("H.264: HW decoder waiting for IDR")
+				}
+			} else if d.keyframeWaitCount%30 == 0 {
+				slog.Debug("H.264: still waiting for IDR",
+					"waited", d.keyframeWaitCount,
+					"waitedFor", time.Since(d.keyframeWaitStart).Round(time.Millisecond))
 			}
 			waitedTooLong := d.useHW && !d.keyframeWaitStart.IsZero() &&
 				time.Since(d.keyframeWaitStart) >= keyframeWaitTimeout
@@ -747,6 +763,12 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 				return nil, nil // drop P-frames while waiting
 			}
 		} else {
+			waitedFor := time.Duration(0)
+			if !d.keyframeWaitStart.IsZero() {
+				waitedFor = time.Since(d.keyframeWaitStart).Round(time.Millisecond)
+			}
+			slog.Debug("H.264: IDR received, resuming decode",
+				"hw", d.useHW, "waitedFor", waitedFor)
 			d.needsKeyFrame = false
 			d.keyframeWaitCount = 0
 			d.keyframeWaitStart = time.Time{}
@@ -791,12 +813,51 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 				slog.Debug("H.264: HW decoder stall clock reset (server was idle)",
 					"idleFor", stalledFor, "hwSentCount", d.hwSentCount)
 				d.lastSuccessTime = time.Now()
+				d.stallProbeStart = time.Time{}
 			} else {
-				slog.Warn("H.264: HW decoder pre-flight stall timeout, marking broken",
-					"frozenFor", stalledFor, "hwSentCount", d.hwSentCount)
-				d.broken = true
-				return nil, nil
+				// Probe for pending output that VideoToolbox may be about to
+				// produce.  VT legitimately stalls for several seconds at a
+				// GOP/IDR boundary while it flushes its reference pipeline;
+				// immediately marking broken would cause an unnecessary
+				// soft-reset loop followed by a ForceRefresh that the server
+				// may not honour with a timely IDR.
+				//
+				// avcodec_receive_frame is non-blocking and safe to call
+				// without a preceding send_packet.  If a frame emerges VT was
+				// just slow but is still healthy — reset the stall clock and
+				// let the current packet be sent normally below.
+				if C.avcodec_receive_frame(d.codecCtx, d.frame) >= 0 {
+					C.av_frame_unref(d.frame)
+					d.lastSuccessTime = time.Now()
+					d.stallProbeStart = time.Time{}
+					slog.Debug("H.264: HW decoder stall clock reset (drain found pending frame)",
+						"hadBeenSilentFor", stalledFor, "hwSentCount", d.hwSentCount)
+					// Fall through to send the current packet normally.
+				} else {
+					// No output yet.  Enter / stay in recovery-probe window.
+					if d.stallProbeStart.IsZero() {
+						d.stallProbeStart = time.Now()
+						slog.Warn("H.264: HW decoder stall detected, probing for recovery",
+							"frozenFor", stalledFor.Round(time.Millisecond),
+							"hwSentCount", d.hwSentCount)
+					} else if probedFor := time.Since(d.stallProbeStart); probedFor >= avcHWRecoveryWindow {
+						slog.Warn("H.264: HW decoder recovery probe timed out, marking broken",
+							"totalFrozen", stalledFor.Round(time.Second),
+							"probedFor", probedFor.Round(time.Second),
+							"hwSentCount", d.hwSentCount)
+						d.broken = true
+						return nil, nil
+					}
+					// Still in recovery window: skip send_packet to avoid the
+					// ~5.75 s CGo deadlock and wait for VT to resume.
+					return nil, nil
+				}
 			}
+		} else if !d.stallProbeStart.IsZero() {
+			// Stall resolved (lastSuccessTime updated by normal frame output).
+			slog.Debug("H.264: HW decoder recovered from stall",
+				"probedFor", time.Since(d.stallProbeStart).Round(time.Millisecond))
+			d.stallProbeStart = time.Time{}
 		}
 	}
 
@@ -1197,6 +1258,13 @@ func scanH264Packet(data []byte) scanResult {
 		pos = i + scLen + 1
 	}
 	return r
+}
+
+// h264PacketHasIDR reports whether an Annex B H.264 packet contains an IDR
+// (keyframe) NAL unit.  Used by AVC444 logic in avc.go (no h264 build tag)
+// to gate aux-decoder recreation on stream2 IDR availability.
+func h264PacketHasIDR(data []byte) bool {
+	return scanH264Packet(data).hasKeyFrame
 }
 
 func (d *ffmpegDecoder) Close() {
