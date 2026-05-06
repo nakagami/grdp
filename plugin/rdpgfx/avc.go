@@ -512,28 +512,34 @@ func combineAVC444v2BGRA(
 					Cr = i420aux.V[uvRow*auxVStride+quarterW+k]
 				}
 			}
-			avc444bt601BGRA(Y, Cb, Cr, fullRange, outRow[col*4:])
+			avc444bt709BGRA(Y, Cb, Cr, fullRange, outRow[col*4:])
 		}
 	}
 	return out, true
 }
 
-// avc444bt601BGRA converts one YCbCr pixel to BGRA using BT.601 coefficients.
+// avc444bt709BGRA converts one YCbCr pixel to BGRA using BT.709 coefficients,
+// matching FreeRDP's general_YUV444ToBGRX implementation.
+// Windows AVC444v2 content is encoded in BT.709; using BT.601 here was the
+// cause of red color bleeding on LC=2 chroma-upgrade frames.
 // Cb and Cr are raw (0-255); the function subtracts 128 internally.
-func avc444bt601BGRA(Y, Cb, Cr byte, fullRange bool, dst []byte) {
+//
+// Full range  (Y∈[0,255]):   R = Y + 1.5748*(Cr-128)   ≈ (256y + 403v) >> 8
+// Limited range (Y∈[16,235]): R = 1.164*(Y-16) + 1.793*(Cr-128) ≈ (298c + 459v) >> 8
+func avc444bt709BGRA(Y, Cb, Cr byte, fullRange bool, dst []byte) {
 	u := int(Cb) - 128
 	v := int(Cr) - 128
 	var r, g, b int
 	if fullRange {
 		y := int(Y)
-		r = (256*y + 359*v + 128) >> 8
-		g = (256*y - 88*u - 183*v + 128) >> 8
-		b = (256*y + 454*u + 128) >> 8
+		r = (256*y + 403*v + 128) >> 8
+		g = (256*y - 48*u - 120*v + 128) >> 8
+		b = (256*y + 475*u + 128) >> 8
 	} else {
 		c := int(Y) - 16
-		r = (298*c + 409*v + 128) >> 8
-		g = (298*c - 100*u - 208*v + 128) >> 8
-		b = (298*c + 516*u + 128) >> 8
+		r = (298*c + 459*v + 128) >> 8
+		g = (298*c - 55*u - 136*v + 128) >> 8
+		b = (298*c + 541*u + 128) >> 8
 	}
 	dst[0] = clampByte(b)
 	dst[1] = clampByte(g)
@@ -560,6 +566,16 @@ func clampByte(v int) byte {
 // can decode the subsequent LC=2 P-frames without waiting forever for a
 // keyframe that already passed.
 func (g *GfxHandler) primeAuxDecoder(h264Data []byte) {
+	if g.h264dec2 == nil {
+		return
+	}
+	// If the aux decoder was already broken (e.g. from a prior pre-flight stall),
+	// reset it now so the incoming IDR can re-initialize it cleanly.
+	if g.h264dec2.IsBroken() {
+		slog.Debug("H.264: aux decoder broken, resetting before prime")
+		g.h264dec2.Close()
+		g.h264dec2 = newH264Decoder()
+	}
 	i420dec, ok := g.h264dec2.(i420Decoder)
 	if !ok {
 		return
@@ -589,6 +605,7 @@ func (g *GfxHandler) decodeAVC444LC2(stream2 *avc420Stream, destW, destH int) (d
 	}
 	if g.avc444YPlane.w == 0 {
 		slog.Debug("RDPGFX: AVC444 LC=2 skipped (no cached luma)")
+		g.maybeRequestKeyframe()
 		return
 	}
 	i420dec, ok := g.h264dec2.(i420Decoder)
@@ -607,6 +624,15 @@ func (g *GfxHandler) decodeAVC444LC2(stream2 *avc420Stream, destW, destH int) (d
 	}
 	if i420aux == nil {
 		slog.Debug("RDPGFX: AVC444 LC=2 aux decode buffering")
+		// The pre-flight stall detector inside Decode() may have set broken=true
+		// and returned nil without an error.  Detect and reset here so the next
+		// LC=0 IDR can re-prime the aux decoder via primeAuxDecoder.
+		if g.h264dec2 != nil && g.h264dec2.IsBroken() {
+			slog.Debug("H.264: aux decoder broken during LC=2 decode, resetting")
+			g.h264dec2.Close()
+			g.h264dec2 = newH264Decoder()
+			g.maybeRequestKeyframe()
+		}
 		return
 	}
 	w, h := g.avc444YPlane.w, g.avc444YPlane.h
@@ -625,7 +651,7 @@ func (g *GfxHandler) decodeAVC444LC2(stream2 *avc420Stream, destW, destH int) (d
 	if combined == nil {
 		return
 	}
-	if g.lc2SampleLogged {
+	if !g.lc2SampleLogged {
 		g.lc2SampleLogged = true
 		for _, p := range [][2]int{{100, 50}, {500, 50}, {960, 50}, {1400, 50}, {960, 200}} {
 			px, py := p[0], p[1]
@@ -697,12 +723,15 @@ func (g *GfxHandler) maybeNotifyDecoderBroken() {
 			"attempt", g.softResetCount, "limit", softResetLimit)
 		g.h264dec.Close()
 		g.h264dec = newH264Decoder()
-		if g.h264dec2 != nil {
+		// Keep h264dec2 if healthy; reset it if already broken so primeAuxDecoder
+		// can re-initialize it with the incoming IDR rather than silently discarding it.
+		// Always keep avc444YPlane so that LC=2 frames can continue to display
+		// stale-but-reasonable content during recovery.
+		if g.h264dec2 != nil && g.h264dec2.IsBroken() {
+			slog.Debug("H.264: aux decoder also broken, resetting on soft reset")
 			g.h264dec2.Close()
 			g.h264dec2 = newH264Decoder()
 		}
-		// Invalidate luma cache so stale data is not combined with a new stream.
-		g.avc444YPlane = avc444YPlane{}
 		// Reset rate-limiter so keyframe request fires immediately after reset.
 		g.lastKeyframeRequest = time.Time{}
 		g.maybeRequestKeyframe()
