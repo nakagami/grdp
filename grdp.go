@@ -955,6 +955,11 @@ func (g *RdpClient) sendWheelLocked(now time.Time) {
 	g.wheelAccum = 0
 	g.wheelLastTx = now
 
+	// FreeRDP uses 120 (0x78) per scroll notch, matching the Windows
+	// WHEEL_DELTA convention.  Scale the accumulated notch count accordingly.
+	const wheelDelta = 120
+	accum *= wheelDelta
+
 	// The RDP wheel rotation field is 9 bits (WheelRotationMask = 0x01FF).
 	// If the accumulated delta exceeds 0x1FF, clamp it.
 	const maxWheel = int(pdu.WheelRotationMask)
