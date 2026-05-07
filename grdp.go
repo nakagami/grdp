@@ -976,7 +976,7 @@ func (g *RdpClient) sendWheelLocked(now time.Time) {
 	if accum < 0 {
 		p.PointerFlags |= pdu.PTRFLAGS_WHEEL_NEGATIVE
 		if -accum > maxWheel {
-			accum = -maxWheel
+			accum = maxWheel
 		} else {
 			accum = -accum
 		}
