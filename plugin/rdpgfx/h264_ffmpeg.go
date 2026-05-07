@@ -431,17 +431,17 @@ var avLogOnce sync.Once
 // avcFreezeThreshold is the duration of no decoded output from the HW decoder
 // after which it is marked broken.  The application-level watchdog then
 // reconnects the RDP session.  VideoToolbox (macOS) can stall for 2-3 seconds
-// while processing a new IDR/SPS frame; 4 seconds gives it enough headroom to
+// while processing a new IDR/SPS frame; 6 seconds gives it enough headroom to
 // recover naturally before we declare it broken.  FreeRDP takes a similar
 // passive approach: it drops failed frames without hard resets or IDR requests
 // and waits for the server to resume naturally.
 // This threshold applies to the initial-stall case (hwReady=false).
-const avcFreezeThreshold = 4 * time.Second
+const avcFreezeThreshold = 6 * time.Second
 
 // avcHWReadyFreezeThreshold is the point at which a stalled HW decoder stops
 // accepting new packets.  VideoToolbox can legitimately pause for several
 // seconds when flushing its internal reference pipeline at an IDR/GOP
-// boundary; 5 s is chosen because the CGo call (avcodec_send_packet) itself
+// boundary; 7 s is chosen because the CGo call (avcodec_send_packet) itself
 // permanently blocks after ~5.75 s of stall on macOS VideoToolbox.  The
 // pre-flight guard in Decode() bails out *before* the CGo call to prevent the
 // decodeLoop goroutine from hanging inside CGo.
@@ -452,17 +452,17 @@ const avcFreezeThreshold = 4 * time.Second
 // VideoToolbox produces a frame during that window the stall clock is reset
 // and normal decoding resumes; only if the window is exhausted is the decoder
 // marked broken.
-const avcHWReadyFreezeThreshold = 5 * time.Second
+const avcHWReadyFreezeThreshold = 7 * time.Second
 
 // avcHWRecoveryWindow is how long Decode() probes for pending output after
 // avcHWReadyFreezeThreshold is crossed.  VideoToolbox may legitimately stall
 // for 1-2 s at a GOP/IDR boundary while flushing its reference pipeline; a
-// 2 s probe window (added on top of the 5 s threshold) gives it up to 7 s
+// 3 s probe window (added on top of the 7 s threshold) gives it up to 10 s
 // total before we declare the decoder broken and trigger a soft reset.
 // Keeping this window short minimises the visual freeze on genuine failures
 // since YouTube / gnome-remote-desktop sends a fresh IDR within 2 s of the
 // soft reset (either via ForceRefresh or a natural GOP boundary).
-const avcHWRecoveryWindow = 2 * time.Second
+const avcHWRecoveryWindow = 3 * time.Second
 
 // keyframeWaitLimit is the maximum number of non-IDR packets we drop while
 // waiting for a keyframe after a decoder reset or flush.  gnome-remote-desktop
@@ -479,7 +479,7 @@ const keyframeWaitLimit = 900
 // this window the decoder marks itself broken so the soft-reset / reconnect
 // chain escalates quickly rather than waiting the full keyframeWaitLimit
 // (~30 s) of dropped packets.
-const keyframeWaitTimeout = 10 * time.Second
+const keyframeWaitTimeout = 15 * time.Second
 
 // profileWindow is the number of HW frames over which Decode aggregates
 // timing measurements before logging an INFO summary.  At 30 fps this is
@@ -764,6 +764,10 @@ func (d *ffmpegDecoder) signalWatchdog() {
 // The method is kept to satisfy the h264Decoder interface used by GfxHandler.
 func (d *ffmpegDecoder) HardResetCount() int {
 	return 0
+}
+
+func (d *ffmpegDecoder) LastReceiveTime() time.Time {
+	return d.lastReceiveTime
 }
 
 func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {

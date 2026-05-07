@@ -288,10 +288,11 @@ func NewGfxHandler(onBitmap func([]BitmapUpdate)) *GfxHandler {
 	return g
 }
 
-// inputStallSilentThreshold mirrors the HW decoder stall threshold used by the
-// H.264 path. Keep this in the non-build-tagged file so both normal and !h264
-// builds compile.
-const inputStallSilentThreshold = 5 * time.Second
+// inputStallSilentThreshold is the minimum time without a decoded frame before
+// the local-input watchdog considers the HW decoder potentially stalled.
+// Kept in the non-build-tagged file so both normal and !h264 builds compile.
+// Must be kept in sync with avcHWReadyFreezeThreshold in h264_ffmpeg.go.
+const inputStallSilentThreshold = 7 * time.Second
 
 const localInputRecoveryGrace = 750 * time.Millisecond
 
@@ -317,6 +318,13 @@ func (g *GfxHandler) NotifyLocalInput() {
 	if g.h264dec == nil {
 		return
 	}
+	// Don't arm the watchdog when the decoder is waiting for an IDR after a
+	// reset: it is already in a known recovery state, and arming the watchdog
+	// here would force-break the newly reset decoder 750 ms later when the IDR
+	// hasn't arrived yet, causing rapid cascading soft resets.
+	if g.h264dec.NeedsIDR() {
+		return
+	}
 	lastDecodedNS := g.lastDecodedFrame.Load()
 	if lastDecodedNS == 0 {
 		return
@@ -324,6 +332,13 @@ func (g *GfxHandler) NotifyLocalInput() {
 	now := time.Now()
 	silentFor := now.Sub(time.Unix(0, lastDecodedNS))
 	if silentFor < inputStallSilentThreshold {
+		return
+	}
+	// Only arm the watchdog if the server has been actively sending video
+	// packets recently.  A genuinely static screen (server sends nothing) is
+	// not a decoder stall and should not trigger a force-break.
+	if recvTime := g.h264dec.LastReceiveTime(); recvTime.IsZero() ||
+		time.Since(recvTime) >= inputStallSilentThreshold {
 		return
 	}
 
@@ -381,6 +396,19 @@ func (g *GfxHandler) maybeTriggerInputStall() {
 	g.inputWatchdogMu.Unlock()
 
 	if inputNS == 0 || g.h264dec == nil || g.h264dec.IsBroken() {
+		return
+	}
+	// Don't force-break a decoder that is already in IDR-wait state (e.g.
+	// after a soft reset).  It is in a known recovery path; breaking it again
+	// would restart the soft-reset cycle unnecessarily.
+	if g.h264dec.NeedsIDR() {
+		return
+	}
+	// Don't force-break when the server has been idle (no video packets
+	// arriving).  A static screen produces no frames but the decoder is
+	// healthy; only break when packets are flowing but output is absent.
+	if recvTime := g.h264dec.LastReceiveTime(); recvTime.IsZero() ||
+		time.Since(recvTime) >= inputStallSilentThreshold {
 		return
 	}
 	lastDecodedNS := g.lastDecodedFrame.Load()

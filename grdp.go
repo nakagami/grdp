@@ -375,7 +375,7 @@ func (g *RdpClient) doLogin(routingToken []byte) error {
 		g.onBitmapPaintFn(bs)
 	})
 	gfxHandler.SetDecoderBrokenCallback(func() {
-		slog.Warn("H.264 decoder broken")
+		slog.Debug("H.264 decoder broken")
 		if g.onDecoderBrokenFn != nil {
 			g.onDecoderBrokenFn()
 			return

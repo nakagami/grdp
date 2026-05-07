@@ -1,5 +1,7 @@
 package rdpgfx
 
+import "time"
+
 // h264BrokenReason describes why a decoder became unrecoverable.
 type h264BrokenReason int
 
@@ -81,6 +83,12 @@ type h264Decoder interface {
 	// HardResetCount returns the number of hard resets performed so far.
 	// Callers can use this to detect a new reset and clear rate-limit state.
 	HardResetCount() int
+	// LastReceiveTime returns the wall-clock time of the most recent Decode()
+	// call, or a zero Time if Decode has never been called.  The caller uses
+	// this to distinguish a genuinely idle server (no packets → zero or old
+	// LastReceiveTime) from a HW decoder stall (packets arriving but no
+	// decoded frames produced).
+	LastReceiveTime() time.Time
 	// Close releases all resources held by the decoder.
 	Close()
 }

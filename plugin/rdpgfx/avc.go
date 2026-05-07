@@ -718,7 +718,7 @@ func (g *GfxHandler) decodeAVC444LC2(stream2 *avc420Stream, destW, destH int) (d
 
 // softResetLimit is the number of in-place decoder recreations attempted
 // before escalating to a full RDP reconnect.
-const softResetLimit = 3
+const softResetLimit = 5
 
 // maybeRequestKeyframe sends a keyframe request to the server when either
 // decoder needs a fresh IDR.  Requests are rate-limited to once per 2 seconds
@@ -763,7 +763,26 @@ func (g *GfxHandler) maybeNotifyDecoderBroken() {
 	}
 	reason := g.h264dec.BrokenReason()
 	if reason == h264BrokenReasonNoIDR {
-		slog.Debug("H.264: escalating directly to reconnect",
+		// If soft resets remain, try one before escalating to a full reconnect.
+		// The server may have been slow to send an IDR; recreating the decoder
+		// and requesting a fresh ForceRefresh gives it another chance.
+		if g.softResetCount < softResetLimit {
+			g.softResetCount++
+			slog.Debug("H.264: soft decoder reset (no-IDR)",
+				"attempt", g.softResetCount, "limit", softResetLimit,
+				"reason", reason.String())
+			g.h264dec.Close()
+			g.h264dec = newH264DecoderWithWatchdog(g.watchdogCh)
+			if g.h264dec2 != nil && g.h264dec2.IsBroken() {
+				slog.Debug("H.264: aux decoder also broken on soft reset, waiting for IDR to recreate")
+				g.h264dec2.Close()
+				g.h264dec2 = nil
+			}
+			g.lastKeyframeRequest = time.Time{}
+			g.maybeRequestKeyframe()
+			return
+		}
+		slog.Debug("H.264: escalating to reconnect after no-IDR soft resets exhausted",
 			"reason", reason.String())
 		g.decoderBrokenNotified = true
 		if g.onDecoderBroken != nil {
