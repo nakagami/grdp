@@ -13,6 +13,15 @@ type avcRect struct {
 	left, top, right, bottom uint16
 }
 
+// regionHinter is an optional interface implemented by decoders that support
+// region-aware YUV→BGRA conversion.  When setRegionHint is called immediately
+// before Decode, the decoder only converts pixels within the specified dirty
+// rectangles, skipping unchanged areas of the frame and reducing CPU cost for
+// small updates such as scroll, cursor movement, or partial redraws.
+type regionHinter interface {
+	setRegionHint(regions []avcRect)
+}
+
 type avcQuantQuality struct {
 	qp          uint8
 	quality     uint8
@@ -194,6 +203,14 @@ func (g *GfxHandler) decodeAVC420(data []byte, destX, destY, destW, destH int) (
 	if len(stream.h264Data) == 0 {
 		return nil, nil, false
 	}
+	// For frames where only a small dirty area changed, pass region hints so
+	// the decoder can skip converting pixels outside those rectangles.  This
+	// is safe here because decodeAVC420 uses blitAndEmitAVCRegions (which only
+	// reads dirty pixels) when shouldUseAVCRegions returns true.
+	if rh, ok := g.h264dec.(regionHinter); ok &&
+		len(stream.regions) > 0 && shouldUseAVCRegions(stream.regions, destW, destH) {
+		rh.setRegionHint(stream.regions)
+	}
 	frame, err := g.h264dec.Decode(stream.h264Data)
 	if err != nil {
 		slog.Warn("RDPGFX: H.264 decode error", "err", err)
@@ -239,6 +256,14 @@ func (g *GfxHandler) decodeAVC444(data []byte, destX, destY, destW, destH int) (
 	}
 	if stream1 == nil || len(stream1.h264Data) == 0 {
 		return nil, nil, false
+	}
+
+	// Pass region hints so the decoder skips converting pixels outside the
+	// dirty rectangles.  Safe here because decodeAVC444 also uses
+	// blitAndEmitAVCRegions when shouldUseAVCRegions returns true.
+	if rh, ok := g.h264dec.(regionHinter); ok &&
+		len(stream1.regions) > 0 && shouldUseAVCRegions(stream1.regions, destW, destH) {
+		rh.setRegionHint(stream1.regions)
 	}
 
 	var frame *h264Frame

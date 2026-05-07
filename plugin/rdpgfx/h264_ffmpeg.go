@@ -212,6 +212,65 @@ static void grdp_yuv420p_to_bgra(
 #endif
 }
 
+// grdp_yuv420p_to_bgra_regions is the region-aware variant of
+// grdp_yuv420p_to_bgra.  Only pixels within the n_rects dirty rectangles
+// (flat array of [left,top,right,bottom] uint16 tuples) are written to dst;
+// all other pixels are left untouched, saving work proportional to the
+// fraction of the frame that did not change.
+static void grdp_yuv420p_to_bgra_regions(
+    const AVFrame *src, uint8_t *dst, int dst_stride, int full_range,
+    const uint16_t *rects, int n_rects)
+{
+    int width  = src->width;
+    int height = src->height;
+#ifdef __ARM_NEON__
+    int16_t ky   = full_range ? 256 : 298;
+    int16_t kr   = full_range ? 359 : 409;
+    int16_t kgu  = full_range ?  88 : 100;
+    int16_t kgv  = full_range ? 183 : 208;
+    int16_t kb   = full_range ? 454 : 516;
+    int16_t yoff = full_range ?   0 :  16;
+#endif
+    for (int i = 0; i < n_rects; i++) {
+        int left   = (int)rects[i*4+0];
+        int top    = (int)rects[i*4+1];
+        int right  = (int)rects[i*4+2];
+        int bottom = (int)rects[i*4+3];
+        if (left   < 0)      left   = 0;
+        if (top    < 0)      top    = 0;
+        if (right  > width)  right  = width;
+        if (bottom > height) bottom = height;
+        if (left >= right || top >= bottom) continue;
+        for (int row = top; row < bottom; row++) {
+            const uint8_t *yrow = src->data[0] + row        * src->linesize[0];
+            const uint8_t *urow = src->data[1] + (row >> 1) * src->linesize[1];
+            const uint8_t *vrow = src->data[2] + (row >> 1) * src->linesize[2];
+            uint8_t *drow = dst + row * dst_stride;
+            int col = left;
+#ifdef __ARM_NEON__
+            // Advance scalar to the next multiple-of-8 boundary before the
+            // NEON loop.  The NEON helper loads 8 luma bytes and 8 UV bytes
+            // starting at col; col must be even for correct NV12 UV pairing.
+            // A multiple of 8 satisfies both that and the 8-pixel alignment.
+            int neon_start = (col + 7) & ~7;
+            for (; col < neon_start && col < right; col++) {
+                int u = (int)urow[col >> 1] - 128;
+                int v = (int)vrow[col >> 1] - 128;
+                grdp_bt601_pixel((int)yrow[col], u, v, full_range, drow + col*4);
+            }
+            for (; col + 7 < right; col += 8)
+                grdp_yuv420p_to_bgra_neon_8(yrow, urow, vrow, drow, col,
+                                             ky, kr, kgu, kgv, kb, yoff);
+#endif
+            for (; col < right; col++) {
+                int u = (int)urow[col >> 1] - 128;
+                int v = (int)vrow[col >> 1] - 128;
+                grdp_bt601_pixel((int)yrow[col], u, v, full_range, drow + col*4);
+            }
+        }
+    }
+}
+
 // grdp_nv12_to_bgra converts a semi-planar NV12 frame (Y plane + interleaved
 // UV plane) to packed BGRA using BT.601 coefficients.  This bypasses swscale
 // for the same reason as grdp_yuv420p_to_bgra: on ARM64 swscale's
@@ -310,6 +369,57 @@ static void grdp_nv12_to_bgra(
         }
     }
 #endif
+}
+
+// grdp_nv12_to_bgra_regions is the region-aware variant of grdp_nv12_to_bgra.
+// Only pixels within the n_rects dirty rectangles (flat [left,top,right,bottom]
+// uint16 tuples) are written; all other pixels in dst are left untouched.
+static void grdp_nv12_to_bgra_regions(
+    const AVFrame *src, uint8_t *dst, int dst_stride, int full_range,
+    const uint16_t *rects, int n_rects)
+{
+    int width  = src->width;
+    int height = src->height;
+#ifdef __ARM_NEON__
+    int16_t ky   = full_range ? 256 : 298;
+    int16_t kr   = full_range ? 359 : 409;
+    int16_t kgu  = full_range ?  88 : 100;
+    int16_t kgv  = full_range ? 183 : 208;
+    int16_t kb   = full_range ? 454 : 516;
+    int16_t yoff = full_range ?   0 :  16;
+#endif
+    for (int i = 0; i < n_rects; i++) {
+        int left   = (int)rects[i*4+0];
+        int top    = (int)rects[i*4+1];
+        int right  = (int)rects[i*4+2];
+        int bottom = (int)rects[i*4+3];
+        if (left   < 0)      left   = 0;
+        if (top    < 0)      top    = 0;
+        if (right  > width)  right  = width;
+        if (bottom > height) bottom = height;
+        if (left >= right || top >= bottom) continue;
+        for (int row = top; row < bottom; row++) {
+            const uint8_t *yrow  = src->data[0] + row        * src->linesize[0];
+            const uint8_t *uvrow = src->data[1] + (row >> 1) * src->linesize[1];
+            uint8_t *drow = dst + row * dst_stride;
+            int col = left;
+#ifdef __ARM_NEON__
+            int neon_start = (col + 7) & ~7;
+            for (; col < neon_start && col < right; col++) {
+                int u = (int)uvrow[(col >> 1) * 2    ] - 128;
+                int v = (int)uvrow[(col >> 1) * 2 + 1] - 128;
+                grdp_bt601_pixel((int)yrow[col], u, v, full_range, drow + col*4);
+            }
+            for (; col + 7 < right; col += 8)
+                grdp_nv12_to_bgra_neon_8(yrow, uvrow, drow, col, ky, kr, kgu, kgv, kb, yoff);
+#endif
+            for (; col < right; col++) {
+                int u = (int)uvrow[(col >> 1) * 2    ] - 128;
+                int v = (int)uvrow[(col >> 1) * 2 + 1] - 128;
+                grdp_bt601_pixel((int)yrow[col], u, v, full_range, drow + col*4);
+            }
+        }
+    }
 }
 
 // grdp_sample_yuv samples the centre pixel of a planar YUV frame for
@@ -550,6 +660,13 @@ type ffmpegDecoder struct {
 	outI420RingIdx int
 	outI420Enabled bool
 	lastI420       *h264FrameI420
+
+	// regionHint carries dirty-rect hints for region-aware YUV→BGRA conversion.
+	// setRegionHint populates these fields; Decode() captures them into local
+	// variables at entry (clearing nRegionHints) so stale hints can never
+	// carry over to a subsequent unrelated frame.
+	regionHint  []C.uint16_t // flat [left,top,right,bottom,...] per rect
+	nRegionHints C.int        // number of valid rects in regionHint
 }
 
 // extractI420fromSrc extracts I420 planar data from srcFrame into the ring
@@ -683,6 +800,13 @@ func newH264DecoderWithWatchdog(watchdogCh chan<- struct{}) h264Decoder {
 
 	if !d.useHW {
 		slog.Debug("H.264: using software decoding")
+		// Limit the decoded picture buffer to 1 reference frame so each frame
+		// is emitted immediately rather than waiting for up to
+		// max_dec_frame_buffering (often 8) frames to accumulate.  RDP H.264
+		// streams use sequential P-frames that only reference the immediately
+		// preceding frame, so this is safe.  VideoToolbox (HW path) has its
+		// own zero-latency output mechanism and does not need this.
+		codecCtx.refs = 1
 	}
 
 	if C.avcodec_open2(codecCtx, codec, nil) < 0 {
@@ -770,7 +894,36 @@ func (d *ffmpegDecoder) LastReceiveTime() time.Time {
 	return d.lastReceiveTime
 }
 
+// setRegionHint specifies dirty rectangles for the next Decode call.  When
+// set, convertFrame will use region-aware YUV→BGRA conversion and only write
+// pixels within the provided rectangles, skipping unchanged areas of the frame.
+// Must be called immediately before Decode; Decode clears the hint at entry so
+// it cannot accidentally apply to a later unrelated frame.
+func (d *ffmpegDecoder) setRegionHint(regions []avcRect) {
+	n := len(regions)
+	need := n * 4
+	if cap(d.regionHint) < need {
+		d.regionHint = make([]C.uint16_t, need)
+	} else {
+		d.regionHint = d.regionHint[:need]
+	}
+	for i, r := range regions {
+		d.regionHint[i*4+0] = C.uint16_t(r.left)
+		d.regionHint[i*4+1] = C.uint16_t(r.top)
+		d.regionHint[i*4+2] = C.uint16_t(r.right)
+		d.regionHint[i*4+3] = C.uint16_t(r.bottom)
+	}
+	d.nRegionHints = C.int(n)
+}
+
 func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
+	// Capture and clear the pending region hint immediately so that any early
+	// return (broken, keyframe wait, etc.) cannot leave stale hints that would
+	// incorrectly apply to a subsequent unrelated frame.
+	regHint := d.regionHint
+	nReg := d.nRegionHints
+	d.nRegionHints = 0
+
 	if len(h264Data) == 0 {
 		return nil, nil
 	}
@@ -1034,7 +1187,7 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 			break // EAGAIN (need more input) or EOF
 		}
 		convStart := time.Now()
-		f, tNs, err := d.convertFrame()
+		f, tNs, err := d.convertFrame(regHint, nReg)
 		dur := time.Since(convStart).Nanoseconds()
 		convertNs += dur
 		transferNs += tNs
@@ -1129,7 +1282,7 @@ func (d *ffmpegDecoder) DecodeWithI420(h264Data []byte) (*h264Frame, *h264FrameI
 	return frame, d.lastI420, err
 }
 
-func (d *ffmpegDecoder) convertFrame() (*h264Frame, int64, error) {
+func (d *ffmpegDecoder) convertFrame(regionHint []C.uint16_t, nRegions C.int) (*h264Frame, int64, error) {
 	srcFrame := d.frame
 	var transferNs int64
 
@@ -1197,8 +1350,14 @@ func (d *ffmpegDecoder) convertFrame() (*h264Frame, int64, error) {
 				d.swFrameCount++
 			}
 		}
-		C.grdp_yuv420p_to_bgra(srcFrame,
-			(*C.uint8_t)(unsafe.Pointer(&out[0])), C.int(w*4), fullRange)
+		if nRegions > 0 && len(regionHint) > 0 {
+			C.grdp_yuv420p_to_bgra_regions(srcFrame,
+				(*C.uint8_t)(unsafe.Pointer(&out[0])), C.int(w*4), fullRange,
+				(*C.uint16_t)(unsafe.Pointer(&regionHint[0])), nRegions)
+		} else {
+			C.grdp_yuv420p_to_bgra(srcFrame,
+				(*C.uint8_t)(unsafe.Pointer(&out[0])), C.int(w*4), fullRange)
+		}
 
 	case srcFmt == C.AV_PIX_FMT_NV12 && !useSwscale:
 		fullRange := C.int(0)
@@ -1220,8 +1379,14 @@ func (d *ffmpegDecoder) convertFrame() (*h264Frame, int64, error) {
 				"w", int(w), "h", int(h))
 			d.hwFrameCount++
 		}
-		C.grdp_nv12_to_bgra(srcFrame,
-			(*C.uint8_t)(unsafe.Pointer(&out[0])), C.int(w*4), fullRange)
+		if nRegions > 0 && len(regionHint) > 0 {
+			C.grdp_nv12_to_bgra_regions(srcFrame,
+				(*C.uint8_t)(unsafe.Pointer(&out[0])), C.int(w*4), fullRange,
+				(*C.uint16_t)(unsafe.Pointer(&regionHint[0])), nRegions)
+		} else {
+			C.grdp_nv12_to_bgra(srcFrame,
+				(*C.uint8_t)(unsafe.Pointer(&out[0])), C.int(w*4), fullRange)
+		}
 		if logThis {
 			// Sample NV12 input and BGRA output at multiple positions for
 			// the first three frames to diagnose colour conversion.
