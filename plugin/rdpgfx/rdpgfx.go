@@ -242,6 +242,15 @@ type GfxHandler struct {
 	inputWatchdogMu  sync.Mutex
 	inputWatchdog    *time.Timer
 	inputWatchdogNS  int64
+	// lastLC2RecvTime records when the most recent AVC444 LC=2 frame arrived,
+	// regardless of whether it could be decoded.  Used to detect the
+	// "server sending LC=2 only, aux decoder absent" deadlock.
+	lastLC2RecvTime atomic.Int64
+	// auxDecoderBrokenTimer fires after auxDecoderBrokenTimeout when h264dec2
+	// is nil.  When it fires it signals watchdogCh so that decodeLoop can call
+	// maybeRenegotiateCapabilities and break the LC=2-only deadlock.
+	auxDecoderBrokenTimer   *time.Timer
+	auxDecoderBrokenTimerMu sync.Mutex
 	// onKeyframeRequest is called to ask the server to send a fresh IDR
 	// keyframe.  Optional: if nil, the decoder will wait for the next
 	// server-initiated keyframe.
@@ -296,6 +305,13 @@ const inputStallSilentThreshold = 7 * time.Second
 
 const localInputRecoveryGrace = 750 * time.Millisecond
 
+// auxDecoderBrokenTimeout is the maximum time we wait for an LC=0 stream2 IDR
+// to arrive and recreate the aux decoder (h264dec2) after it has been torn down.
+// If LC=2 frames keep arriving beyond this window without an LC=0 IDR, the RDPGFX
+// capabilities are re-advertised to force the server to issue RESET_GRAPHICS and
+// restart the video pipeline with a fresh LC=0 IDR for both streams.
+const auxDecoderBrokenTimeout = 10 * time.Second
+
 // Close shuts down the GfxHandler's background goroutines.
 // Safe to call multiple times; subsequent calls are no-ops.
 //
@@ -306,6 +322,7 @@ const localInputRecoveryGrace = 750 * time.Millisecond
 func (g *GfxHandler) Close() {
 	g.closeOnce.Do(func() {
 		g.stopInputWatchdog()
+		g.stopAuxDecoderBrokenTimer()
 		close(g.doneCh)
 	})
 }
@@ -381,6 +398,67 @@ func (g *GfxHandler) stopInputWatchdog() {
 	}
 	g.inputWatchdogNS = 0
 	g.inputWatchdogMu.Unlock()
+}
+
+// startAuxDecoderBrokenTimer arms a one-shot timer.  If it fires before
+// stopAuxDecoderBrokenTimer cancels it, it signals watchdogCh so that
+// decodeLoop calls maybeRenegotiateCapabilities.
+// Idempotent: only the first call while h264dec2 is nil takes effect.
+func (g *GfxHandler) startAuxDecoderBrokenTimer() {
+	g.auxDecoderBrokenTimerMu.Lock()
+	defer g.auxDecoderBrokenTimerMu.Unlock()
+	if g.auxDecoderBrokenTimer == nil {
+		g.auxDecoderBrokenTimer = time.AfterFunc(auxDecoderBrokenTimeout, func() {
+			select {
+			case g.watchdogCh <- struct{}{}:
+			default:
+			}
+		})
+	}
+}
+
+func (g *GfxHandler) stopAuxDecoderBrokenTimer() {
+	g.auxDecoderBrokenTimerMu.Lock()
+	if g.auxDecoderBrokenTimer != nil {
+		g.auxDecoderBrokenTimer.Stop()
+		g.auxDecoderBrokenTimer = nil
+	}
+	g.auxDecoderBrokenTimerMu.Unlock()
+}
+
+// maybeRenegotiateCapabilities is called from decodeLoop when watchdogCh fires.
+// If h264dec2 has been nil since the timer was armed AND the server has been
+// actively sending LC=2 frames while the screen is frozen, the only recovery
+// path is a full RDP reconnect: the server will never send an LC=0 IDR on its
+// own while in "LC=2 only" mode, and sending CAPS_ADVERTISE mid-session causes
+// the Windows server to immediately RST the TCP connection.
+func (g *GfxHandler) maybeRenegotiateCapabilities() {
+	if g.h264dec2 != nil {
+		return // aux decoder recovered while timer was in flight
+	}
+	if g.decoderBrokenNotified {
+		return // reconnect already in flight
+	}
+	// Only act when the server has recently been sending LC=2 frames —
+	// a genuinely idle server needs no intervention.
+	lastLC2NS := g.lastLC2RecvTime.Load()
+	if lastLC2NS == 0 || time.Since(time.Unix(0, lastLC2NS)) >= auxDecoderBrokenTimeout {
+		return
+	}
+	lastDecodedNS := g.lastDecodedFrame.Load()
+	if lastDecodedNS == 0 {
+		return
+	}
+	silentFor := time.Since(time.Unix(0, lastDecodedNS))
+	if silentFor < auxDecoderBrokenTimeout {
+		return
+	}
+	slog.Debug("H.264: aux decoder absent, server sending LC=2 only — triggering reconnect",
+		"silentFor", silentFor.Round(time.Millisecond))
+	g.decoderBrokenNotified = true
+	if g.onDecoderBroken != nil {
+		go g.onDecoderBroken()
+	}
 }
 
 func (g *GfxHandler) noteSuccessfulDecode() {
@@ -792,6 +870,7 @@ func (g *GfxHandler) decodeLoop() {
 			// new frame while the decoder had already been silent too long.
 			slog.Debug("H.264: watchdog triggered, checking decoder state")
 			g.maybeTriggerInputStall()
+			g.maybeRenegotiateCapabilities()
 			g.maybeNotifyDecoderBroken()
 		}
 	}

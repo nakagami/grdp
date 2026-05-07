@@ -608,6 +608,7 @@ func (g *GfxHandler) primeAuxDecoder(h264Data []byte) {
 		}
 		slog.Debug("H.264: recreating aux decoder on stream2 IDR")
 		g.h264dec2 = newH264Decoder()
+		g.stopAuxDecoderBrokenTimer() // LC=0 IDR arrived; cancel recovery timer
 		// Fall through to prime the freshly-created decoder with this IDR.
 	}
 	// If the aux decoder was already broken (e.g. from a prior pre-flight stall),
@@ -617,6 +618,7 @@ func (g *GfxHandler) primeAuxDecoder(h264Data []byte) {
 		slog.Debug("H.264: aux decoder broken, waiting for IDR to recreate")
 		g.h264dec2.Close()
 		g.h264dec2 = nil
+		g.startAuxDecoderBrokenTimer()
 		return
 	}
 	i420dec, ok := g.h264dec2.(i420Decoder)
@@ -634,6 +636,7 @@ func (g *GfxHandler) primeAuxDecoder(h264Data []byte) {
 		slog.Debug("H.264: aux decoder broken after prime, waiting for IDR to recreate")
 		g.h264dec2.Close()
 		g.h264dec2 = nil
+		g.startAuxDecoderBrokenTimer()
 	}
 }
 
@@ -642,6 +645,9 @@ func (g *GfxHandler) primeAuxDecoder(h264Data []byte) {
 // (Y plane) with the auxiliary chroma (Y2 = U/Cb channel, U2 = V/Cr channel)
 // to produce a BGRA frame.
 func (g *GfxHandler) decodeAVC444LC2(stream2 *avc420Stream, destW, destH int) (decoded []byte, regions []avcRect, pooled bool) {
+	// Record LC=2 arrival unconditionally so maybeRenegotiateCapabilities can
+	// distinguish an active-LC=2-only server from a truly idle server.
+	g.lastLC2RecvTime.Store(time.Now().UnixNano())
 	if g.h264dec2 == nil {
 		slog.Debug("RDPGFX: AVC444 LC=2 skipped (no aux decoder)")
 		return
@@ -673,6 +679,7 @@ func (g *GfxHandler) decodeAVC444LC2(stream2 *avc420Stream, destW, destH int) (d
 		if g.h264dec2.IsBroken() {
 			g.h264dec2.Close()
 			g.h264dec2 = nil
+			g.startAuxDecoderBrokenTimer()
 		}
 		return
 	}
@@ -689,6 +696,9 @@ func (g *GfxHandler) decodeAVC444LC2(stream2 *avc420Stream, destW, destH int) (d
 			// Do NOT call maybeRequestKeyframe() here: ForceRefresh only delivers
 			// LC=1 luma IDR, not a stream2/chroma IDR.  h264dec2 will be re-primed
 			// naturally when the next LC=0 frame arrives via primeAuxDecoder.
+			// The aux decoder broken timer will escalate to caps renegotiation if
+			// no LC=0 IDR arrives within auxDecoderBrokenTimeout.
+			g.startAuxDecoderBrokenTimer()
 		}
 		return
 	}
