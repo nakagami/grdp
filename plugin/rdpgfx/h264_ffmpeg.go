@@ -413,6 +413,7 @@ import (
 	"log/slog"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 )
@@ -509,8 +510,14 @@ type ffmpegDecoder struct {
 	swFrameCount             int       // frames decoded by SW decoder (for diagnostics)
 	hwFrameCount             int       // frames decoded by HW decoder (for diagnostics)
 	broken                   bool      // decoder is unrecoverable; stop producing frames so the app reconnects
-	proceededWithoutKeyframe bool      // "proceed without keyframe" path was taken; AVERROR here means broken
-	stallProbeStart          time.Time // wall-clock time we entered the stall recovery-probe window
+	brokenReason             h264BrokenReason
+	timerBroken              atomic.Bool // set by background timers when probe/IDR timeouts expire
+	timerBrokenReason        atomic.Int32
+	proceededWithoutKeyframe bool            // "proceed without keyframe" path was taken; AVERROR here means broken
+	stallProbeStart          time.Time       // wall-clock time we entered the stall recovery-probe window
+	stallTimer               *time.Timer     // fires after avcHWRecoveryWindow to mark broken independently of frame rate
+	kfWaitTimer              *time.Timer     // fires after keyframeWaitTimeout to mark broken independently of frame rate
+	watchdogCh               chan<- struct{} // signals GfxHandler.decodeLoop to call maybeNotifyDecoderBroken
 
 	// Profiling: aggregated timing stats over the last profileWindow frames
 	// for the HW path.  Helps determine whether convertFrame
@@ -606,7 +613,9 @@ func (d *ffmpegDecoder) extractI420fromSrc(srcFrame *C.AVFrame) {
 	d.lastI420 = slot
 }
 
-func newH264Decoder() h264Decoder {
+func newH264Decoder() h264Decoder { return newH264DecoderWithWatchdog(nil) }
+
+func newH264DecoderWithWatchdog(watchdogCh chan<- struct{}) h264Decoder {
 	// Suppress FFmpeg stderr output (e.g. "[h264 @ ...] sps_id out of range").
 	// grdp emits its own slog messages for H.264 recovery events.
 	avLogOnce.Do(func() { C.grdp_suppress_av_log() })
@@ -627,6 +636,7 @@ func newH264Decoder() h264Decoder {
 		hwPixFmt:      C.AV_PIX_FMT_NONE,
 		lastFmt:       C.AV_PIX_FMT_NONE,
 		needsKeyFrame: true, // always wait for a clean IDR before feeding packets
+		watchdogCh:    watchdogCh,
 	}
 
 	// Always enable LOW_DELAY: RDP H.264 streams are transmitted in display
@@ -701,7 +711,53 @@ func (d *ffmpegDecoder) NeedsIDR() bool {
 }
 
 func (d *ffmpegDecoder) IsBroken() bool {
-	return d.broken
+	return d.broken || d.timerBroken.Load()
+}
+
+func (d *ffmpegDecoder) BrokenReason() h264BrokenReason {
+	if d.brokenReason != h264BrokenReasonNone {
+		return d.brokenReason
+	}
+	return h264BrokenReason(d.timerBrokenReason.Load())
+}
+
+func (d *ffmpegDecoder) ForceBroken(reason h264BrokenReason) {
+	d.markBroken(reason)
+}
+
+// markBroken sets d.broken and stops any pending background timers.
+// Called from inside Decode() (decodeLoop goroutine) when a timeout fires.
+func (d *ffmpegDecoder) markBroken(reason h264BrokenReason) {
+	d.broken = true
+	if reason != h264BrokenReasonNone {
+		d.brokenReason = reason
+		d.timerBrokenReason.Store(int32(reason))
+	}
+	d.stopTimers()
+}
+
+// stopTimers cancels the stall-probe and IDR-wait background timers.
+func (d *ffmpegDecoder) stopTimers() {
+	if d.stallTimer != nil {
+		d.stallTimer.Stop()
+		d.stallTimer = nil
+	}
+	if d.kfWaitTimer != nil {
+		d.kfWaitTimer.Stop()
+		d.kfWaitTimer = nil
+	}
+}
+
+// signalWatchdog sends a non-blocking signal to the GfxHandler decodeLoop so
+// it calls maybeNotifyDecoderBroken even when no server frames are arriving.
+func (d *ffmpegDecoder) signalWatchdog() {
+	if d.watchdogCh == nil {
+		return
+	}
+	select {
+	case d.watchdogCh <- struct{}{}:
+	default:
+	}
 }
 
 // HardResetCount always returns 0 — hard resets have been removed.
@@ -717,6 +773,13 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 	if d.broken {
 		// HW decoder is unrecoverable.  Stop feeding packets so no frames
 		// are produced; the application-level watchdog will reconnect.
+		return nil, nil
+	}
+	// A background timer may have fired and set timerBroken while Decode()
+	// was not being called (static screen → server sends no frames).
+	// Propagate it to broken so all downstream checks see a consistent state.
+	if d.timerBroken.Load() {
+		d.markBroken(h264BrokenReason(d.timerBrokenReason.Load()))
 		return nil, nil
 	}
 	// Track every call, including those that return early (probe mode, keyframe
@@ -741,6 +804,13 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 				d.keyframeWaitStart = time.Now()
 				if d.useHW {
 					slog.Debug("H.264: HW decoder waiting for IDR")
+					// Start a background timer so the timeout fires even when
+					// the server sends no frames (static screen → 0 fps).
+					d.kfWaitTimer = time.AfterFunc(keyframeWaitTimeout, func() {
+						d.timerBrokenReason.Store(int32(h264BrokenReasonNoIDR))
+						d.timerBroken.Store(true)
+						d.signalWatchdog()
+					})
 				}
 			} else if d.keyframeWaitCount%30 == 0 {
 				slog.Debug("H.264: still waiting for IDR",
@@ -757,7 +827,7 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 					slog.Debug("H.264: HW decoder: no IDR received, marking broken",
 						"waited", d.keyframeWaitCount,
 						"waitedFor", time.Since(d.keyframeWaitStart).Round(time.Millisecond))
-					d.broken = true
+					d.markBroken(h264BrokenReasonNoIDR)
 					return nil, nil
 				}
 				slog.Debug("H.264: no IDR received, proceeding without keyframe",
@@ -780,6 +850,11 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 			d.needsKeyFrame = false
 			d.keyframeWaitCount = 0
 			d.keyframeWaitStart = time.Time{}
+			// IDR received — cancel the background wait timer.
+			if d.kfWaitTimer != nil {
+				d.kfWaitTimer.Stop()
+				d.kfWaitTimer = nil
+			}
 		}
 	}
 
@@ -808,7 +883,7 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 		if stalledFor := time.Since(d.hwFirstSendTime); stalledFor >= avcFreezeThreshold {
 			slog.Warn("H.264: HW decoder failed to produce first frame, marking broken",
 				"stalledFor", stalledFor, "hwSentCount", d.hwSentCount)
-			d.broken = true
+			d.markBroken(h264BrokenReasonInitFailure)
 			return nil, nil
 		}
 	}
@@ -841,6 +916,11 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 					C.av_frame_unref(d.frame)
 					d.lastSuccessTime = time.Now()
 					d.stallProbeStart = time.Time{}
+					// Stall resolved — cancel the background probe timer.
+					if d.stallTimer != nil {
+						d.stallTimer.Stop()
+						d.stallTimer = nil
+					}
 					slog.Debug("H.264: HW decoder stall clock reset (drain found pending frame)",
 						"hadBeenSilentFor", stalledFor, "hwSentCount", d.hwSentCount)
 					// Fall through to send the current packet normally.
@@ -851,12 +931,19 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 						slog.Debug("H.264: HW decoder stall detected, probing for recovery",
 							"frozenFor", stalledFor.Round(time.Millisecond),
 							"hwSentCount", d.hwSentCount)
+						// Start a background timer so the probe window expires
+						// even when the server sends no more frames.
+						d.stallTimer = time.AfterFunc(avcHWRecoveryWindow, func() {
+							d.timerBrokenReason.Store(int32(h264BrokenReasonHWStall))
+							d.timerBroken.Store(true)
+							d.signalWatchdog()
+						})
 					} else if probedFor := time.Since(d.stallProbeStart); probedFor >= avcHWRecoveryWindow {
 						slog.Debug("H.264: HW decoder recovery probe timed out, marking broken",
 							"totalFrozen", stalledFor.Round(time.Second),
 							"probedFor", probedFor.Round(time.Second),
 							"hwSentCount", d.hwSentCount)
-						d.broken = true
+						d.markBroken(h264BrokenReasonHWStall)
 						return nil, nil
 					}
 					// Still in recovery window: skip send_packet to avoid the
@@ -869,6 +956,11 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 			slog.Debug("H.264: HW decoder recovered from stall",
 				"probedFor", time.Since(d.stallProbeStart).Round(time.Millisecond))
 			d.stallProbeStart = time.Time{}
+			// Cancel the background probe timer — VT recovered on its own.
+			if d.stallTimer != nil {
+				d.stallTimer.Stop()
+				d.stallTimer = nil
+			}
 		}
 	}
 
@@ -921,7 +1013,7 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 				// reconnect chain can proceed.
 				slog.Warn("H.264: HW decoder rejected packet after keyframe wait exhaustion, marking broken",
 					"err", int(ret))
-				d.broken = true
+				d.markBroken(h264BrokenReasonNoIDR)
 			}
 		}
 		return nil, nil
@@ -1010,7 +1102,7 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 			if d.stallProbeStart.IsZero() && stalledFor >= avcHWReadyFreezeThreshold {
 				slog.Warn("H.264: HW decoder stall timeout (safety valve), marking broken",
 					"frozenFor", stalledFor, "hwSentCount", d.hwSentCount)
-				d.broken = true
+				d.markBroken(h264BrokenReasonHWStall)
 			}
 		}
 	}
@@ -1280,6 +1372,8 @@ func h264PacketHasIDR(data []byte) bool {
 }
 
 func (d *ffmpegDecoder) Close() {
+	// Stop any background timers so their callbacks don't fire after Close.
+	d.stopTimers()
 	if d.swsCtx != nil {
 		C.sws_freeContext(d.swsCtx)
 		d.swsCtx = nil

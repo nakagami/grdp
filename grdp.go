@@ -799,6 +799,12 @@ func (g *RdpClient) NotifyClipboardChanged() {
 	}
 }
 
+func (g *RdpClient) notifyGfxLocalInput() {
+	if gfx := g.gfxHandler; gfx != nil {
+		gfx.NotifyLocalInput()
+	}
+}
+
 func (g *RdpClient) KeyUp(sc int) {
 	if !g.eventReady {
 		return
@@ -811,6 +817,7 @@ func (g *RdpClient) KeyUp(sc int) {
 	p.KeyCode = uint16(sc)
 	p.KeyboardFlags |= pdu.KBDFLAGS_RELEASE
 	g.pdu.SendInputEvents(pdu.INPUT_EVENT_SCANCODE, []pdu.InputEventsInterface{p})
+	g.notifyGfxLocalInput()
 }
 
 func (g *RdpClient) KeyDown(sc int) {
@@ -824,6 +831,7 @@ func (g *RdpClient) KeyDown(sc int) {
 	p := &pdu.ScancodeKeyEvent{}
 	p.KeyCode = uint16(sc)
 	g.pdu.SendInputEvents(pdu.INPUT_EVENT_SCANCODE, []pdu.InputEventsInterface{p})
+	g.notifyGfxLocalInput()
 }
 
 // MouseMove queues a mouse-move event.  Successive moves within
@@ -977,6 +985,7 @@ func (g *RdpClient) sendWheelLocked(now time.Time) {
 	}
 	p.PointerFlags |= pdu.WheelRotationMask & uint16(accum)
 	g.pdu.SendInputEvents(pdu.INPUT_EVENT_MOUSE, []pdu.InputEventsInterface{p})
+	g.notifyGfxLocalInput()
 }
 
 func (g *RdpClient) MouseUp(button int, x, y int) {
@@ -1002,6 +1011,7 @@ func (g *RdpClient) MouseUp(button int, x, y int) {
 	p.XPos = uint16(x)
 	p.YPos = uint16(y)
 	g.pdu.SendInputEvents(pdu.INPUT_EVENT_MOUSE, []pdu.InputEventsInterface{p})
+	g.notifyGfxLocalInput()
 }
 
 func (g *RdpClient) MouseDown(button int, x, y int) {
@@ -1029,6 +1039,7 @@ func (g *RdpClient) MouseDown(button int, x, y int) {
 	p.XPos = uint16(x)
 	p.YPos = uint16(y)
 	g.pdu.SendInputEvents(pdu.INPUT_EVENT_MOUSE, []pdu.InputEventsInterface{p})
+	g.notifyGfxLocalInput()
 }
 
 func (g *RdpClient) Reconnect(width, height int) error {

@@ -230,6 +230,18 @@ type GfxHandler struct {
 	// the RDP session to create a fresh decoder.
 	onDecoderBroken       func()
 	decoderBrokenNotified bool
+	// watchdogCh receives signals from background timers inside ffmpegDecoder
+	// when stall-probe or IDR-wait timeouts expire independently of server
+	// frame rate.  decodeLoop selects on this channel so it calls
+	// maybeNotifyDecoderBroken even when no server frames are arriving.
+	watchdogCh chan struct{}
+	// lastDecodedFrame records when a visible AVC frame was last produced.
+	// Local-input watchdogs compare against this timestamp so recovery does
+	// not wait for a subsequent H.264 packet to arrive.
+	lastDecodedFrame atomic.Int64
+	inputWatchdogMu  sync.Mutex
+	inputWatchdog    *time.Timer
+	inputWatchdogNS  int64
 	// onKeyframeRequest is called to ask the server to send a fresh IDR
 	// keyframe.  Optional: if nil, the decoder will wait for the next
 	// server-initiated keyframe.
@@ -263,17 +275,25 @@ func NewGfxHandler(onBitmap func([]BitmapUpdate)) *GfxHandler {
 		zgfx:         newZgfxContext(),
 		rfx:          newRfxDecoder(),
 		progressive:  newRfxProgressiveDecoder(),
-		h264dec:      newH264Decoder(),
 		h264dec2:     newH264Decoder(),
 		onBitmap:     onBitmap,
 		decodeCh:     make(chan decodePkt, 1024),
 		ackCh:        make(chan []byte, 512),
 		doneCh:       make(chan struct{}),
+		watchdogCh:   make(chan struct{}, 4),
 	}
+	g.h264dec = newH264DecoderWithWatchdog(g.watchdogCh)
 	go g.decodeLoop()
 	go g.writeLoop()
 	return g
 }
+
+// inputStallSilentThreshold mirrors the HW decoder stall threshold used by the
+// H.264 path. Keep this in the non-build-tagged file so both normal and !h264
+// builds compile.
+const inputStallSilentThreshold = 5 * time.Second
+
+const localInputRecoveryGrace = 750 * time.Millisecond
 
 // Close shuts down the GfxHandler's background goroutines.
 // Safe to call multiple times; subsequent calls are no-ops.
@@ -284,8 +304,97 @@ func NewGfxHandler(onBitmap func([]BitmapUpdate)) *GfxHandler {
 // defers cleanup of h264dec so it always runs after the last Decode call.
 func (g *GfxHandler) Close() {
 	g.closeOnce.Do(func() {
+		g.stopInputWatchdog()
 		close(g.doneCh)
 	})
+}
+
+// NotifyLocalInput tells the graphics pipeline that a real local input event
+// was just sent to the server. If the decoder has already been silent longer
+// than the HW stall threshold, arm a short watchdog so recovery no longer
+// depends on the next H.264 packet arriving.
+func (g *GfxHandler) NotifyLocalInput() {
+	if g.h264dec == nil {
+		return
+	}
+	lastDecodedNS := g.lastDecodedFrame.Load()
+	if lastDecodedNS == 0 {
+		return
+	}
+	now := time.Now()
+	silentFor := now.Sub(time.Unix(0, lastDecodedNS))
+	if silentFor < inputStallSilentThreshold {
+		return
+	}
+
+	inputNS := now.UnixNano()
+	g.inputWatchdogMu.Lock()
+	g.inputWatchdogNS = inputNS
+	if g.inputWatchdog == nil {
+		g.inputWatchdog = time.AfterFunc(localInputRecoveryGrace, func() {
+			g.fireInputWatchdog(inputNS)
+		})
+	} else {
+		g.inputWatchdog.Reset(localInputRecoveryGrace)
+	}
+	g.inputWatchdogMu.Unlock()
+
+	slog.Debug("H.264: local input armed stall watchdog",
+		"silentFor", silentFor.Round(time.Millisecond))
+}
+
+func (g *GfxHandler) fireInputWatchdog(inputNS int64) {
+	g.inputWatchdogMu.Lock()
+	if g.inputWatchdogNS != inputNS {
+		g.inputWatchdogMu.Unlock()
+		return
+	}
+	g.inputWatchdog = nil
+	g.inputWatchdogMu.Unlock()
+
+	select {
+	case g.watchdogCh <- struct{}{}:
+	default:
+	}
+}
+
+func (g *GfxHandler) stopInputWatchdog() {
+	g.inputWatchdogMu.Lock()
+	if g.inputWatchdog != nil {
+		g.inputWatchdog.Stop()
+		g.inputWatchdog = nil
+	}
+	g.inputWatchdogNS = 0
+	g.inputWatchdogMu.Unlock()
+}
+
+func (g *GfxHandler) noteSuccessfulDecode() {
+	g.lastDecodedFrame.Store(time.Now().UnixNano())
+	g.stopInputWatchdog()
+}
+
+func (g *GfxHandler) maybeTriggerInputStall() {
+	g.inputWatchdogMu.Lock()
+	inputNS := g.inputWatchdogNS
+	g.inputWatchdogNS = 0
+	g.inputWatchdog = nil
+	g.inputWatchdogMu.Unlock()
+
+	if inputNS == 0 || g.h264dec == nil || g.h264dec.IsBroken() {
+		return
+	}
+	lastDecodedNS := g.lastDecodedFrame.Load()
+	if lastDecodedNS == 0 || lastDecodedNS >= inputNS {
+		return
+	}
+	silentFor := time.Since(time.Unix(0, lastDecodedNS))
+	if silentFor < inputStallSilentThreshold {
+		return
+	}
+	g.h264dec.ForceBroken(h264BrokenReasonHWStall)
+	slog.Debug("H.264: local input produced no new frame, marking decoder broken",
+		"silentFor", silentFor.Round(time.Millisecond),
+		"inputAgo", time.Since(time.Unix(0, inputNS)).Round(time.Millisecond))
 }
 
 // SetSendFunc sets the function used to send RDPGFX responses via DVC.
@@ -648,6 +757,14 @@ func (g *GfxHandler) decodeLoop() {
 			if pkt.pooled {
 				releaseBitmapBuf(pkt.data)
 			}
+		case <-g.watchdogCh:
+			// A background timer in ffmpegDecoder fired because the stall-probe
+			// or IDR-wait timeout expired while the server was sending no frames
+			// (static screen → near-0 fps), or because local input produced no
+			// new frame while the decoder had already been silent too long.
+			slog.Debug("H.264: watchdog triggered, checking decoder state")
+			g.maybeTriggerInputStall()
+			g.maybeNotifyDecoderBroken()
 		}
 	}
 }
@@ -807,9 +924,11 @@ func (g *GfxHandler) onResetGraphics(data []byte) {
 	g.softResetCount = 0
 	g.decoderBrokenNotified = false
 	g.lastKeyframeRequest = time.Time{}
+	g.lastDecodedFrame.Store(0)
+	g.stopInputWatchdog()
 	if g.h264dec != nil {
 		g.h264dec.Close()
-		g.h264dec = newH264Decoder()
+		g.h264dec = newH264DecoderWithWatchdog(g.watchdogCh)
 	}
 	if g.h264dec2 != nil {
 		g.h264dec2.Close()

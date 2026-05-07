@@ -77,9 +77,9 @@ func parseAVC420Stream(data []byte) (*avc420Stream, error) {
 // Returns the main AVC420 stream, the auxiliary AVC420 stream, and the LC
 // (luma-chroma) field.
 //
-//   LC=0: both streams present; stream1 = main (YUV420), stream2 = chroma upgrade.
-//   LC=1: main stream only; stream2 is nil.
-//   LC=2: auxiliary only (chroma upgrade); stream1 is nil.
+//	LC=0: both streams present; stream1 = main (YUV420), stream2 = chroma upgrade.
+//	LC=1: main stream only; stream2 is nil.
+//	LC=2: auxiliary only (chroma upgrade); stream1 is nil.
 func parseAVC444Stream(data []byte) (stream1, stream2 *avc420Stream, lc uint8, err error) {
 	if len(data) < 4 {
 		return nil, nil, 0, fmt.Errorf("avc444 stream too short")
@@ -206,6 +206,7 @@ func (g *GfxHandler) decodeAVC420(data []byte, destX, destY, destW, destH int) (
 		return nil, nil, false
 	}
 	slog.Debug("RDPGFX: AVC420 decoded", "frameW", frame.Width, "frameH", frame.Height, "destW", destW, "destH", destH, "regions", len(stream.regions), "h264Len", len(stream.h264Data))
+	g.noteSuccessfulDecode()
 	decoded, pooled := cropBGRA(frame.Data, frame.Width, frame.Height, destW, destH)
 	return decoded, stream.regions, pooled
 }
@@ -270,6 +271,7 @@ func (g *GfxHandler) decodeAVC444(data []byte, destX, destY, destW, destH int) (
 	}
 	slog.Debug("RDPGFX: AVC444 decoded", "frameW", frame.Width, "frameH", frame.Height,
 		"destW", destW, "destH", destH, "h264Len", len(stream1.h264Data))
+	g.noteSuccessfulDecode()
 	decoded, pooled := cropBGRA(frame.Data, frame.Width, frame.Height, destW, destH)
 
 	// For LC=0 frames prime h264dec2 with the auxiliary (chroma-upgrade) stream2
@@ -332,6 +334,7 @@ func (g *GfxHandler) decodeAVC420WithI420(data []byte, destX, destY, destW, dest
 	slog.Debug("RDPGFX: AVC420 decoded (WithI420)", "frameW", frame.Width, "frameH", frame.Height,
 		"destW", destW, "destH", destH, "hasI420", i420 != nil,
 		"regions", len(stream.regions), "h264Len", len(stream.h264Data))
+	g.noteSuccessfulDecode()
 	decoded, pooled = cropBGRA(frame.Data, frame.Width, frame.Height, destW, destH)
 	regions = stream.regions
 	return
@@ -391,6 +394,7 @@ func (g *GfxHandler) decodeAVC444WithI420(data []byte, destX, destY, destW, dest
 	}
 	slog.Debug("RDPGFX: AVC444 decoded (WithI420)", "frameW", frame.Width, "frameH", frame.Height,
 		"destW", destW, "destH", destH, "hasI420", i420 != nil, "h264Len", len(stream1.h264Data))
+	g.noteSuccessfulDecode()
 	decoded, pooled = cropBGRA(frame.Data, frame.Width, frame.Height, destW, destH)
 	regions = stream1.regions
 
@@ -446,17 +450,17 @@ func (g *GfxHandler) updateAVC444YCache(i420 *h264FrameI420) {
 // Stream2 encodes the missing chroma positions that stream1's 4:2:0 quantiser
 // discards, split across three "Bx areas" of the auxiliary I420 frame:
 //
-//   B4/B5 — stream2 Y plane, each row:
-//     bytes [0,   w/2)  = Cb at all odd-x columns  (U444[2k+1, y]  for k=0..w/2-1)
-//     bytes [w/2, w)    = Cr at all odd-x columns  (V444[2k+1, y]  for k=0..w/2-1)
+//	B4/B5 — stream2 Y plane, each row:
+//	  bytes [0,   w/2)  = Cb at all odd-x columns  (U444[2k+1, y]  for k=0..w/2-1)
+//	  bytes [w/2, w)    = Cr at all odd-x columns  (V444[2k+1, y]  for k=0..w/2-1)
 //
-//   B6/B7 — stream2 U plane, each half-height row j:
-//     bytes [0,    w/4) = Cb at even-x multiples of 4  (U444[4k,   2j+1])
-//     bytes [w/4,  w/2) = Cr at even-x multiples of 4  (V444[4k,   2j+1])
+//	B6/B7 — stream2 U plane, each half-height row j:
+//	  bytes [0,    w/4) = Cb at even-x multiples of 4  (U444[4k,   2j+1])
+//	  bytes [w/4,  w/2) = Cr at even-x multiples of 4  (V444[4k,   2j+1])
 //
-//   B8/B9 — stream2 V plane, each half-height row j:
-//     bytes [0,    w/4) = Cb at even-x offset-2 cols   (U444[4k+2, 2j+1])
-//     bytes [w/4,  w/2) = Cr at even-x offset-2 cols   (V444[4k+2, 2j+1])
+//	B8/B9 — stream2 V plane, each half-height row j:
+//	  bytes [0,    w/4) = Cb at even-x offset-2 cols   (U444[4k+2, 2j+1])
+//	  bytes [w/4,  w/2) = Cr at even-x offset-2 cols   (V444[4k+2, 2j+1])
 //
 // Positions not covered by stream2 (even-x, even-y) use stream1's half-res
 // B2/B3 chroma values from the cached cachedU/cachedV planes.
@@ -561,7 +565,6 @@ func clampByte(v int) byte {
 	}
 	return byte(v)
 }
-
 
 // auxiliary H.264 sequence.  The IDR frame for the chroma-upgrade stream is
 // always carried in the LC=0 stream2; subsequent LC=2 standalone frames are
@@ -709,6 +712,7 @@ func (g *GfxHandler) decodeAVC444LC2(stream2 *avc420Stream, destW, destH int) (d
 	regions = stream2.regions
 	slog.Debug("RDPGFX: AVC444 LC=2 decoded", "w", w, "h", h,
 		"destW", destW, "destH", destH, "h264Len", len(stream2.h264Data))
+	g.noteSuccessfulDecode()
 	return
 }
 
@@ -722,7 +726,10 @@ const softResetLimit = 3
 // flood the server.  This covers both post-flush and post-soft-reset cases,
 // including the case where h264dec2 was reset independently of h264dec.
 func (g *GfxHandler) maybeRequestKeyframe() {
-	dec1NeedsKF := g.h264dec != nil && g.h264dec.NeedsKeyframe()
+	if g.h264dec == nil || g.h264dec.IsBroken() {
+		return
+	}
+	dec1NeedsKF := g.h264dec.NeedsKeyframe()
 	// Do NOT include h264dec2 here: ForceRefresh only triggers an LC=1 luma IDR
 	// from the server.  The stream2/chroma IDR is never delivered via
 	// ForceRefresh — it arrives naturally as an LC=0 frame via primeAuxDecoder.
@@ -754,12 +761,23 @@ func (g *GfxHandler) maybeNotifyDecoderBroken() {
 	if g.h264dec == nil || !g.h264dec.IsBroken() {
 		return
 	}
+	reason := g.h264dec.BrokenReason()
+	if reason == h264BrokenReasonNoIDR {
+		slog.Debug("H.264: escalating directly to reconnect",
+			"reason", reason.String())
+		g.decoderBrokenNotified = true
+		if g.onDecoderBroken != nil {
+			go g.onDecoderBroken()
+		}
+		return
+	}
 	if g.softResetCount < softResetLimit {
 		g.softResetCount++
 		slog.Debug("H.264: soft decoder reset",
-			"attempt", g.softResetCount, "limit", softResetLimit)
+			"attempt", g.softResetCount, "limit", softResetLimit,
+			"reason", reason.String())
 		g.h264dec.Close()
-		g.h264dec = newH264Decoder()
+		g.h264dec = newH264DecoderWithWatchdog(g.watchdogCh)
 		// Keep h264dec2 if healthy; tear it down if already broken so
 		// primeAuxDecoder can recreate it when the next stream2 IDR arrives,
 		// rather than spinning up a new VT session only to have it break again.

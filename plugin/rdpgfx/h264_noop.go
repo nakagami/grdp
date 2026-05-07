@@ -8,6 +8,11 @@ func newH264Decoder() h264Decoder {
 	return nil
 }
 
+// newH264DecoderWithWatchdog returns nil when built without the "h264" build tag.
+func newH264DecoderWithWatchdog(_ chan<- struct{}) h264Decoder {
+	return nil
+}
+
 // h264PacketHasIDR always returns false when built without the "h264" build
 // tag; the aux decoder is nil in that case so this path is never reached.
 func h264PacketHasIDR(_ []byte) bool {
