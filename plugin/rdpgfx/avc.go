@@ -730,8 +730,8 @@ func (g *GfxHandler) decodeAVC444LC2(stream2 *avc420Stream, destW, destH int) (d
 				slog.Debug("H.264: pixel sample (LC=2 combine)",
 					"x", px, "y", py,
 					"Y1", g.avc444YPlane.data[py*g.avc444YPlane.stride+px],
-					"Cb", i420aux.Y[py*i420aux.YStride+px/2],
-					"Cr", i420aux.Y[py*i420aux.YStride+w/2+px/2],
+					"Cb", i420aux.U[(py/2)*i420aux.UStride+px/2],
+					"Cr", i420aux.V[(py/2)*i420aux.VStride+px/2],
 					"B", combined[off], "G", combined[off+1], "R", combined[off+2])
 			}
 		}

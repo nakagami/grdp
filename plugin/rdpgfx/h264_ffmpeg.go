@@ -940,9 +940,11 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 		return nil, nil
 	}
 	// Track every call, including those that return early (probe mode, keyframe
-	// wait, etc.).  Used for server-idle detection: if no packets have arrived
-	// for avcHWReadyFreezeThreshold, the server is genuinely quiet, not us.
-	d.lastReceiveTime = time.Now()
+	// wait, etc.).  Keep the previous receive time for idle detection before we
+	// overwrite it with the current call timestamp.
+	now := time.Now()
+	prevReceiveTime := d.lastReceiveTime
+	d.lastReceiveTime = now
 
 	// After a decoder reset we must resync with a fresh IDR from the server.
 	// After a SW decoder flush, wait for an IDR before resuming decoding.
@@ -1046,17 +1048,19 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 	}
 	if d.useHW && d.hwReady && !d.lastSuccessTime.IsZero() {
 		if stalledFor := time.Since(d.lastSuccessTime); stalledFor >= avcHWReadyFreezeThreshold {
-			// If no packet has arrived at Decode() during the apparent stall,
-			// the server was simply idle (e.g. screen was static).  Reset the
-			// stall clock so we don't misfire on the first packet after a
-			// server-side pause.  Use lastReceiveTime (updated on every
-			// Decode() call, even in probe mode) rather than lastSendTime so
-			// that probe-mode early returns don't make us appear idle.
-			if d.lastReceiveTime.IsZero() || time.Since(d.lastReceiveTime) >= avcHWReadyFreezeThreshold {
+			// If no packet had arrived since the previous Decode() call during
+			// the apparent stall, the server was simply idle (e.g. screen was
+			// static).  Reset the stall clock so we don't misfire on the first
+			// packet after a server-side pause.
+			if prevReceiveTime.IsZero() || now.Sub(prevReceiveTime) >= avcHWReadyFreezeThreshold {
 				slog.Debug("H.264: HW decoder stall clock reset (server was idle)",
 					"idleFor", stalledFor, "hwSentCount", d.hwSentCount)
-				d.lastSuccessTime = time.Now()
+				d.lastSuccessTime = now
 				d.stallProbeStart = time.Time{}
+				if d.stallTimer != nil {
+					d.stallTimer.Stop()
+					d.stallTimer = nil
+				}
 			} else {
 				// Probe for pending output that VideoToolbox may be about to
 				// produce.  VT legitimately stalls for several seconds at a
@@ -1084,7 +1088,7 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 				} else {
 					// No output yet.  Enter / stay in recovery-probe window.
 					if d.stallProbeStart.IsZero() {
-						d.stallProbeStart = time.Now()
+						d.stallProbeStart = now
 						slog.Debug("H.264: HW decoder stall detected, probing for recovery",
 							"frozenFor", stalledFor.Round(time.Millisecond),
 							"hwSentCount", d.hwSentCount)
