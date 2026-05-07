@@ -12,6 +12,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ebitengine/oto/v3"
@@ -239,6 +240,11 @@ var (
 	otoCtx                 *oto.Context
 	otoPlayer              *oto.Player
 	clipStopCh             chan struct{}
+	// lastServerActivity tracks the last time any data arrived from the server
+	// (bitmap, audio, pointer update).  Used by the video-stall watchdog to
+	// distinguish a truly stuck stream from a legitimately idle desktop.
+	// Stored as UnixNano; zero means no activity yet (watchdog disarmed).
+	lastServerActivity atomic.Int64
 )
 
 func uiRdp(hostPort, domain, user, password string, width, height int, keyboardType, keyboardLayout string) (error, *grdp.RdpClient) {
@@ -254,6 +260,7 @@ func uiRdp(hostPort, domain, user, password string, width, height int, keyboardT
 	}
 
 	g.OnAudio(func(af rdpsnd.AudioFormat, data []byte) {
+		lastServerActivity.Store(time.Now().UnixNano())
 		audioStr.Write(data)
 	})
 
@@ -289,12 +296,16 @@ func uiRdp(hostPort, domain, user, password string, width, height int, keyboardT
 	}).OnReady(func() {
 		slog.Debug("on ready")
 	}).OnPointerHide(func() {
+		lastServerActivity.Store(time.Now().UnixNano())
 		slog.Debug("on pointer_hide")
 	}).OnPointerCached(func(idx uint16) {
+		lastServerActivity.Store(time.Now().UnixNano())
 		slog.Debug("on pointer_cached", "idx", idx)
 	}).OnPointerUpdate(func(idx uint16, bpp uint16, x uint16, y uint16, width uint16, height uint16, mask []byte, data []byte) {
+		lastServerActivity.Store(time.Now().UnixNano())
 		slog.Debug("on pointer_update", "idx", idx)
 	}).OnBitmap(func(bs []grdp.Bitmap) {
+		lastServerActivity.Store(time.Now().UnixNano())
 		// Bitmap.Data for compressed bitmaps is borrowed from an internal
 		// pool and only valid for the duration of this callback.  Copy the
 		// pixel data before sending it to the asynchronous paint goroutine.
@@ -476,6 +487,52 @@ func appMain(driver gxui.Driver) {
 		})
 	})
 	update()
+	startVideoStallWatchdog()
+}
+
+// videoStallTimeout is the maximum time without any server-originated traffic
+// (bitmap, audio, pointer) before treating the session as stalled and
+// reconnecting.  This mirrors the SDL2 frontend's watchdog and recovers from
+// VideoToolbox / H.264 decoder hangs without requiring user interaction.
+//
+// 10 s is generous enough to survive a normal HW-decoder soft-reset cycle
+// (stall detection → soft reset → IDR request → first new frame ≈ 5–8 s)
+// while still catching a truly frozen session.
+const videoStallTimeout = 10 * time.Second
+
+func startVideoStallWatchdog() {
+	go func() {
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			if rdpClient == nil {
+				continue
+			}
+			lastNS := lastServerActivity.Load()
+			if lastNS == 0 {
+				continue
+			}
+			elapsed := time.Since(time.Unix(0, lastNS))
+			if elapsed <= videoStallTimeout {
+				continue
+			}
+			slog.Warn("Video stalled, reconnecting to recover",
+				"stalled", elapsed.Round(time.Millisecond))
+			// Reset the watchdog before reconnecting to avoid repeated
+			// reconnects while Reconnect() is running.
+			lastServerActivity.Store(time.Now().UnixNano())
+			w, h := rdpClient.Width(), rdpClient.Height()
+			if err := rdpClient.Reconnect(w, h); err != nil {
+				slog.Error("Video stall reconnect failed", "err", err)
+			} else {
+				// Clear the watchdog so the fresh session starts clean.
+				lastServerActivity.Store(0)
+				screenMu.Lock()
+				screenImage = image.NewRGBA(image.Rect(0, 0, w, h))
+				screenMu.Unlock()
+			}
+		}
+	}()
 }
 
 func update() {
