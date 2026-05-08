@@ -518,6 +518,9 @@ func (c *Client) RecvFastPath(secFlag byte, s []byte) {
 			c.Emit("orders", p.Data.(*FastPathOrdersPDU).OrderPdus)
 		} else if updateCode == FASTPATH_UPDATETYPE_PTR_NULL {
 			c.Emit("pointer_hide")
+		} else if updateCode == FASTPATH_UPDATETYPE_PTR_POSITION {
+			pp := p.Data.(*FastPathPointerPositionPDU)
+			c.Emit("pointer_position", pp.X, pp.Y)
 		} else if updateCode == FASTPATH_UPDATETYPE_CACHED {
 			c.Emit("pointer_cached", p.Data.(*FastPathUpdateCachedPDU).CacheIdx)
 		} else if updateCode == FASTPATH_UPDATETYPE_POINTER {

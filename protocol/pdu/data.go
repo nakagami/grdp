@@ -1531,6 +1531,19 @@ func (f *FastPathUpdatePointerPDU) Unpack(r io.Reader) error {
 	return struc.Unpack(r, f)
 }
 
+type FastPathPointerPositionPDU struct {
+	X uint16 `struc:"little"`
+	Y uint16 `struc:"little"`
+}
+
+func (*FastPathPointerPositionPDU) FastPathUpdateType() uint8 {
+	return FASTPATH_UPDATETYPE_PTR_POSITION
+}
+
+func (f *FastPathPointerPositionPDU) Unpack(r io.Reader) error {
+	return struc.Unpack(r, f)
+}
+
 type FastPathUpdatePointerNullPDU struct {
 }
 
@@ -1589,6 +1602,7 @@ func readFastPathUpdatePDU(r io.Reader, code uint8) (*FastPathUpdatePDU, error) 
 		d = &FastPathUpdatePointerNullPDU{}
 	case FASTPATH_UPDATETYPE_PTR_DEFAULT:
 	case FASTPATH_UPDATETYPE_PTR_POSITION:
+		d = &FastPathPointerPositionPDU{}
 	case FASTPATH_UPDATETYPE_COLOR:
 		//d = &FastPathColorPdu{}
 	case FASTPATH_UPDATETYPE_CACHED:
