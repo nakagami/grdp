@@ -666,13 +666,24 @@ const avcHWRecoveryWindow = 3 * time.Second
 // codecs like VideoToolbox cannot recover without a proper IDR).
 const keyframeWaitLimit = 900
 
-// keyframeWaitTimeout is the maximum wall-clock time the HW decoder waits for
+// keyframeWaitTimeout is the maximum wall-clock time an HW decoder waits for
 // an IDR after entering needsKeyFrame=true.  ForceRefresh is sent every 2 s,
 // so the server should respond within a few seconds.  If no IDR arrives within
-// this window the decoder marks itself broken so the soft-reset / reconnect
+// this window the HW decoder marks itself broken so the soft-reset / reconnect
 // chain escalates quickly rather than waiting the full keyframeWaitLimit
-// (~30 s) of dropped packets.
+// (~30 s) of dropped packets.  The HW path cannot do error-concealment, so a
+// longer window gives the server more chances to deliver a natural IDR.
 const keyframeWaitTimeout = 15 * time.Second
+
+// keyframeWaitTimeoutSW is the same limit for SW (FFmpeg) decoders.  SW
+// decoders can attempt error-concealment decode on P-frames, so a shorter wait
+// allows recovery much sooner.  With ForceRefresh sent every 2 s, three
+// attempts in 5 s are sufficient before giving up and trying to decode without
+// a keyframe.  This matters most for the HW→SW fallback path: when the server
+// (e.g. gnome-remote-desktop) refuses to deliver an IDR in response to
+// ForceRefresh the connection can time out (typically ~14 s) before the 15 s
+// HW timeout fires; the SW decoder must attempt error-concealment before that.
+const keyframeWaitTimeoutSW = 5 * time.Second
 
 // profileWindow is the number of HW frames over which Decode aggregates
 // timing measurements before logging an INFO summary.  At 30 fps this is
@@ -1136,8 +1147,12 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 					"waited", d.keyframeWaitCount,
 					"waitedFor", time.Since(d.keyframeWaitStart).Round(time.Millisecond))
 			}
-			waitedTooLong := d.useHW && !d.keyframeWaitStart.IsZero() &&
-				time.Since(d.keyframeWaitStart) >= keyframeWaitTimeout
+			kfTimeout := keyframeWaitTimeout // HW: 15 s (no error-concealment)
+			if !d.useHW {
+				kfTimeout = keyframeWaitTimeoutSW // SW: 5 s (can error-conceal sooner)
+			}
+			waitedTooLong := !d.keyframeWaitStart.IsZero() &&
+				time.Since(d.keyframeWaitStart) >= kfTimeout
 			if d.keyframeWaitCount >= keyframeWaitLimit || waitedTooLong {
 				if d.useHW {
 					// HW decoders (e.g. VideoToolbox) cannot recover without a
@@ -1150,7 +1165,8 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 					return nil, nil
 				}
 				slog.Debug("H.264: no IDR received, proceeding without keyframe",
-					"waited", d.keyframeWaitCount)
+					"waited", d.keyframeWaitCount,
+					"waitedFor", time.Since(d.keyframeWaitStart).Round(time.Millisecond))
 				d.needsKeyFrame = false
 				d.keyframeWaitCount = 0
 				d.keyframeWaitStart = time.Time{}
@@ -1340,6 +1356,15 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 					"err", int(ret))
 				d.markBroken(h264BrokenReasonNoIDR)
 			}
+		} else if prev {
+			// SW decoder: error-concealment attempt (proceededWithoutKeyframe)
+			// failed — avcodec_send_packet rejected the P-frame.  Without
+			// marking broken the decoder would loop: wait 900 frames → try →
+			// fail → reset → wait 900 frames → ...  Mark broken so the
+			// soft-reset / reconnect chain can escalate instead.
+			slog.Warn("H.264: SW decoder rejected packet after keyframe wait exhaustion, marking broken",
+				"err", int(ret))
+			d.markBroken(h264BrokenReasonNoIDR)
 		}
 		return nil, nil
 	}
