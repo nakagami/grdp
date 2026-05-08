@@ -261,6 +261,11 @@ type GfxHandler struct {
 	// softResetCount tracks how many in-place decoder resets have been
 	// attempted since the last server-triggered RESET_GRAPHICS.
 	softResetCount int
+	// usingSWFallback is set after a HW stall forces a switch to software
+	// decoding.  Both h264dec and h264dec2 are created SW-only while this
+	// flag is true, avoiding repeated VideoToolbox stalls that would
+	// otherwise trigger a full RDP reconnect.
+	usingSWFallback bool
 	// onH264Raw is called with raw H.264 NAL unit data when h264dec is nil
 	// (e.g. WASM builds without CGo).  The caller can forward the data to a
 	// JavaScript WebCodecs VideoDecoder instead.
@@ -286,7 +291,7 @@ func NewGfxHandler(onBitmap func([]BitmapUpdate)) *GfxHandler {
 		zgfx:         newZgfxContext(),
 		rfx:          newRfxDecoder(),
 		progressive:  newRfxProgressiveDecoder(),
-		h264dec2:     newH264Decoder(),
+		h264dec2:     newH264DecoderSW(),
 		onBitmap:     onBitmap,
 		decodeCh:     make(chan decodePkt, 1024),
 		ackCh:        make(chan []byte, 512),
@@ -1046,7 +1051,7 @@ func (g *GfxHandler) onResetGraphics(data []byte) {
 	}
 	if g.h264dec2 != nil {
 		g.h264dec2.Close()
-		g.h264dec2 = newH264Decoder()
+		g.h264dec2 = newH264DecoderSW()
 	}
 	g.avc444YPlane = avc444YPlane{}
 }

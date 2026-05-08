@@ -870,6 +870,16 @@ func (d *ffmpegDecoder) extractNV12fromSrc(srcFrame *C.AVFrame) {
 func newH264Decoder() h264Decoder { return newH264DecoderWithWatchdog(nil) }
 
 func newH264DecoderWithWatchdog(watchdogCh chan<- struct{}) h264Decoder {
+	return newH264DecoderInternal(watchdogCh, false)
+}
+
+func newH264DecoderSW() h264Decoder { return newH264DecoderSWWithWatchdog(nil) }
+
+func newH264DecoderSWWithWatchdog(watchdogCh chan<- struct{}) h264Decoder {
+	return newH264DecoderInternal(watchdogCh, true)
+}
+
+func newH264DecoderInternal(watchdogCh chan<- struct{}, forceSW bool) h264Decoder {
 	// Suppress FFmpeg stderr output (e.g. "[h264 @ ...] sps_id out of range").
 	// grdp emits its own slog messages for H.264 recovery events.
 	avLogOnce.Do(func() { C.grdp_suppress_av_log() })
@@ -899,44 +909,50 @@ func newH264DecoderWithWatchdog(watchdogCh chan<- struct{}) h264Decoder {
 	// stalled between IDRs.
 	C.grdp_set_low_delay(codecCtx)
 
-	// Probe available hardware acceleration backends.
-	hwType := C.av_hwdevice_iterate_types(C.AV_HWDEVICE_TYPE_NONE)
-	for hwType != C.AV_HWDEVICE_TYPE_NONE {
-		var devCtx *C.AVBufferRef
-		if C.av_hwdevice_ctx_create(&devCtx, hwType, nil, nil, 0) == 0 {
-			// Find the HW pixel format for this device type.
-			hwPixFmt := C.enum_AVPixelFormat(C.AV_PIX_FMT_NONE)
-			for i := C.int(0); ; i++ {
-				cfg := C.avcodec_get_hw_config(codec, i)
-				if cfg == nil {
-					break
+	if !forceSW {
+		// Probe available hardware acceleration backends.
+		hwType := C.av_hwdevice_iterate_types(C.AV_HWDEVICE_TYPE_NONE)
+		for hwType != C.AV_HWDEVICE_TYPE_NONE {
+			var devCtx *C.AVBufferRef
+			if C.av_hwdevice_ctx_create(&devCtx, hwType, nil, nil, 0) == 0 {
+				// Find the HW pixel format for this device type.
+				hwPixFmt := C.enum_AVPixelFormat(C.AV_PIX_FMT_NONE)
+				for i := C.int(0); ; i++ {
+					cfg := C.avcodec_get_hw_config(codec, i)
+					if cfg == nil {
+						break
+					}
+					if cfg.device_type == hwType &&
+						(cfg.methods&C.AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) != 0 {
+						hwPixFmt = cfg.pix_fmt
+						break
+					}
 				}
-				if cfg.device_type == hwType &&
-					(cfg.methods&C.AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) != 0 {
-					hwPixFmt = cfg.pix_fmt
-					break
-				}
-			}
 
-			if hwPixFmt != C.AV_PIX_FMT_NONE {
-				codecCtx.hw_device_ctx = C.av_buffer_ref(devCtx)
-				C.grdp_set_hw_pix_fmt(codecCtx, hwPixFmt)
-				C.grdp_set_get_format(codecCtx)
-				d.useHW = true
-				d.hwPixFmt = hwPixFmt
-				name := C.av_hwdevice_get_type_name(hwType)
-				slog.Debug("H.264: hardware acceleration enabled", "type", C.GoString(name))
+				if hwPixFmt != C.AV_PIX_FMT_NONE {
+					codecCtx.hw_device_ctx = C.av_buffer_ref(devCtx)
+					C.grdp_set_hw_pix_fmt(codecCtx, hwPixFmt)
+					C.grdp_set_get_format(codecCtx)
+					d.useHW = true
+					d.hwPixFmt = hwPixFmt
+					name := C.av_hwdevice_get_type_name(hwType)
+					slog.Debug("H.264: hardware acceleration enabled", "type", C.GoString(name))
+				}
+				C.av_buffer_unref(&devCtx)
+				if d.useHW {
+					break
+				}
 			}
-			C.av_buffer_unref(&devCtx)
-			if d.useHW {
-				break
-			}
+			hwType = C.av_hwdevice_iterate_types(hwType)
 		}
-		hwType = C.av_hwdevice_iterate_types(hwType)
 	}
 
 	if !d.useHW {
-		slog.Debug("H.264: using software decoding")
+		if forceSW {
+			slog.Debug("H.264: using software decoding (SW fallback)")
+		} else {
+			slog.Debug("H.264: using software decoding")
+		}
 		// Limit the decoded picture buffer to 1 reference frame so each frame
 		// is emitted immediately rather than waiting for up to
 		// max_dec_frame_buffering (often 8) frames to accumulate.  RDP H.264

@@ -693,7 +693,7 @@ func (g *GfxHandler) primeAuxDecoder(h264Data []byte) {
 			return
 		}
 		slog.Debug("H.264: recreating aux decoder on stream2 IDR")
-		g.h264dec2 = newH264Decoder()
+		g.h264dec2 = newH264DecoderSW()
 		g.stopAuxDecoderBrokenTimer() // LC=0 IDR arrived; cancel recovery timer
 		// Fall through to prime the freshly-created decoder with this IDR.
 	}
@@ -935,11 +935,21 @@ func (g *GfxHandler) maybeNotifyDecoderBroken() {
 	}
 	if g.softResetCount < softResetLimit {
 		g.softResetCount++
-		slog.Debug("H.264: soft decoder reset",
-			"attempt", g.softResetCount, "limit", softResetLimit,
-			"reason", reason.String())
+		if reason == h264BrokenReasonHWStall && !g.usingSWFallback {
+			slog.Debug("H.264: HW stall — falling back to software decoding",
+				"attempt", g.softResetCount, "limit", softResetLimit)
+			g.usingSWFallback = true
+		} else {
+			slog.Debug("H.264: soft decoder reset",
+				"attempt", g.softResetCount, "limit", softResetLimit,
+				"reason", reason.String())
+		}
 		g.h264dec.Close()
-		g.h264dec = newH264DecoderWithWatchdog(g.watchdogCh)
+		if g.usingSWFallback {
+			g.h264dec = newH264DecoderSWWithWatchdog(g.watchdogCh)
+		} else {
+			g.h264dec = newH264DecoderWithWatchdog(g.watchdogCh)
+		}
 		// Keep h264dec2 if healthy; tear it down if already broken so
 		// primeAuxDecoder can recreate it when the next stream2 IDR arrives,
 		// rather than spinning up a new VT session only to have it break again.
