@@ -17,6 +17,14 @@ import (
 // keeps the number of read(2) syscalls low without wasting memory.
 const readBufSize = 65536
 
+// tcpRecvBufSize is the OS-level TCP receive socket buffer size.
+// The default on most systems (~87 KiB on Linux, ~128 KiB on macOS) is too
+// small for high-resolution RDP sessions where the server can burst several
+// MiB of bitmap/H.264 data per frame.  512 KiB allows the kernel to buffer
+// more in-flight data, reducing stalls when the application goroutine is
+// briefly busy decoding a previous frame.
+const tcpRecvBufSize = 512 * 1024
+
 type SocketLayer struct {
 	conn       net.Conn
 	tlsConn    *tls.Conn
@@ -28,6 +36,11 @@ func NewSocketLayer(conn net.Conn, serverName string) *SocketLayer {
 	// Disable Nagle's algorithm so small DVC responses are sent immediately.
 	if tc, ok := conn.(*net.TCPConn); ok {
 		tc.SetNoDelay(true)
+		// Increase the OS receive buffer so the kernel can absorb large bitmap
+		// or H.264 bursts without dropping bytes while the decoder is busy.
+		// SetReadBuffer is a best-effort hint; ignore errors (e.g. restricted
+		// by the OS cap in /proc/sys/net/core/rmem_max on Linux).
+		_ = tc.SetReadBuffer(tcpRecvBufSize)
 	}
 	l := &SocketLayer{
 		conn:       conn,
