@@ -856,13 +856,16 @@ func (g *GfxHandler) maybeNotifyDecoderBroken() {
 	}
 	reason := g.h264dec.BrokenReason()
 	if reason == h264BrokenReasonNoIDR {
-		// If soft resets remain, try one before escalating to a full reconnect.
-		// The server may have been slow to send an IDR; recreating the decoder
-		// and requesting a fresh ForceRefresh gives it another chance.
-		if g.softResetCount < softResetLimit {
+		// Allow only one no-IDR soft reset before escalating to reconnect.
+		// ForceRefresh (SuppressOutput toggle) often fails to trigger a new
+		// AVC444 IDR from Windows servers; repeatedly retrying just prolongs
+		// the freeze.  One attempt gives the server a fair chance; after that
+		// a full reconnect is faster than waiting another 10+ seconds per try.
+		const softResetLimitNoIDR = 1
+		if g.softResetCount < softResetLimitNoIDR {
 			g.softResetCount++
 			slog.Debug("H.264: soft decoder reset (no-IDR)",
-				"attempt", g.softResetCount, "limit", softResetLimit,
+				"attempt", g.softResetCount, "limit", softResetLimitNoIDR,
 				"reason", reason.String())
 			g.h264dec.Close()
 			g.h264dec = newH264DecoderWithWatchdog(g.watchdogCh)
@@ -875,7 +878,7 @@ func (g *GfxHandler) maybeNotifyDecoderBroken() {
 			g.maybeRequestKeyframe()
 			return
 		}
-		slog.Debug("H.264: escalating to reconnect after no-IDR soft resets exhausted",
+		slog.Debug("H.264: escalating to reconnect after no-IDR soft reset exhausted",
 			"reason", reason.String())
 		g.decoderBrokenNotified = true
 		if g.onDecoderBroken != nil {
