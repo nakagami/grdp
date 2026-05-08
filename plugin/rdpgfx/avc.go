@@ -147,7 +147,16 @@ type avc444YPlane struct {
 	uvStride  int    // = (w+1)/2
 	w, h      int
 	fullRange bool
+	updatedAt time.Time // last time the cache was refreshed from a live main-stream decode
 }
+
+// avc444YStaleness is the maximum age of the Y-plane cache before LC=2
+// combines are suppressed.  When the main decoder (h264dec) stalls, the
+// Y-plane is frozen while incoming LC=2 frames carry fresh chroma — combining
+// stale luma with fresh chroma produces wrong colours.  500 ms is well above
+// the inter-frame interval at typical RDP frame rates (≥2 fps) yet much lower
+// than the 7-second hard stall threshold, so normal operation is unaffected.
+const avc444YStaleness = 500 * time.Millisecond
 
 // isH264Keyframe returns true when data contains an IDR NAL unit (type 5),
 // which marks the start of a new GOP (key frame).  The scan handles both
@@ -485,6 +494,7 @@ func (g *GfxHandler) updateAVC444YCache(i420 *h264FrameI420) {
 	g.avc444YPlane.w = w
 	g.avc444YPlane.h = h
 	g.avc444YPlane.fullRange = i420.FullRange
+	g.avc444YPlane.updatedAt = time.Now()
 }
 
 // combineAVC444v2BGRA implements the AVC444v2 chroma reconstruction defined in
@@ -705,6 +715,15 @@ func (g *GfxHandler) decodeAVC444LC2(stream2 *avc420Stream, destW, destH int) (d
 	if g.avc444YPlane.w == 0 {
 		slog.Debug("RDPGFX: AVC444 LC=2 skipped (no cached luma)")
 		g.maybeRequestKeyframe()
+		return
+	}
+	// Skip the combine when the Y cache is stale: the main decoder is likely
+	// stalling (VideoToolbox null frames).  Combining old luma with fresh chroma
+	// produces visible colour artefacts.  We suppress LC=2 output until h264dec
+	// delivers a fresh frame and refreshes the cache.
+	if !g.avc444YPlane.updatedAt.IsZero() && time.Since(g.avc444YPlane.updatedAt) > avc444YStaleness {
+		slog.Debug("RDPGFX: AVC444 LC=2 skipped (Y cache stale, main decoder likely stalling)",
+			"age", time.Since(g.avc444YPlane.updatedAt).Round(time.Millisecond))
 		return
 	}
 	i420dec, ok := g.h264dec2.(i420Decoder)

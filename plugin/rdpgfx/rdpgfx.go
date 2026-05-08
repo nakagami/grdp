@@ -428,10 +428,10 @@ func (g *GfxHandler) stopAuxDecoderBrokenTimer() {
 
 // maybeRenegotiateCapabilities is called from decodeLoop when watchdogCh fires.
 // If h264dec2 has been nil since the timer was armed AND the server has been
-// actively sending LC=2 frames while the screen is frozen, the only recovery
-// path is a full RDP reconnect: the server will never send an LC=0 IDR on its
-// own while in "LC=2 only" mode, and sending CAPS_ADVERTISE mid-session causes
-// the Windows server to immediately RST the TCP connection.
+// actively sending LC=2 frames, the only recovery path is a full RDP reconnect:
+// the server will never send an LC=0 IDR on its own while in "LC=2 only" mode,
+// and sending CAPS_ADVERTISE mid-session causes the Windows server to immediately
+// RST the TCP connection.
 func (g *GfxHandler) maybeRenegotiateCapabilities() {
 	if g.h264dec2 != nil {
 		return // aux decoder recovered while timer was in flight
@@ -445,16 +445,12 @@ func (g *GfxHandler) maybeRenegotiateCapabilities() {
 	if lastLC2NS == 0 || time.Since(time.Unix(0, lastLC2NS)) >= auxDecoderBrokenTimeout {
 		return
 	}
-	lastDecodedNS := g.lastDecodedFrame.Load()
-	if lastDecodedNS == 0 {
-		return
-	}
-	silentFor := time.Since(time.Unix(0, lastDecodedNS))
-	if silentFor < auxDecoderBrokenTimeout {
-		return
-	}
-	slog.Debug("H.264: aux decoder absent, server sending LC=2 only — triggering reconnect",
-		"silentFor", silentFor.Round(time.Millisecond))
+	// The timer firing is itself the auxDecoderBrokenTimeout signal.  Do not
+	// gate on lastDecodedFrame: the main decoder (h264dec) may still be active
+	// and continuously updating lastDecodedFrame even while the aux decoder
+	// (h264dec2) is broken, which would prevent this function from ever
+	// triggering a reconnect and permanently lose LC=2 chroma enhancement.
+	slog.Debug("H.264: aux decoder absent, server sending LC=2 — triggering reconnect")
 	g.decoderBrokenNotified = true
 	if g.onDecoderBroken != nil {
 		go g.onDecoderBroken()
