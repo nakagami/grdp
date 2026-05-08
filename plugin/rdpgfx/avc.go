@@ -267,10 +267,10 @@ func (g *GfxHandler) decodeAVC444(data []byte, destX, destY, destW, destH int) (
 	}
 
 	var frame *h264Frame
+	var i420out *h264FrameI420
 	if g.h264dec2 != nil {
 		// Cache luma for future LC=2 combine.
 		if i420dec, ok := g.h264dec.(i420Decoder); ok {
-			var i420out *h264FrameI420
 			frame, i420out, err = i420dec.DecodeWithI420(stream1.h264Data)
 			if err != nil {
 				slog.Warn("RDPGFX: H.264 decode error (AVC444)", "err", err)
@@ -290,9 +290,19 @@ func (g *GfxHandler) decodeAVC444(data []byte, destX, destY, destW, destH int) (
 		return nil, nil, false
 	}
 	if frame == nil {
-		g.maybeRequestKeyframe()
-		g.maybeNotifyDecoderBroken()
-		return nil, nil, false
+		if i420out == nil {
+			g.maybeRequestKeyframe()
+			g.maybeNotifyDecoderBroken()
+			return nil, nil, false
+		}
+		// I420 fast path: HW decoder returned planar I420 instead of BGRA.
+		// Convert to BGRA using BT.709 (AVC444 standard encoding) so the
+		// BGRA rendering path can continue normally.
+		bgra, _ := i420ToBGRA(i420out)
+		if bgra == nil {
+			return nil, nil, false
+		}
+		frame = &h264Frame{Data: bgra, Width: i420out.Width, Height: i420out.Height}
 	}
 	slog.Debug("RDPGFX: AVC444 decoded", "frameW", frame.Width, "frameH", frame.Height,
 		"destW", destW, "destH", destH, "h264Len", len(stream1.h264Data))
@@ -350,17 +360,21 @@ func (g *GfxHandler) decodeAVC420WithI420(data []byte, destX, destY, destW, dest
 			return
 		}
 	}
-	if frame == nil {
+	// I420 fast path: frame is nil but i420 is non-nil — decoder produced output
+	// via the direct NV12/YUV420P copy path.  Still counts as a successful decode.
+	if frame == nil && i420 == nil {
 		g.maybeRequestKeyframe()
 		g.maybeNotifyDecoderBroken()
 		slog.Debug("RDPGFX: H.264 decode returned nil frame (buffering?)")
 		return
 	}
-	slog.Debug("RDPGFX: AVC420 decoded (WithI420)", "frameW", frame.Width, "frameH", frame.Height,
-		"destW", destW, "destH", destH, "hasI420", i420 != nil,
-		"regions", len(stream.regions), "h264Len", len(stream.h264Data))
 	g.noteSuccessfulDecode()
-	decoded, pooled = cropBGRA(frame.Data, frame.Width, frame.Height, destW, destH)
+	if frame != nil {
+		slog.Debug("RDPGFX: AVC420 decoded (WithI420)", "frameW", frame.Width, "frameH", frame.Height,
+			"destW", destW, "destH", destH, "hasI420", i420 != nil,
+			"regions", len(stream.regions), "h264Len", len(stream.h264Data))
+		decoded, pooled = cropBGRA(frame.Data, frame.Width, frame.Height, destW, destH)
+	}
 	regions = stream.regions
 	return
 }
@@ -412,16 +426,20 @@ func (g *GfxHandler) decodeAVC444WithI420(data []byte, destX, destY, destW, dest
 			return
 		}
 	}
-	if frame == nil {
+	// I420 fast path: frame is nil but i420 is non-nil — decoder produced output
+	// via the direct NV12/YUV420P copy path.  Still counts as a successful decode.
+	if frame == nil && i420 == nil {
 		g.maybeRequestKeyframe()
 		g.maybeNotifyDecoderBroken()
 		return
 	}
-	slog.Debug("RDPGFX: AVC444 decoded (WithI420)", "frameW", frame.Width, "frameH", frame.Height,
-		"destW", destW, "destH", destH, "hasI420", i420 != nil, "h264Len", len(stream1.h264Data))
 	g.noteSuccessfulDecode()
-	decoded, pooled = cropBGRA(frame.Data, frame.Width, frame.Height, destW, destH)
-	regions = stream1.regions
+	if frame != nil {
+		slog.Debug("RDPGFX: AVC444 decoded (WithI420)", "frameW", frame.Width, "frameH", frame.Height,
+			"destW", destW, "destH", destH, "hasI420", i420 != nil, "h264Len", len(stream1.h264Data))
+		decoded, pooled = cropBGRA(frame.Data, frame.Width, frame.Height, destW, destH)
+		regions = stream1.regions
+	}
 
 	// For LC=0 frames prime h264dec2 with the auxiliary (chroma-upgrade) stream2.
 	// Always call even when h264dec2 is nil: primeAuxDecoder gates recreation on
@@ -546,6 +564,27 @@ func combineAVC444v2BGRA(
 				}
 			}
 			avc444bt709BGRA(Y, Cb, Cr, fullRange, outRow[col*4:])
+		}
+	}
+	return out, true
+}
+
+// i420ToBGRA converts a planar I420 frame to a packed BGRA buffer using BT.709
+// coefficients (matching AVC444 content encoding). Used when the I420 fast path
+// is active and a BGRA output is required by the rendering path.
+func i420ToBGRA(src *h264FrameI420) ([]byte, bool) {
+	if src == nil || src.Width <= 0 || src.Height <= 0 {
+		return nil, false
+	}
+	w, h := src.Width, src.Height
+	out := acquireBitmapBuf(w * h * 4)
+	for row := 0; row < h; row++ {
+		uvRow := row >> 1
+		for col := 0; col < w; col++ {
+			Y := src.Y[row*src.YStride+col]
+			U := src.U[uvRow*src.UStride+(col>>1)]
+			V := src.V[uvRow*src.VStride+(col>>1)]
+			avc444bt709BGRA(Y, U, V, src.FullRange, out[(row*w+col)*4:])
 		}
 	}
 	return out, true

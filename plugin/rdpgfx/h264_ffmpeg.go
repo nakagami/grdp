@@ -1205,7 +1205,10 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 		result = f
 	}
 
-	if result != nil {
+	// I420 fast path returns nil for the BGRA frame but still represents a
+	// successfully decoded frame.  Count it as success for health tracking.
+	gotFrame := result != nil || d.lastI420 != nil
+	if gotFrame {
 		d.lastSuccessTime = time.Now()
 		if d.useHW {
 			if !d.hwReady {
@@ -1250,7 +1253,7 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 				d.profMaxRecvNs = 0
 			}
 		}
-	} else {
+	} else { // !gotFrame
 		if d.useHW && d.hwReady {
 			stalledFor := time.Since(d.lastSuccessTime)
 			slog.Debug("H.264: HW null frame", "frozenFor", stalledFor,
@@ -1304,6 +1307,26 @@ func (d *ffmpegDecoder) convertFrame(regionHint []C.uint16_t, nRegions C.int) (*
 	w := srcFrame.width
 	h := srcFrame.height
 	srcFmt := C.enum_AVPixelFormat(srcFrame.format)
+
+	// Fast path: when I420 output is requested and the source pixel format is
+	// directly convertible to I420 (YUV420P, YUVJ420P, NV12), skip the
+	// YUV→BGRA conversion entirely.  The SDL2 IYUV texture render path does
+	// not need BGRA; eliminating the conversion saves roughly w*h*4 bytes of
+	// CPU writes per frame (≈8 MB at 1920×1080).
+	// Trade-off: blitToSurface will not be called for this frame, so the
+	// RDPGFX surface backing store will not reflect the H.264 content.
+	// SurfaceToSurface reads from this surface will see stale data, but in
+	// practice H.264-decoded surfaces are destination-only in normal sessions.
+	if d.outI420Enabled {
+		if srcFmt == C.AV_PIX_FMT_YUV420P || srcFmt == C.AV_PIX_FMT_YUVJ420P ||
+			srcFmt == C.AV_PIX_FMT_NV12 {
+			d.extractI420fromSrc(srcFrame)
+			if srcFrame == d.swFrame {
+				C.av_frame_unref(d.swFrame)
+			}
+			return nil, transferNs, nil
+		}
+	}
 
 	outSize := int(w) * int(h) * 4
 	// Borrow the next ring buffer instead of allocating fresh.  At 1920×1080

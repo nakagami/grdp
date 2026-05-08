@@ -1226,12 +1226,14 @@ func (g *GfxHandler) onWireToSurface1Decode(data []byte, skipHeavy bool) {
 			var i420 *h264FrameI420
 			decoded, i420, avcRegions, ownedAVC = g.decodeAVC420WithI420(bmpData, destX, destY, w, h)
 			owned = ownedAVC
-			if decoded != nil && i420 != nil {
-				blitToSurface(s, int(left), int(top), w, h, decoded)
-				g.onI420(destX, destY, w, h, i420.Y, i420.YStride, i420.U, i420.UStride, i420.V, i420.VStride)
-				if owned {
-					releaseBitmapBuf(decoded)
+			if i420 != nil {
+				if decoded != nil {
+					blitToSurface(s, int(left), int(top), w, h, decoded)
+					if owned {
+						releaseBitmapBuf(decoded)
+					}
 				}
+				g.onI420(destX, destY, w, h, i420.Y, i420.YStride, i420.U, i420.UStride, i420.V, i420.VStride)
 				return
 			}
 			// I420 unavailable (nil frame or unsupported format); fall through to BGRA emit.
@@ -1248,12 +1250,14 @@ func (g *GfxHandler) onWireToSurface1Decode(data []byte, skipHeavy bool) {
 			var i420 *h264FrameI420
 			decoded, i420, avcRegions, ownedAVC = g.decodeAVC444WithI420(bmpData, destX, destY, w, h)
 			owned = ownedAVC
-			if decoded != nil && i420 != nil {
-				blitToSurface(s, int(left), int(top), w, h, decoded)
-				g.onI420(destX, destY, w, h, i420.Y, i420.YStride, i420.U, i420.UStride, i420.V, i420.VStride)
-				if owned {
-					releaseBitmapBuf(decoded)
+			if i420 != nil {
+				if decoded != nil {
+					blitToSurface(s, int(left), int(top), w, h, decoded)
+					if owned {
+						releaseBitmapBuf(decoded)
+					}
 				}
+				g.onI420(destX, destY, w, h, i420.Y, i420.YStride, i420.U, i420.UStride, i420.V, i420.VStride)
 				return
 			}
 		} else {
@@ -1359,27 +1363,27 @@ func (g *GfxHandler) onWireToSurface2Decode(data []byte, skipHeavy bool) {
 		destY := int(s.outputY)
 		if g.onI420 != nil {
 			decoded, i420, avcRegions, ownedAVC := g.decodeAVC420WithI420(bmpData, destX, destY, w, h)
-			if decoded != nil {
-				if i420 != nil {
+			if i420 != nil {
+				if decoded != nil {
 					blitToSurface(s, 0, 0, w, h, decoded)
-					g.onI420(destX, destY, w, h, i420.Y, i420.YStride, i420.U, i420.UStride, i420.V, i420.VStride)
+					if ownedAVC {
+						releaseBitmapBuf(decoded)
+					}
+				}
+				g.onI420(destX, destY, w, h, i420.Y, i420.YStride, i420.U, i420.UStride, i420.V, i420.VStride)
+			} else if decoded != nil {
+				// I420 unavailable; fall back to BGRA emit.
+				if len(avcRegions) > 0 && shouldUseAVCRegions(avcRegions, w, h) {
+					g.blitAndEmitAVCRegions(s, 0, 0, w, h, decoded, avcRegions)
 					if ownedAVC {
 						releaseBitmapBuf(decoded)
 					}
 				} else {
-					// I420 unavailable; fall back to BGRA emit.
-					if len(avcRegions) > 0 && shouldUseAVCRegions(avcRegions, w, h) {
-						g.blitAndEmitAVCRegions(s, 0, 0, w, h, decoded, avcRegions)
-						if ownedAVC {
-							releaseBitmapBuf(decoded)
-						}
+					blitToSurface(s, 0, 0, w, h, decoded)
+					if ownedAVC {
+						g.emitBitmapPooled(s, 0, 0, w, h, decoded)
 					} else {
-						blitToSurface(s, 0, 0, w, h, decoded)
-						if ownedAVC {
-							g.emitBitmapPooled(s, 0, 0, w, h, decoded)
-						} else {
-							g.emitBitmap(s, 0, 0, w, h, decoded)
-						}
+						g.emitBitmap(s, 0, 0, w, h, decoded)
 					}
 				}
 			}
@@ -1406,26 +1410,26 @@ func (g *GfxHandler) onWireToSurface2Decode(data []byte, skipHeavy bool) {
 		destY := int(s.outputY)
 		if g.onI420 != nil {
 			decoded, i420, avcRegions, ownedAVC := g.decodeAVC444WithI420(bmpData, destX, destY, w, h)
-			if decoded != nil {
-				if i420 != nil {
+			if i420 != nil {
+				if decoded != nil {
 					blitToSurface(s, 0, 0, w, h, decoded)
-					g.onI420(destX, destY, w, h, i420.Y, i420.YStride, i420.U, i420.UStride, i420.V, i420.VStride)
+					if ownedAVC {
+						releaseBitmapBuf(decoded)
+					}
+				}
+				g.onI420(destX, destY, w, h, i420.Y, i420.YStride, i420.U, i420.UStride, i420.V, i420.VStride)
+			} else if decoded != nil {
+				if len(avcRegions) > 0 && shouldUseAVCRegions(avcRegions, w, h) {
+					g.blitAndEmitAVCRegions(s, 0, 0, w, h, decoded, avcRegions)
 					if ownedAVC {
 						releaseBitmapBuf(decoded)
 					}
 				} else {
-					if len(avcRegions) > 0 && shouldUseAVCRegions(avcRegions, w, h) {
-						g.blitAndEmitAVCRegions(s, 0, 0, w, h, decoded, avcRegions)
-						if ownedAVC {
-							releaseBitmapBuf(decoded)
-						}
+					blitToSurface(s, 0, 0, w, h, decoded)
+					if ownedAVC {
+						g.emitBitmapPooled(s, 0, 0, w, h, decoded)
 					} else {
-						blitToSurface(s, 0, 0, w, h, decoded)
-						if ownedAVC {
-							g.emitBitmapPooled(s, 0, 0, w, h, decoded)
-						} else {
-							g.emitBitmap(s, 0, 0, w, h, decoded)
-						}
+						g.emitBitmap(s, 0, 0, w, h, decoded)
 					}
 				}
 			}
