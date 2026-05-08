@@ -648,14 +648,24 @@ const avcHWEarlyFreezeThreshold = 3 * time.Second
 const avcHWEarlyFrameLimit = 50
 
 // avcHWRecoveryWindow is how long Decode() probes for pending output after
-// avcHWReadyFreezeThreshold is crossed.  VideoToolbox may legitimately stall
-// for 1-2 s at a GOP/IDR boundary while flushing its reference pipeline; a
-// 3 s probe window (added on top of the 7 s threshold) gives it up to 10 s
-// total before we declare the decoder broken and trigger a soft reset.
-// Keeping this window short minimises the visual freeze on genuine failures
-// since YouTube / gnome-remote-desktop sends a fresh IDR within 2 s of the
-// soft reset (either via ForceRefresh or a natural GOP boundary).
-const avcHWRecoveryWindow = 3 * time.Second
+// a stall is detected (either from avcHWReadyFreezeThreshold or from the
+// early null-frame count detector).  After this window, if VT has not
+// produced a real frame, the decoder is declared broken and a soft reset
+// is triggered.  1 s is sufficient: any frame VT had buffered will have
+// surfaced well within 1 s, and YouTube / gnome-remote-desktop delivers a
+// fresh IDR within ~2 s of the soft reset anyway.
+const avcHWRecoveryWindow = 1 * time.Second
+
+// avcHWNullFrameStallLimit is the number of consecutive null (blank) frames
+// the HW decoder may produce before triggering an early stall-probe.
+// VideoToolbox legitimately outputs a handful of null frames at IDR
+// boundaries while it rebuilds its reference pipeline (observed max: ~10
+// frames / ~300 ms at 30 fps).  90 consecutive null frames (≈ 3 s at
+// 30 fps) is well beyond any normal IDR warm-up and safely below the
+// ~5.75-second CGo avcodec_send_packet deadlock boundary, so the early
+// probe can safely skip avcodec_send_packet until VT recovers or the
+// avcHWRecoveryWindow expires and the decoder is marked broken.
+const avcHWNullFrameStallLimit = 90
 
 // keyframeWaitLimit is the maximum number of non-IDR packets we drop while
 // waiting for a keyframe after a decoder reset or flush.  gnome-remote-desktop
@@ -722,6 +732,7 @@ type ffmpegDecoder struct {
 	proceededWithoutKeyframe bool            // "proceed without keyframe" path was taken; AVERROR here means broken
 	stallProbeStart          time.Time       // wall-clock time we entered the stall recovery-probe window
 	stallTimer               *time.Timer     // fires after avcHWRecoveryWindow to mark broken independently of frame rate
+	hwConsecNullFrames       int             // consecutive HW null frames since last real frame; for early stall detection
 	kfWaitTimer              *time.Timer     // fires after keyframeWaitTimeout to mark broken independently of frame rate
 	watchdogCh               chan<- struct{} // signals GfxHandler.decodeLoop to call maybeNotifyDecoderBroken
 
@@ -1254,6 +1265,49 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 		}
 	}
 	if d.useHW && d.hwReady && !d.lastSuccessTime.IsZero() {
+		// Early probe: the null-frame count detector may have set stallProbeStart
+		// before stalledFor reached readyThreshold.  Handle it here so we skip
+		// avcodec_send_packet during the probe window even while stalledFor is
+		// still below the 7-second CGo-safe threshold.
+		if !d.stallProbeStart.IsZero() {
+			readyThreshold := avcHWReadyFreezeThreshold
+			if d.hwSentCount < avcHWEarlyFrameLimit {
+				readyThreshold = avcHWEarlyFreezeThreshold
+			}
+			if stalledFor := time.Since(d.lastSuccessTime); stalledFor < readyThreshold {
+				// Probe active but main threshold not yet crossed.  Try to drain
+				// a frame that VT may have buffered; if found the stall was
+				// transient and we resume normally.
+				if C.avcodec_receive_frame(d.codecCtx, d.frame) >= 0 {
+					C.av_frame_unref(d.frame)
+					d.lastSuccessTime = time.Now()
+					d.hwConsecNullFrames = 0
+					d.stallProbeStart = time.Time{}
+					if d.stallTimer != nil {
+						d.stallTimer.Stop()
+						d.stallTimer = nil
+					}
+					slog.Debug("H.264: HW decoder recovered during early probe (drain found frame)",
+						"hwSentCount", d.hwSentCount)
+					// Fall through to send the current packet normally.
+				} else if probedFor := time.Since(d.stallProbeStart); probedFor >= avcHWRecoveryWindow {
+					slog.Debug("H.264: HW decoder early-probe timed out, marking broken",
+						"probedFor", probedFor.Round(time.Second),
+						"frozenFor", stalledFor.Round(time.Second),
+						"hwSentCount", d.hwSentCount)
+					d.markBroken(h264BrokenReasonHWStall)
+					return nil, nil
+				} else {
+					// Still inside probe window: skip send_packet to avoid
+					// feeding the stalled VT pipeline.
+					return nil, nil
+				}
+			}
+			// else: stalledFor >= readyThreshold — fall through to the
+			// threshold-based block below which also handles the probe.
+		}
+	}
+	if d.useHW && d.hwReady && !d.lastSuccessTime.IsZero() {
 		readyThreshold := avcHWReadyFreezeThreshold
 		if d.hwSentCount < avcHWEarlyFrameLimit {
 			readyThreshold = avcHWEarlyFreezeThreshold
@@ -1378,6 +1432,7 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 		if d.useHW {
 			d.hwFirstSendTime = time.Time{} // restart stall clock after IDR
 			d.hwSentCount = 0
+			d.hwConsecNullFrames = 0
 			if !d.hwReady && prev {
 				// We gave up waiting for an IDR and tried a P-frame anyway, and
 				// VideoToolbox rejected it.  There is no further recovery possible
@@ -1430,6 +1485,7 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 	gotFrame := result != nil || d.lastI420 != nil || d.lastNV12 != nil
 	if gotFrame {
 		d.lastSuccessTime = time.Now()
+		d.hwConsecNullFrames = 0
 		if d.useHW {
 			if !d.hwReady {
 				slog.Debug("H.264: HW decoder produced first frame",
@@ -1476,8 +1532,25 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 	} else { // !gotFrame
 		if d.useHW && d.hwReady {
 			stalledFor := time.Since(d.lastSuccessTime)
+			d.hwConsecNullFrames++
 			slog.Debug("H.264: HW null frame", "frozenFor", stalledFor,
 				"hwSentCount", d.hwSentCount)
+			// Early stall probe: if we have accumulated many consecutive null
+			// frames (well before the 7-second CGo-safe threshold), enter the
+			// probe window now.  This reduces visible freeze time from ~10 s to
+			// ~4 s for a genuine VideoToolbox stall.
+			if d.hwConsecNullFrames >= avcHWNullFrameStallLimit && d.stallProbeStart.IsZero() {
+				slog.Debug("H.264: HW decoder early stall detected (null frame count), entering probe",
+					"consecNullFrames", d.hwConsecNullFrames,
+					"frozenFor", stalledFor.Round(time.Millisecond),
+					"hwSentCount", d.hwSentCount)
+				d.stallProbeStart = time.Now()
+				d.stallTimer = time.AfterFunc(avcHWRecoveryWindow, func() {
+					d.timerBrokenReason.Store(int32(h264BrokenReasonHWStall))
+					d.timerBroken.Store(true)
+					d.signalWatchdog()
+				})
+			}
 			// Safety valve: if the pre-flight probe window is NOT active and
 			// the decoder has been silent past the threshold, VideoToolbox is
 			// genuinely stuck.  In probe mode the pre-flight block (above) is
