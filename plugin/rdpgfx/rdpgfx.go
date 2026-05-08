@@ -208,9 +208,18 @@ type GfxHandler struct {
 	// avc444YPlane caches the luma (Y) and half-res chroma (U/V) planes from the
 	// last main-stream AVC444 decode, for use when an LC=2 chroma-upgrade frame arrives.
 	avc444YPlane avc444YPlane
+	// avc444IDRYPlane caches the luma and half-res chroma planes from the most
+	// recently decoded stream1 IDR frame.  When a standalone LC=2 packet carries
+	// a stream2 IDR, it should be combined with the matching stream1 IDR luma
+	// (not the latest P-frame luma stored in avc444YPlane), so we keep this
+	// separate snapshot.
+	avc444IDRYPlane avc444YPlane
 	// lc2SampleLogged is set after the first LC=2 combine output has been
-	// sampled for green/pink colour diagnostics.
-	lc2SampleLogged bool
+	// sampled for green/pink colour diagnostics.  Reset on each stream1 IDR so
+	// we can observe the combine quality at every GOP boundary.
+	lc2SampleLogged      bool
+	lc2PFrameSampleLogged bool // logged first P-frame LC=2 combine after IDR
+	lc0SampleLogged      bool // logged first LC=0 IDR frame pixel samples
 	// framesDecoded is accessed from both read and decode goroutines.
 	framesDecoded atomic.Uint32
 	sendFn        func(data []byte)
@@ -1068,6 +1077,7 @@ func (g *GfxHandler) onResetGraphics(data []byte) {
 		g.h264dec2 = newH264DecoderSW()
 	}
 	g.avc444YPlane = avc444YPlane{}
+	g.avc444IDRYPlane = avc444YPlane{}
 }
 
 func (g *GfxHandler) onCreateSurface(data []byte) {

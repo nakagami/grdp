@@ -258,6 +258,14 @@ func (g *GfxHandler) decodeAVC444(data []byte, destX, destY, destW, destH int) (
 	var frame *h264Frame
 	var i420out *h264FrameI420
 	var err error
+	isIDR := g.h264dec2 != nil && isH264Keyframe(stream1.h264Data)
+	if isIDR {
+		// Reset per-GOP diagnostic flags so the LC=0 IDR and LC=2 combine
+		// after this IDR are sampled again for colour diagnostics.
+		g.lc2SampleLogged = false
+		g.lc2PFrameSampleLogged = false
+		g.lc0SampleLogged = false
+	}
 	if g.h264dec2 != nil {
 		// Cache luma for future LC=2 combine.
 		if i420dec, ok := g.h264dec.(i420Decoder); ok {
@@ -268,6 +276,14 @@ func (g *GfxHandler) decodeAVC444(data []byte, destX, destY, destW, destH int) (
 			}
 			if i420out != nil {
 				g.updateAVC444YCache(i420out)
+				if isIDR {
+					// Snapshot the IDR luma separately.  When a standalone
+					// LC=2 packet carries a stream2 IDR, the chroma data
+					// belongs to this GOP's first frame, so we must combine
+					// it with the IDR luma — not with a later P-frame's luma
+					// that has since overwritten avc444YPlane.
+					g.copyAVC444YToIDRCache()
+				}
 			}
 		} else {
 			frame, err = g.h264dec.Decode(stream1.h264Data)
@@ -293,6 +309,31 @@ func (g *GfxHandler) decodeAVC444(data []byte, destX, destY, destW, destH int) (
 			return nil, nil, false
 		}
 		frame = &h264Frame{Data: bgra, Width: i420out.Width, Height: i420out.Height}
+	}
+	if !g.lc0SampleLogged && isIDR {
+		g.lc0SampleLogged = true
+		bgraData := frame.Data
+		w, h := frame.Width, frame.Height
+		for _, p := range [][2]int{{960, 400}, {480, 400}, {1440, 400}, {960, 600}, {100, 100}} {
+			px, py := p[0], p[1]
+			if px >= w || py >= h {
+				continue
+			}
+			off := (py*w + px) * 4
+			if off+3 < len(bgraData) {
+				var rawY, rawU, rawV byte
+				if i420out != nil && py < i420out.Height && px < i420out.Width {
+					rawY = i420out.Y[py*i420out.YStride+px]
+					rawU = i420out.U[(py/2)*i420out.UStride+(px/2)]
+					rawV = i420out.V[(py/2)*i420out.VStride+(px/2)]
+				}
+				slog.Debug("H.264: pixel sample (LC=0 IDR frame)",
+					"x", px, "y", py,
+					"rawY", rawY, "rawU", rawU, "rawV", rawV,
+					"fullRange", i420out != nil && i420out.FullRange,
+					"B", bgraData[off], "G", bgraData[off+1], "R", bgraData[off+2])
+			}
+		}
 	}
 	slog.Debug("RDPGFX: AVC444 decoded", "frameW", frame.Width, "frameH", frame.Height,
 		"destW", destW, "destH", destH, "h264Len", len(stream1.h264Data))
@@ -534,6 +575,39 @@ func (g *GfxHandler) updateAVC444YCache(i420 *h264FrameI420) {
 	g.avc444YPlane.updatedAt = time.Now()
 }
 
+// copyAVC444YToIDRCache copies the current avc444YPlane content into
+// avc444IDRYPlane.  Called immediately after updating avc444YPlane from a
+// stream1 IDR decode, so the IDR luma snapshot stays separate from any
+// subsequent P-frame luma updates.
+func (g *GfxHandler) copyAVC444YToIDRCache() {
+	src := &g.avc444YPlane
+	dst := &g.avc444IDRYPlane
+	if cap(dst.data) < len(src.data) {
+		dst.data = make([]byte, len(src.data))
+	} else {
+		dst.data = dst.data[:len(src.data)]
+	}
+	if cap(dst.u) < len(src.u) {
+		dst.u = make([]byte, len(src.u))
+	} else {
+		dst.u = dst.u[:len(src.u)]
+	}
+	if cap(dst.v) < len(src.v) {
+		dst.v = make([]byte, len(src.v))
+	} else {
+		dst.v = dst.v[:len(src.v)]
+	}
+	copy(dst.data, src.data)
+	copy(dst.u, src.u)
+	copy(dst.v, src.v)
+	dst.stride = src.stride
+	dst.uvStride = src.uvStride
+	dst.w = src.w
+	dst.h = src.h
+	dst.fullRange = src.fullRange
+	dst.updatedAt = src.updatedAt
+}
+
 // combineAVC444v2BGRA implements the AVC444v2 chroma reconstruction defined in
 // [MS-RDPEGFX 3.3.8.3.3] ("YUV420p Stream Combination for YUV444v2 mode").
 //
@@ -684,14 +758,20 @@ func clampByte(v int) byte {
 // can decode the subsequent LC=2 P-frames without waiting forever for a
 // keyframe that already passed.
 func (g *GfxHandler) primeAuxDecoder(h264Data []byte) {
+	// Only process IDR frames.  Standalone LC=2 P-frames are decoded
+	// exclusively by decodeAVC444LC2 and form their own H.264 reference chain
+	// (IDR → P1 → P2 → …).  If primeAuxDecoder also fed LC=0's stream2
+	// P-frames to h264dec2, the DPB would be advanced ahead of where the
+	// standalone LC=2 stream expects its reference, causing the first P-frame
+	// to be decoded against the wrong reference and producing Cb=0 (green tint).
+	if !h264PacketHasIDR(h264Data) {
+		return
+	}
 	if g.h264dec2 == nil {
 		// Aux decoder was torn down after a VT stall.  Recreate it only when
 		// the incoming stream2 carries an IDR so the new VT session starts with
 		// a clean reference frame.  This avoids the rapid create/destroy cycle
 		// that stresses macOS VideoToolbox and destabilises the main decoder.
-		if !h264PacketHasIDR(h264Data) {
-			return
-		}
 		slog.Debug("H.264: recreating aux decoder on stream2 IDR")
 		g.h264dec2 = newH264DecoderSW()
 		g.stopAuxDecoderBrokenTimer() // LC=0 IDR arrived; cancel recovery timer
@@ -807,39 +887,120 @@ func (g *GfxHandler) decodeAVC444LC2(stream2 *avc420Stream, destW, destH int) (d
 		}
 		return
 	}
-	w, h := g.avc444YPlane.w, g.avc444YPlane.h
+	// Select the luma plane for the combine.  When stream2 carries an IDR its
+	// chroma data corresponds to the GOP-boundary frame, not to the latest
+	// P-frame.  Using avc444IDRYPlane (a snapshot of the luma at the moment
+	// stream1's IDR was decoded) avoids combining mismatched luma/chroma planes
+	// and eliminates the transient green tint that appears at GOP boundaries
+	// when the server delivers the stream2 IDR as a standalone LC=2 packet.
+	// Fall back to avc444YPlane when no IDR snapshot is available (e.g. the
+	// VideoToolbox pipeline delayed the IDR output past the P-frame boundary).
+	stream2IsIDR := isH264Keyframe(stream2.h264Data)
+	yp := &g.avc444YPlane
+	if stream2IsIDR && g.avc444IDRYPlane.w > 0 {
+		yp = &g.avc444IDRYPlane
+		slog.Debug("RDPGFX: AVC444 LC=2 IDR combine using IDR luma snapshot")
+	}
+	w, h := yp.w, yp.h
 	if i420aux.Width < w || i420aux.Height < h {
 		slog.Debug("RDPGFX: AVC444 LC=2 aux frame too small",
 			"auxW", i420aux.Width, "auxH", i420aux.Height, "lumaW", w, "lumaH", h)
 		return
 	}
 	combined, _ := combineAVC444v2BGRA(
-		g.avc444YPlane.data, g.avc444YPlane.stride,
-		g.avc444YPlane.u, g.avc444YPlane.v, g.avc444YPlane.uvStride,
+		yp.data, yp.stride,
+		yp.u, yp.v, yp.uvStride,
 		i420aux,
-		g.avc444YPlane.fullRange,
+		yp.fullRange,
 		w, h,
 	)
 	if combined == nil {
 		return
 	}
-	if !g.lc2SampleLogged {
-		g.lc2SampleLogged = true
-		for _, p := range [][2]int{{100, 50}, {500, 50}, {960, 50}, {1400, 50}, {960, 200}} {
-			px, py := p[0], p[1]
-			if px >= w || py >= h {
-				continue
-			}
-			off := (py*w + px) * 4
-			if off+3 < len(combined) {
-				slog.Debug("H.264: pixel sample (LC=2 combine)",
-					"x", px, "y", py,
-					"Y1", g.avc444YPlane.data[py*g.avc444YPlane.stride+px],
-					"Cb", i420aux.U[(py/2)*i420aux.UStride+px/2],
-					"Cr", i420aux.V[(py/2)*i420aux.VStride+px/2],
-					"B", combined[off], "G", combined[off+1], "R", combined[off+2])
+	// lc2Sample logs the actual Cb/Cr values used by combineAVC444v2BGRA for
+	// position (px,py), which depend on the B-area that pixel falls into.
+	halfW := w / 2
+	quarterW := w / 4
+	lc2Sample := func(px, py int) {
+		if px >= w || py >= h {
+			return
+		}
+		off := (py*w + px) * 4
+		if off+3 >= len(combined) {
+			return
+		}
+		uvRow := py >> 1
+		var actualCb, actualCr byte
+		var barea string
+		if px&1 == 1 {
+			// B4/B5: odd column — Cb/Cr packed in stream2 Y plane.
+			barea = "B4/B5"
+			k := px >> 1
+			auxYRow := i420aux.Y[py*i420aux.YStride:]
+			actualCb = auxYRow[k]
+			actualCr = auxYRow[halfW+k]
+		} else if py&1 == 0 {
+			// B2/B3: even column, even row — from stream1 cached chroma.
+			barea = "B2/B3"
+			actualCb = yp.u[uvRow*yp.uvStride+(px>>1)]
+			actualCr = yp.v[uvRow*yp.uvStride+(px>>1)]
+		} else {
+			k2 := px >> 2
+			if px&2 == 0 {
+				// B6/B7: even column (col%4==0), odd row.
+				barea = "B6/B7"
+				actualCb = i420aux.U[uvRow*i420aux.UStride+k2]
+				actualCr = i420aux.U[uvRow*i420aux.UStride+quarterW+k2]
+			} else {
+				// B8/B9: even column (col%4==2), odd row.
+				barea = "B8/B9"
+				actualCb = i420aux.V[uvRow*i420aux.VStride+k2]
+				actualCr = i420aux.V[uvRow*i420aux.VStride+quarterW+k2]
 			}
 		}
+		slog.Debug("H.264: pixel sample (LC=2 combine)",
+			"x", px, "y", py,
+			"area", barea,
+			"isIDR", stream2IsIDR,
+			"usedIDRSnapshot", yp == &g.avc444IDRYPlane,
+			"Y1", yp.data[py*yp.stride+px],
+			"Cb", actualCb, "Cr", actualCr,
+			"B", combined[off], "G", combined[off+1], "R", combined[off+2])
+	}
+	if !g.lc2SampleLogged {
+		g.lc2SampleLogged = true
+		// B2/B3 (even col, even row)
+		lc2Sample(100, 50)
+		lc2Sample(500, 50)
+		// B4/B5 (odd col) — most important for diagnosing tint artifacts
+		lc2Sample(101, 50)
+		lc2Sample(501, 50)
+		lc2Sample(961, 50)
+		// B6/B7 (col%4==0, odd row)
+		lc2Sample(100, 51)
+		lc2Sample(500, 51)
+		// B8/B9 (col%4==2, odd row)
+		lc2Sample(102, 51)
+		lc2Sample(502, 51)
+		// video area — all four B-areas near the same spot
+		lc2Sample(960, 600)
+		lc2Sample(961, 600)
+		lc2Sample(960, 601)
+		lc2Sample(962, 601)
+	} else if !g.lc2PFrameSampleLogged && !stream2IsIDR {
+		g.lc2PFrameSampleLogged = true
+		lc2Sample(100, 50)
+		lc2Sample(101, 50)
+		lc2Sample(100, 51)
+		lc2Sample(102, 51)
+		lc2Sample(500, 50)
+		lc2Sample(501, 50)
+		lc2Sample(960, 400)
+		lc2Sample(961, 400)
+		lc2Sample(960, 401)
+		lc2Sample(962, 401)
+		lc2Sample(960, 600)
+		lc2Sample(961, 600)
 	}
 	decoded, pooled = cropBGRA(combined, w, h, destW, destH)
 	if w == destW && h == destH {
