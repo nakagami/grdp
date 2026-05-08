@@ -971,6 +971,13 @@ func newH264DecoderInternal(watchdogCh chan<- struct{}, forceSW bool) h264Decode
 		// preceding frame, so this is safe.  VideoToolbox (HW path) has its
 		// own zero-latency output mechanism and does not need this.
 		codecCtx.refs = 1
+		// Use slice-level threading only.  Frame-level threading (the FFmpeg
+		// default) introduces a one-frame reorder delay that conflicts with
+		// AV_CODEC_FLAG_LOW_DELAY and causes each decoded frame to arrive one
+		// frame late — effectively doubling input latency.  Slice threading
+		// parallelises within a single frame with no added latency, which is
+		// beneficial when the server encodes multiple slices per frame.
+		codecCtx.thread_type = C.FF_THREAD_SLICE
 	}
 
 	if C.avcodec_open2(codecCtx, codec, nil) < 0 {
