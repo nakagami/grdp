@@ -627,6 +627,26 @@ const avcFreezeThreshold = 6 * time.Second
 // marked broken.
 const avcHWReadyFreezeThreshold = 7 * time.Second
 
+// avcHWEarlyFreezeThreshold is a shorter stall threshold applied during the
+// first avcHWEarlyFrameLimit packets sent to the HW decoder after each
+// decoder initialisation or flush.  VideoToolbox exhibits a characteristic
+// stall pattern at RDP session start (and after a forced flush): it processes
+// a small burst of frames, then freezes for 8+ seconds without recovering.
+// The normal 7 s threshold is designed for mid-session IDR stalls that
+// self-resolve in 2-3 s; in the early phase a genuine VT stall is
+// distinguishable because it persists well beyond 3 s.  Using a shorter
+// threshold here reduces the visible freeze by ~4 s.
+const avcHWEarlyFreezeThreshold = 3 * time.Second
+
+// avcHWEarlyFrameLimit is the number of packets sent to the HW decoder
+// (hwSentCount) below which avcHWEarlyFreezeThreshold is used instead of
+// avcHWReadyFreezeThreshold.  hwSentCount resets to zero on every
+// avcodec_send_packet failure (decoder flush), so this threshold also covers
+// the early window after an in-session flush.  50 packets at 30 fps ≈ 1.7 s,
+// comfortably covering the unstable session-start window without interfering
+// with normal mid-session IDR stalls.
+const avcHWEarlyFrameLimit = 50
+
 // avcHWRecoveryWindow is how long Decode() probes for pending output after
 // avcHWReadyFreezeThreshold is crossed.  VideoToolbox may legitimately stall
 // for 1-2 s at a GOP/IDR boundary while flushing its reference pipeline; a
@@ -1171,12 +1191,16 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 		}
 	}
 	if d.useHW && d.hwReady && !d.lastSuccessTime.IsZero() {
-		if stalledFor := time.Since(d.lastSuccessTime); stalledFor >= avcHWReadyFreezeThreshold {
+		readyThreshold := avcHWReadyFreezeThreshold
+		if d.hwSentCount < avcHWEarlyFrameLimit {
+			readyThreshold = avcHWEarlyFreezeThreshold
+		}
+		if stalledFor := time.Since(d.lastSuccessTime); stalledFor >= readyThreshold {
 			// If no packet had arrived since the previous Decode() call during
 			// the apparent stall, the server was simply idle (e.g. screen was
 			// static).  Reset the stall clock so we don't misfire on the first
 			// packet after a server-side pause.
-			if prevReceiveTime.IsZero() || now.Sub(prevReceiveTime) >= avcHWReadyFreezeThreshold {
+			if prevReceiveTime.IsZero() || now.Sub(prevReceiveTime) >= readyThreshold {
 				slog.Debug("H.264: HW decoder stall clock reset (server was idle)",
 					"idleFor", stalledFor, "hwSentCount", d.hwSentCount)
 				d.lastSuccessTime = now
