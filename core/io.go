@@ -37,7 +37,7 @@ func ReadUint16LE(r io.Reader) (uint16, error) {
 	var buf [2]byte
 	_, err := io.ReadFull(r, buf[:])
 	if err != nil {
-		return 0, nil
+		return 0, err
 	}
 	return binary.LittleEndian.Uint16(buf[:]), nil
 }
@@ -46,7 +46,7 @@ func ReadUint16BE(r io.Reader) (uint16, error) {
 	var buf [2]byte
 	_, err := io.ReadFull(r, buf[:])
 	if err != nil {
-		return 0, nil
+		return 0, err
 	}
 	return binary.BigEndian.Uint16(buf[:]), nil
 }
@@ -55,7 +55,7 @@ func ReadUInt32LE(r io.Reader) (uint32, error) {
 	var buf [4]byte
 	_, err := io.ReadFull(r, buf[:])
 	if err != nil {
-		return 0, nil
+		return 0, err
 	}
 	return binary.LittleEndian.Uint32(buf[:]), nil
 }
@@ -64,7 +64,7 @@ func ReadUInt32BE(r io.Reader) (uint32, error) {
 	var buf [4]byte
 	_, err := io.ReadFull(r, buf[:])
 	if err != nil {
-		return 0, nil
+		return 0, err
 	}
 	return binary.BigEndian.Uint32(buf[:]), nil
 }

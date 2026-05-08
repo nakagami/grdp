@@ -65,7 +65,7 @@ type RdpClient struct {
 	// stored callbacks for re-registration on reconnect
 	onErrorFn         func(e error)
 	onCloseFn         func()
-	onSuccesFn        func()
+	onSuccessFn        func()
 	onReadyFn         func()
 	onBitmapPaintFn   func([]Bitmap)
 	onPointerHideFn   func()
@@ -583,10 +583,10 @@ func (g *RdpClient) OnClose(f func()) *RdpClient {
 	return g
 }
 
-func (g *RdpClient) OnSucces(f func()) *RdpClient {
-	g.onSuccesFn = f
-	if g.pdu != nil {
-		g.pdu.On("succes", f)
+func (g *RdpClient) OnSuccess(f func()) *RdpClient {
+	g.onSuccessFn = f
+	if g.sec != nil {
+		g.sec.On("success", f)
 	}
 	return g
 }
@@ -1109,8 +1109,8 @@ func (g *RdpClient) reregisterCallbacks() {
 	if g.onCloseFn != nil {
 		g.OnClose(g.onCloseFn)
 	}
-	if g.onSuccesFn != nil {
-		g.OnSucces(g.onSuccesFn)
+	if g.onSuccessFn != nil {
+		g.OnSuccess(g.onSuccessFn)
 	}
 	if g.onReadyFn != nil {
 		g.OnReady(g.onReadyFn)

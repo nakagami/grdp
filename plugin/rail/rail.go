@@ -82,7 +82,7 @@ func (h *RailPDUHeader) serialize() []byte {
 }
 
 func (c *RailClient) sendData(mType uint16, ln int, s []byte) {
-	slog.Debug("sendData", ln, "s_length", len(s), "data:", hex.EncodeToString(s))
+	slog.Debug("sendData", "ln", ln, "s_length", len(s), "data", hex.EncodeToString(s))
 	header := NewRailPDUHeader(mType, uint16(ln))
 
 	b := &bytes.Buffer{}
@@ -93,7 +93,7 @@ func (c *RailClient) sendData(mType uint16, ln int, s []byte) {
 }
 
 func (c *RailClient) Send(s []byte) (int, error) {
-	slog.Debug("len:", len(s), "data:", hex.EncodeToString(s))
+	slog.Debug("send", "len", len(s), "data", hex.EncodeToString(s))
 	name, _ := c.GetType()
 	return c.w.SendToChannel(name, s)
 }
@@ -105,15 +105,15 @@ func (c *RailClient) GetType() (string, uint32) {
 }
 
 func (c *RailClient) Process(s []byte) {
-	slog.Debug("recv:", hex.EncodeToString(s))
+	slog.Debug("recv", "data", hex.EncodeToString(s))
 	r := bytes.NewReader(s)
 	msgType, _ := core.ReadUint16LE(r)
 	length, _ := core.ReadUint16LE(r)
 
-	slog.Debug(fmt.Sprintf("rail: type=0x%x length=%d, all=%d", msgType, length, r.Len()))
+	slog.Debug("rail", "type", fmt.Sprintf("0x%x", msgType), "length", length, "remaining", r.Len())
 
 	b, _ := core.ReadBytes(int(length), r)
-	slog.Debug("b:", hex.EncodeToString(b))
+	slog.Debug("recv body", "data", hex.EncodeToString(b))
 
 	switch msgType {
 	case TS_RAIL_ORDER_HANDSHAKE:
@@ -127,14 +127,14 @@ func (c *RailClient) Process(s []byte) {
 		c.processExecResult(b)
 
 	default:
-		slog.Error(fmt.Sprintf("type 0x%x not supported", msgType))
+		slog.Error("type not supported", "msgType", fmt.Sprintf("0x%x", msgType))
 	}
 }
 
 func (c *RailClient) processOrderHandshake(b []byte) {
 	r := bytes.NewReader(b)
 	buildNumber, _ := core.ReadUInt32LE(r)
-	slog.Debug("buildNumber:", buildNumber)
+	slog.Debug("processOrderHandshake", "buildNumber", buildNumber)
 
 	//send client info
 	c.sendClientStatus()
@@ -419,7 +419,7 @@ func (c *RailClient) processOrderSysparam(b []byte) {
 	r := bytes.NewReader(b)
 	systemParam, _ := core.ReadUInt32LE(r)
 	body, _ := core.ReadUInt8(r)
-	slog.Debug(fmt.Sprintf("systemParam:0x%x, body:%d", systemParam, body))
+	slog.Debug("processOrderSysparam", "systemParam", fmt.Sprintf("0x%x", systemParam), "body", body)
 }
 
 const (
@@ -447,6 +447,6 @@ func (c *RailClient) processExecResult(b []byte) {
 	core.ReadUint16LE(r)
 	exeOrFileLength, _ := core.ReadUint16LE(r)
 	exeOrFile, _ := core.ReadBytes(r.Len(), r)
-	slog.Debug("flags:", flags, "execResult:", execResult, "rawResult:", rawResult)
-	slog.Debug("length:", exeOrFileLength, "file:", core.UnicodeDecode(exeOrFile))
+	slog.Debug("processExecResult", "flags", flags, "execResult", execResult, "rawResult", rawResult)
+	slog.Debug("processExecResult", "length", exeOrFileLength, "file", core.UnicodeDecode(exeOrFile))
 }

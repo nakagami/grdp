@@ -291,7 +291,7 @@ func uiRdp(hostPort, domain, user, password string, width, height int, keyboardT
 		slog.Debug("on error", "err", e)
 	}).OnClose(func() {
 		slog.Debug("on close")
-	}).OnSucces(func() {
+	}).OnSuccess(func() {
 		slog.Debug("on success")
 	}).OnReady(func() {
 		slog.Debug("on ready")

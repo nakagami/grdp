@@ -123,7 +123,7 @@ func (c *CliprdrClient) processMonitorReady(b []byte) {
 
 func (c *CliprdrClient) processFormatList(b []byte) {
 	EmptyClipboard()
-	fl, _ := c.readForamtList(b)
+	fl, _ := c.readFormatList(b)
 	slog.Debug("numFormats", "count", fl.NumFormats)
 	c.sendFormatListResponse(CB_RESPONSE_OK)
 }
@@ -214,13 +214,13 @@ func (c *CliprdrClient) sendFormatListPDU() {
 	sendClipPDU(c.w, CB_FORMAT_LIST, 0, body.Bytes())
 }
 
-func (c *CliprdrClient) readForamtList(b []byte) (*CliprdrFormatList, bool) {
+func (c *CliprdrClient) readFormatList(b []byte) (*CliprdrFormatList, bool) {
 	r := bytes.NewReader(b)
 	fs := make([]CliprdrFormat, 0, 20)
 	var numFormats uint32 = 0
 	c.formatIdMap = make(map[uint32]uint32, 0)
 	for r.Len() > 0 {
-		foramtId, _ := core.ReadUInt32LE(r)
+		formatId, _ := core.ReadUInt32LE(r)
 		bs := make([]uint16, 0, 20)
 		ln := r.Len()
 		for j := 0; j < ln; j++ {
@@ -231,17 +231,17 @@ func (c *CliprdrClient) readForamtList(b []byte) (*CliprdrFormatList, bool) {
 			bs = append(bs, b)
 		}
 		name := string(utf16.Decode(bs))
-		slog.Debug(fmt.Sprintf("Format:%d Name:<%s>", foramtId, name))
+		slog.Debug(fmt.Sprintf("Format:%d Name:<%s>", formatId, name))
 		if name != "" {
 			localId := RegisterClipboardFormat(name)
-			slog.Debug("format mapping", "local", localId, "remote", foramtId)
-			c.formatIdMap[localId] = foramtId
+			slog.Debug("format mapping", "local", localId, "remote", formatId)
+			c.formatIdMap[localId] = formatId
 		} else {
-			c.formatIdMap[foramtId] = foramtId
+			c.formatIdMap[formatId] = formatId
 		}
 
 		numFormats++
-		fs = append(fs, CliprdrFormat{foramtId, name})
+		fs = append(fs, CliprdrFormat{formatId, name})
 	}
 
 	return &CliprdrFormatList{numFormats, fs}, false
