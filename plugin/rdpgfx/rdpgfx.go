@@ -266,6 +266,12 @@ type GfxHandler struct {
 	// flag is true, avoiding repeated VideoToolbox stalls that would
 	// otherwise trigger a full RDP reconnect.
 	usingSWFallback bool
+	// queueDepthHint is a minimum queueDepth to report in FRAME_ACKNOWLEDGE
+	// PDUs.  A higher value makes the server believe the client has a larger
+	// decode backlog, causing it to slow down or reduce encoding quality.
+	// 0 means "report the real queue length" (default, no throttling).
+	// See SetQueueDepthHint.
+	queueDepthHint atomic.Uint32
 	// onH264Raw is called with raw H.264 NAL unit data when h264dec is nil
 	// (e.g. WASM builds without CGo).  The caller can forward the data to a
 	// JavaScript WebCodecs VideoDecoder instead.
@@ -1154,7 +1160,24 @@ func (g *GfxHandler) onEndFrame(data []byte) {
 	if len(data) < 4 {
 		return
 	}
-	g.sendFrameAck(binary.LittleEndian.Uint32(data), uint32(len(g.decodeCh)))
+	realDepth := uint32(len(g.decodeCh))
+	if hint := g.queueDepthHint.Load(); hint > realDepth {
+		realDepth = hint
+	}
+	g.sendFrameAck(binary.LittleEndian.Uint32(data), realDepth)
+}
+
+// SetQueueDepthHint sets a minimum queueDepth to report in FRAME_ACKNOWLEDGE
+// PDUs (MS-RDPEGFX 2.2.2.8).  The server uses this value to pace its frame
+// rate and encoding quality: a larger value signals that the client's decode
+// queue is full, causing the server to slow down or reduce quality.
+//
+// A hint of 0 (the default) means "report the real queue length".
+// Values in the range 10–100 are typical for moderate throttling.
+// Use suspendFrameAcknowledge (0xFFFFFFFF) to pause the stream entirely
+// (the stream resumes automatically when the hint is cleared).
+func (g *GfxHandler) SetQueueDepthHint(depth uint32) {
+	g.queueDepthHint.Store(depth)
 }
 
 // onWireToSurface1Decode handles RDPGFX_WIRE_TO_SURFACE_PDU_1 (MS-RDPEGFX 2.2.2.1).

@@ -13,6 +13,7 @@ import (
 	"github.com/nakagami/grdp/plugin"
 	"github.com/nakagami/grdp/plugin/cliprdr"
 	"github.com/nakagami/grdp/plugin/drdynvc"
+	"github.com/nakagami/grdp/plugin/rdpedisp"
 	"github.com/nakagami/grdp/plugin/rdpgfx"
 	"github.com/nakagami/grdp/plugin/rdpsnd"
 
@@ -110,6 +111,10 @@ type RdpClient struct {
 	// gfxHandler is the active RDPGFX handler; nil when not connected.
 	// Stored here so closeTransport() can stop its goroutines.
 	gfxHandler *rdpgfx.GfxHandler
+
+	// dispHandler is the active MS-RDPEDISP handler; nil when not connected.
+	// Used by SetResolution to send MONITOR_LAYOUT PDUs.
+	dispHandler *rdpedisp.Handler
 
 	dialer func(hostPort string) (net.Conn, error)
 }
@@ -410,6 +415,12 @@ func (g *RdpClient) doLogin(routingToken []byte) error {
 	}
 	g.gfxHandler = gfxHandler
 	dvcClient.RegisterHandler(rdpgfx.ChannelName, gfxHandler)
+
+	// RDPEDISP (Display Update Virtual Channel) handler — allows requesting
+	// a resolution change while connected (MS-RDPEDISP).
+	dispHandler := rdpedisp.NewHandler()
+	g.dispHandler = dispHandler
+	dvcClient.RegisterHandler(rdpedisp.ChannelName, dispHandler)
 
 	// Reject Video Optimized Remoting (VOR) channels so the server keeps
 	// sending video through the RDPGFX pipeline which we do handle.
@@ -1060,6 +1071,63 @@ func (g *RdpClient) MouseDown(button int, x, y int) {
 	p.YPos = uint16(y)
 	g.pdu.SendInputEvents(pdu.INPUT_EVENT_MOUSE, []pdu.InputEventsInterface{p})
 	g.notifyGfxLocalInput()
+}
+
+// SetResolution requests a desktop resolution change via the MS-RDPEDISP
+// Display Update Virtual Channel.  The server will reshape the desktop to the
+// given dimensions and send a fresh RDPGFX ResetGraphics command.
+//
+// width must be even and both width and height must be >= 200.
+// This method is a no-op when the RDPEDISP channel has not been established
+// (e.g. when the server does not support it).
+func (g *RdpClient) SetResolution(width, height int) {
+	if g.dispHandler == nil {
+		slog.Warn("SetResolution: RDPEDISP channel not available")
+		return
+	}
+	w := uint32(width)
+	if w%2 != 0 {
+		w++
+	}
+	if w < 200 {
+		w = 200
+	}
+	h := uint32(height)
+	if h < 200 {
+		h = 200
+	}
+	g.dispHandler.SendMonitorLayout([]rdpedisp.Monitor{
+		{
+			Flags:              rdpedisp.MonitorFlagPrimary,
+			Left:               0,
+			Top:                0,
+			Width:              w,
+			Height:             h,
+			PhysicalWidth:      0,
+			PhysicalHeight:     0,
+			Orientation:        0,
+			DesktopScaleFactor: 100,
+			DeviceScaleFactor:  100,
+		},
+	})
+	slog.Debug("SetResolution", "width", w, "height", h)
+}
+
+// SetQueueDepthHint controls the frame-rate and encoding quality reported to
+// the server via the RDPGFX FRAME_ACKNOWLEDGE queueDepth field
+// (MS-RDPEGFX 2.2.2.8).
+//
+// A higher value signals a larger client decode backlog, causing the server to
+// slow down or reduce H.264/RFX encoding quality.  0 (default) means "report
+// the real decode-queue length" — no artificial throttling.
+//
+// Typical values: 0 = off, 10–50 = moderate throttle, 100+ = heavy throttle.
+// Use 0xFFFFFFFF to pause new frames entirely (the stream resumes when hint is
+// reduced or cleared).
+func (g *RdpClient) SetQueueDepthHint(depth uint32) {
+	if g.gfxHandler != nil {
+		g.gfxHandler.SetQueueDepthHint(depth)
+	}
 }
 
 func (g *RdpClient) Reconnect(width, height int) error {
