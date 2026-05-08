@@ -173,7 +173,6 @@ func (t *TPKT) SendFastPath(secFlag byte, data []byte) (n int, err error) {
 	hdr := uint16(len(data)+3) | 0x8000
 	buf = append(buf[:0], FASTPATH_ACTION_FASTPATH|((secFlag&0x3)<<6), byte(hdr>>8), byte(hdr))
 	buf = append(buf, data...)
-	slog.Debug("TPTK SendFastPath", "buff", core.Hex(buf))
 	n, err = t.Conn.Write(buf)
 	writePool.Put(buf[:0])
 	return
@@ -189,7 +188,6 @@ func (t *TPKT) recvHeader(s []byte, err error) {
 		return
 	}
 	version := s[0]
-	slog.Debug("TPKT recvHeader", "version", version, "raw", core.Hex(s))
 	if version == FASTPATH_ACTION_X224 {
 		core.StartReadBytes(2, t.Conn, t.recvExtendedHeader)
 	} else {
@@ -243,7 +241,6 @@ func (t *TPKT) recvFastPath(s []byte, err error) {
 		slog.Debug("TPKT recvFastPath error", "err", err)
 		return
 	}
-	slog.Debug("TPKT recvFastPath", "len", len(s))
 	t.fastPathListener.RecvFastPath(t.secFlag, s)
 	core.StartReadBytes(2, t.Conn, t.recvHeader)
 }

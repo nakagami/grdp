@@ -878,7 +878,6 @@ func (c *Client) sendClientChallengeResponse(data []byte) {
 }
 
 func (c *Client) recvData(channel string, s []byte) {
-	slog.Debug("sec recvData", "channel", channel, "s", core.Hex(s))
 	data := c.decrytData(s)
 	if channel != t125.GLOBAL_CHANNEL_NAME {
 		c.Emit("channel", channel, data)
@@ -904,7 +903,6 @@ func (c *Client) SetChannelSender(f core.ChannelSender) {
 
 func (c *Client) SendToChannel(channel string, b []byte) (int, error) {
 	if !c.enableEncryption {
-		slog.Debug("SendToChannel", "b", core.Hex(b))
 		return c.channelSender.SendToChannel(channel, b)
 	}
 	var flag uint16 = ENCRYPT
@@ -917,6 +915,5 @@ func (c *Client) SendToChannel(channel string, b []byte) (int, error) {
 	core.WriteUInt16LE(flag, buff)
 	core.WriteUInt16LE(0, buff)
 	core.WriteBytes(data, buff)
-	slog.Debug("SendToChannel", "channel", channel, "buff", core.Hex(buff.Bytes()))
 	return c.channelSender.SendToChannel(channel, buff.Bytes())
 }

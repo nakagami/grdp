@@ -472,8 +472,6 @@ func (c *MCSClient) sendChannelJoinRequest(channelId uint16) {
 }
 
 func (c *MCSClient) recvData(s []byte) {
-	slog.Debug("mcs recvData", "s", core.Hex(s))
-
 	r := bytes.NewReader(s)
 	option, err := core.ReadUInt8(r)
 	if err != nil {
@@ -520,7 +518,6 @@ func (c *MCSClient) recvData(s []byte) {
 		c.Emit("error", errors.New(fmt.Sprintf("mcs recvData get data error %v", err)))
 		return
 	}
-	slog.Debug("mcs emit sec", "channel", channelName, "left", core.Hex(left))
 	c.Emit("sec", channelName, left)
 }
 
@@ -597,13 +594,10 @@ func (c *MCSClient) handleAutoDetect(data []byte) {
 		return
 	}
 
-	headerLength, _ := core.ReadUInt8(r)
-	core.ReadUInt8(r) // headerTypeId
+	_, _ = core.ReadUInt8(r) // headerLength
+	core.ReadUInt8(r)        // headerTypeId
 	seqNum, _ := core.ReadUint16LE(r)
 	reqType, _ := core.ReadUint16LE(r)
-
-	slog.Debug("AutoDetect request", "requestType", fmt.Sprintf("0x%04x", reqType),
-		"sequenceNumber", seqNum, "headerLength", headerLength)
 
 	switch reqType {
 	case rdpRttRequestConnecttime, rdpRttRequest:
@@ -622,7 +616,7 @@ func (c *MCSClient) handleAutoDetect(data []byte) {
 			elapsed = 1
 		}
 		c.sendAutoDetectResponse(seqNum, rdpBwResults, elapsed)
-	// rdpBwPayload requires no response
+		// rdpBwPayload requires no response
 	}
 }
 
@@ -648,8 +642,6 @@ func (c *MCSClient) sendAutoDetectResponse(sequenceNumber uint16, responseType u
 		core.WriteUInt32LE(0, payload)         // byteCount (no BW_PAYLOAD was sent)
 	}
 
-	slog.Debug("AutoDetect response", "responseType", fmt.Sprintf("0x%04x", responseType),
-		"sequenceNumber", sequenceNumber, "timeDelta", timeDelta)
 	c.transport.Write(c.Pack(payload.Bytes(), c.messageChannelId))
 }
 

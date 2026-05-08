@@ -281,9 +281,8 @@ func (c *Channels) process(channel string, s []byte) {
 		return
 	}
 	r := bytes.NewReader(s)
-	ln, _ := core.ReadUInt32LE(r)
+	_, _ = core.ReadUInt32LE(r)
 	flags, _ := core.ReadUInt32LE(r)
-	slog.Debug(fmt.Sprintf("channel:%s length: %d, flags: %d", channel, ln, flags))
 	if flags&CHANNEL_FLAG_FIRST == 0 || flags&CHANNEL_FLAG_LAST == 0 {
 		if flags&CHANNEL_FLAG_FIRST != 0 {
 			c.buff.Reset()

@@ -22,16 +22,9 @@ type regionHinter interface {
 	setRegionHint(regions []avcRect)
 }
 
-type avcQuantQuality struct {
-	qp          uint8
-	quality     uint8
-	progressive bool
-}
-
 type avc420Stream struct {
-	regions      []avcRect
-	quantQuality []avcQuantQuality
-	h264Data     []byte
+	regions  []avcRect
+	h264Data []byte
 }
 
 // parseAVC420Stream parses RDPGFX_AVC420_BITMAP_STREAM.
@@ -45,7 +38,7 @@ func parseAVC420Stream(data []byte) (*avc420Stream, error) {
 		return nil, fmt.Errorf("avc420: too many regions: %d", numRegions)
 	}
 
-	// 4 bytes header + 8 bytes per region rect + 2 bytes per quant/quality
+	// 4 bytes header + 10 bytes per region (8-byte rect + 2-byte quant/quality)
 	metaSize := 4 + int(numRegions)*10
 	if metaSize > len(data) {
 		return nil, fmt.Errorf("avc420: metadata truncated (need %d, have %d)", metaSize, len(data))
@@ -63,22 +56,9 @@ func parseAVC420Stream(data []byte) (*avc420Stream, error) {
 		off += 8
 	}
 
-	qq := make([]avcQuantQuality, numRegions)
-	for i := uint32(0); i < numRegions; i++ {
-		qp := data[off]
-		qual := data[off+1]
-		qq[i] = avcQuantQuality{
-			qp:          qp & 0x3F,
-			quality:     qual,
-			progressive: (qp & 0x40) != 0,
-		}
-		off += 2
-	}
-
 	return &avc420Stream{
-		regions:      regions,
-		quantQuality: qq,
-		h264Data:     data[metaSize:],
+		regions:  regions,
+		h264Data: data[metaSize:],
 	}, nil
 }
 
@@ -779,8 +759,18 @@ func (g *GfxHandler) decodeAVC444LC2(stream2 *avc420Stream, destW, destH int) (d
 	// produces visible colour artefacts.  We suppress LC=2 output until h264dec
 	// delivers a fresh frame and refreshes the cache.
 	if !g.avc444YPlane.updatedAt.IsZero() && time.Since(g.avc444YPlane.updatedAt) > avc444YStaleness {
+		age := time.Since(g.avc444YPlane.updatedAt).Round(time.Millisecond)
 		slog.Debug("RDPGFX: AVC444 LC=2 skipped (Y cache stale, main decoder likely stalling)",
-			"age", time.Since(g.avc444YPlane.updatedAt).Round(time.Millisecond))
+			"age", age)
+		// During a VideoToolbox stall h264dec.NeedsKeyframe() is false (the
+		// decoder has not been reset) so maybeRequestKeyframe() returns early.
+		// Request a keyframe directly here, reusing the shared rate-limiter, so
+		// the server delivers a fresh IDR that can help break the VT stall.
+		const keyframeRequestInterval = 2 * time.Second
+		if g.onKeyframeRequest != nil && time.Since(g.lastKeyframeRequest) >= keyframeRequestInterval {
+			g.lastKeyframeRequest = time.Now()
+			go g.onKeyframeRequest()
+		}
 		return
 	}
 	i420dec, ok := g.h264dec2.(i420Decoder)

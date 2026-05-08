@@ -134,9 +134,9 @@ func unpackAudioFormat(data []byte, offset int) (AudioFormat, int) {
 type Handler struct {
 	channelSender core.ChannelSender
 
-	serverFormats      []AudioFormat
+	serverFormats       []AudioFormat
 	clientFormatIndices []int
-	activeFormatIndex  int
+	activeFormatIndex   int
 
 	// Wave state
 	waveTimestamp uint16
@@ -215,8 +215,6 @@ func (h *Handler) ProcessData(data []byte) {
 	if bodySize < len(body) {
 		body = body[:bodySize]
 	}
-
-	slog.Debug("rdpsnd: recv", "msgType", fmt.Sprintf("0x%02x", msgType), "bodySize", bodySize)
 
 	switch msgType {
 	case SNDC_FORMATS:
@@ -300,9 +298,9 @@ func (h *Handler) sendClientFormats(serverVersion uint16) {
 	binary.Write(hdr, binary.LittleEndian, uint32(0))               // dwPitch
 	binary.Write(hdr, binary.LittleEndian, uint16(0))               // wDGramPort
 	binary.Write(hdr, binary.LittleEndian, uint16(len(h.clientFormatIndices)))
-	hdr.WriteByte(0)                                                  // cLastBlockConfirmed
-	binary.Write(hdr, binary.LittleEndian, version)                   // wVersion
-	hdr.WriteByte(0)                                                  // bPad
+	hdr.WriteByte(0)                                // cLastBlockConfirmed
+	binary.Write(hdr, binary.LittleEndian, version) // wVersion
+	hdr.WriteByte(0)                                // bPad
 
 	body := append(hdr.Bytes(), formatData.Bytes()...)
 
@@ -325,10 +323,10 @@ func (h *Handler) sendClientFormats(serverVersion uint16) {
 func (h *Handler) sendQualityMode() {
 	pdu := &bytes.Buffer{}
 	pdu.WriteByte(SNDC_QUALITYMODE)
-	pdu.WriteByte(0) // bPad
-	binary.Write(pdu, binary.LittleEndian, uint16(4))           // bodySize
+	pdu.WriteByte(0)                                                // bPad
+	binary.Write(pdu, binary.LittleEndian, uint16(4))               // bodySize
 	binary.Write(pdu, binary.LittleEndian, uint16(DYNAMIC_QUALITY)) // wQualityMode
-	binary.Write(pdu, binary.LittleEndian, uint16(0))           // Reserved
+	binary.Write(pdu, binary.LittleEndian, uint16(0))               // Reserved
 
 	h.send(pdu.Bytes())
 	slog.Debug("rdpsnd: sent QualityMode")
@@ -430,7 +428,7 @@ func (h *Handler) processWave2(body []byte) {
 func (h *Handler) sendWaveConfirm(timestamp uint16, blockNo uint8) {
 	pdu := &bytes.Buffer{}
 	pdu.WriteByte(SNDC_WAVECONFIRM)
-	pdu.WriteByte(0) // bPad
+	pdu.WriteByte(0)                                  // bPad
 	binary.Write(pdu, binary.LittleEndian, uint16(4)) // bodySize
 	binary.Write(pdu, binary.LittleEndian, timestamp)
 	pdu.WriteByte(blockNo) // cConfBlockNo
