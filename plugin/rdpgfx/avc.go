@@ -193,20 +193,20 @@ func isH264Keyframe(data []byte) bool {
 // The pooled return value is true when the returned slice was acquired from
 // bitmapBufPool; the caller must then call releaseBitmapBuf on it.
 func (g *GfxHandler) decodeAVC420(data []byte, destX, destY, destW, destH int) ([]byte, []avcRect, bool) {
-	if g.onH264Raw != nil {
-		stream, err := parseAVC420Stream(data)
-		if err == nil && len(stream.h264Data) > 0 {
-			nalData := make([]byte, len(stream.h264Data))
-			copy(nalData, stream.h264Data)
-			g.onH264Raw(destX, destY, destW, destH, isH264Keyframe(nalData), nalData)
-		}
+	// Parse the stream header once and reuse for both the raw-NAL callback and
+	// the actual decode path, avoiding a redundant walk of the metadata.
+	stream, parseErr := parseAVC420Stream(data)
+	if g.onH264Raw != nil && parseErr == nil && len(stream.h264Data) > 0 {
+		isKF := isH264Keyframe(stream.h264Data)
+		nalData := make([]byte, len(stream.h264Data))
+		copy(nalData, stream.h264Data)
+		g.onH264Raw(destX, destY, destW, destH, isKF, nalData)
 	}
 	if g.h264dec == nil {
 		return nil, nil, false
 	}
-	stream, err := parseAVC420Stream(data)
-	if err != nil {
-		slog.Warn("RDPGFX: AVC420 parse error", "err", err)
+	if parseErr != nil {
+		slog.Warn("RDPGFX: AVC420 parse error", "err", parseErr)
 		return nil, nil, false
 	}
 	if len(stream.h264Data) == 0 {
@@ -244,20 +244,20 @@ func (g *GfxHandler) decodeAVC420(data []byte, destX, destY, destW, destH int) (
 // The pooled return value is true when the returned slice was acquired from
 // bitmapBufPool; the caller must then call releaseBitmapBuf on it.
 func (g *GfxHandler) decodeAVC444(data []byte, destX, destY, destW, destH int) ([]byte, []avcRect, bool) {
-	if g.onH264Raw != nil {
-		stream1, _, _, err := parseAVC444Stream(data)
-		if err == nil && stream1 != nil && len(stream1.h264Data) > 0 {
-			nalData := make([]byte, len(stream1.h264Data))
-			copy(nalData, stream1.h264Data)
-			g.onH264Raw(destX, destY, destW, destH, isH264Keyframe(nalData), nalData)
-		}
+	// Parse the stream header once and reuse for both the raw-NAL callback and
+	// the actual decode path, avoiding a redundant walk of the metadata.
+	stream1, stream2, lc, parseErr := parseAVC444Stream(data)
+	if g.onH264Raw != nil && parseErr == nil && stream1 != nil && len(stream1.h264Data) > 0 {
+		isKF := isH264Keyframe(stream1.h264Data)
+		nalData := make([]byte, len(stream1.h264Data))
+		copy(nalData, stream1.h264Data)
+		g.onH264Raw(destX, destY, destW, destH, isKF, nalData)
 	}
 	if g.h264dec == nil {
 		return nil, nil, false
 	}
-	stream1, stream2, lc, err := parseAVC444Stream(data)
-	if err != nil {
-		slog.Warn("RDPGFX: AVC444 parse error", "err", err)
+	if parseErr != nil {
+		slog.Warn("RDPGFX: AVC444 parse error", "err", parseErr)
 		return nil, nil, false
 	}
 	if lc == 2 {
@@ -277,6 +277,7 @@ func (g *GfxHandler) decodeAVC444(data []byte, destX, destY, destW, destH int) (
 
 	var frame *h264Frame
 	var i420out *h264FrameI420
+	var err error
 	if g.h264dec2 != nil {
 		// Cache luma for future LC=2 combine.
 		if i420dec, ok := g.h264dec.(i420Decoder); ok {
@@ -343,9 +344,10 @@ func (g *GfxHandler) decodeAVC420WithI420(data []byte, destX, destY, destW, dest
 		return
 	}
 	if g.onH264Raw != nil && len(stream.h264Data) > 0 {
+		isKF := isH264Keyframe(stream.h264Data)
 		nalData := make([]byte, len(stream.h264Data))
 		copy(nalData, stream.h264Data)
-		g.onH264Raw(destX, destY, destW, destH, isH264Keyframe(nalData), nalData)
+		g.onH264Raw(destX, destY, destW, destH, isKF, nalData)
 	}
 	if g.h264dec == nil || len(stream.h264Data) == 0 {
 		return
@@ -388,6 +390,60 @@ func (g *GfxHandler) decodeAVC420WithI420(data []byte, destX, destY, destW, dest
 	return
 }
 
+// decodeAVC420WithNV12 decodes AVC420 bitmap data, returning native NV12
+// planes when the underlying decoder produces NV12 (typically VideoToolbox).
+// If NV12 is unavailable, decoded may contain a BGRA fallback frame.
+func (g *GfxHandler) decodeAVC420WithNV12(data []byte, destX, destY, destW, destH int) (decoded []byte, nv12 *h264FrameNV12, regions []avcRect, pooled bool) {
+	stream, err := parseAVC420Stream(data)
+	if err != nil {
+		slog.Warn("RDPGFX: AVC420 parse error", "err", err)
+		return
+	}
+	if g.onH264Raw != nil && len(stream.h264Data) > 0 {
+		isKF := isH264Keyframe(stream.h264Data)
+		nalData := make([]byte, len(stream.h264Data))
+		copy(nalData, stream.h264Data)
+		g.onH264Raw(destX, destY, destW, destH, isKF, nalData)
+	}
+	if g.h264dec == nil || len(stream.h264Data) == 0 {
+		return
+	}
+	var frame *h264Frame
+	nv12dec, hasNV12 := g.h264dec.(nv12Decoder)
+	if hasNV12 {
+		var nv12out *h264FrameNV12
+		frame, nv12out, err = nv12dec.DecodeWithNV12(stream.h264Data)
+		if err != nil {
+			slog.Warn("RDPGFX: H.264 decode error", "err", err)
+			return
+		}
+		if nv12out != nil && nv12out.Width >= destW && nv12out.Height >= destH {
+			nv12 = nv12out
+		}
+	} else {
+		frame, err = g.h264dec.Decode(stream.h264Data)
+		if err != nil {
+			slog.Warn("RDPGFX: H.264 decode error", "err", err)
+			return
+		}
+	}
+	if frame == nil && nv12 == nil {
+		g.maybeRequestKeyframe()
+		g.maybeNotifyDecoderBroken()
+		slog.Debug("RDPGFX: H.264 decode returned nil frame (buffering?)")
+		return
+	}
+	g.noteSuccessfulDecode()
+	if frame != nil {
+		slog.Debug("RDPGFX: AVC420 decoded (WithNV12)", "frameW", frame.Width, "frameH", frame.Height,
+			"destW", destW, "destH", destH, "hasNV12", nv12 != nil,
+			"regions", len(stream.regions), "h264Len", len(stream.h264Data))
+		decoded, pooled = cropBGRA(frame.Data, frame.Width, frame.Height, destW, destH)
+	}
+	regions = stream.regions
+	return
+}
+
 // decodeAVC444WithI420 decodes AVC444 bitmap data, returning BGRA pixels and
 // an optional I420 frame.  LC=0 and LC=1 decode the main stream and cache the
 // luma plane.  LC=2 decodes the auxiliary chroma stream and combines it with
@@ -396,9 +452,10 @@ func (g *GfxHandler) decodeAVC420WithI420(data []byte, destX, destY, destW, dest
 func (g *GfxHandler) decodeAVC444WithI420(data []byte, destX, destY, destW, destH int) (decoded []byte, i420 *h264FrameI420, regions []avcRect, pooled bool) {
 	stream1, stream2, lc, err := parseAVC444Stream(data)
 	if g.onH264Raw != nil && stream1 != nil && len(stream1.h264Data) > 0 {
+		isKF := isH264Keyframe(stream1.h264Data)
 		nalData := make([]byte, len(stream1.h264Data))
 		copy(nalData, stream1.h264Data)
-		g.onH264Raw(destX, destY, destW, destH, isH264Keyframe(nalData), nalData)
+		g.onH264Raw(destX, destY, destW, destH, isKF, nalData)
 	}
 	if err != nil {
 		slog.Warn("RDPGFX: AVC444 parse error", "err", err)

@@ -269,10 +269,12 @@ type GfxHandler struct {
 	// onI420 is called after a successful H.264 decode when I420 planar data
 	// is available.  The caller can upload the planes to an SDL2 IYUV texture
 	// for GPU-accelerated YUV→RGB conversion, bypassing the CPU colour path.
-	// blitToSurface is still called with BGRA data before onI420 so the surface
-	// backing store remains correct for non-H264 RDPGFX operations.
 	// destX, destY are absolute canvas coordinates.
 	onI420 func(destX, destY, w, h int, y []byte, yStride int, u []byte, uStride int, v []byte, vStride int)
+	// onNV12 is like onI420 but receives native NV12 output.  It is preferred
+	// by SDL2 clients when available because VideoToolbox commonly outputs
+	// NV12 and SDL_UpdateNVTexture can upload it directly.
+	onNV12 func(destX, destY, w, h int, y []byte, yStride int, uv []byte, uvStride int)
 }
 
 // NewGfxHandler creates a new RDPGFX handler.
@@ -536,11 +538,20 @@ func (g *GfxHandler) SetH264RawCallback(fn func(destX, destY, w, h int, isKey bo
 // H.264 frame is decoded and the underlying decoder supports I420 extraction.
 // When set, H264 frames are NOT emitted via the normal OnBitmap path; the
 // caller is responsible for rendering the I420 data directly (e.g. via an
-// SDL2 IYUV texture).  blitToSurface is still called so the BGRA surface
-// backing store remains correct for subsequent RDPGFX operations.
+// SDL2 IYUV texture).  When the I420 fast path is used, the BGRA surface
+// backing store is not updated for that frame.
 // Set fn to nil to disable and revert to normal OnBitmap delivery.
 func (g *GfxHandler) SetI420Callback(fn func(destX, destY, w, h int, y []byte, yStride int, u []byte, uStride int, v []byte, vStride int)) {
 	g.onI420 = fn
+}
+
+// SetNV12Callback registers a callback that receives native NV12 planar data
+// when H.264 decoding produces NV12.  When set for AVC420 frames, the normal
+// OnBitmap path is bypassed for frames that can be delivered as NV12; callers
+// should upload the Y and UV planes directly (for example with SDL2
+// SDL_UpdateNVTexture).  Set fn to nil to disable.
+func (g *GfxHandler) SetNV12Callback(fn func(destX, destY, w, h int, y []byte, yStride int, uv []byte, uvStride int)) {
+	g.onNV12 = fn
 }
 
 // OnChannelCreated is called after the DVC CREATE_RSP has been sent.
@@ -1217,7 +1228,23 @@ func (g *GfxHandler) onWireToSurface1Decode(data []byte, skipHeavy bool) {
 	case codecAVC420:
 		destX := int(s.outputX) + int(left)
 		destY := int(s.outputY) + int(top)
-		if g.onI420 != nil {
+		if g.onNV12 != nil {
+			var ownedAVC bool
+			var nv12 *h264FrameNV12
+			decoded, nv12, avcRegions, ownedAVC = g.decodeAVC420WithNV12(bmpData, destX, destY, w, h)
+			owned = ownedAVC
+			if nv12 != nil {
+				if decoded != nil {
+					blitToSurface(s, int(left), int(top), w, h, decoded)
+					if owned {
+						releaseBitmapBuf(decoded)
+					}
+				}
+				g.onNV12(destX, destY, w, h, nv12.Y, nv12.YStride, nv12.UV, nv12.UVStride)
+				return
+			}
+			// NV12 unavailable; fall through to BGRA emit.
+		} else if g.onI420 != nil {
 			var ownedAVC bool
 			var i420 *h264FrameI420
 			decoded, i420, avcRegions, ownedAVC = g.decodeAVC420WithI420(bmpData, destX, destY, w, h)
@@ -1357,7 +1384,33 @@ func (g *GfxHandler) onWireToSurface2Decode(data []byte, skipHeavy bool) {
 	case codecAVC420:
 		destX := int(s.outputX)
 		destY := int(s.outputY)
-		if g.onI420 != nil {
+		if g.onNV12 != nil {
+			decoded, nv12, avcRegions, ownedAVC := g.decodeAVC420WithNV12(bmpData, destX, destY, w, h)
+			if nv12 != nil {
+				if decoded != nil {
+					blitToSurface(s, 0, 0, w, h, decoded)
+					if ownedAVC {
+						releaseBitmapBuf(decoded)
+					}
+				}
+				g.onNV12(destX, destY, w, h, nv12.Y, nv12.YStride, nv12.UV, nv12.UVStride)
+			} else if decoded != nil {
+				// NV12 unavailable; fall back to BGRA emit.
+				if len(avcRegions) > 0 && shouldUseAVCRegions(avcRegions, w, h) {
+					g.blitAndEmitAVCRegions(s, 0, 0, w, h, decoded, avcRegions)
+					if ownedAVC {
+						releaseBitmapBuf(decoded)
+					}
+				} else {
+					blitToSurface(s, 0, 0, w, h, decoded)
+					if ownedAVC {
+						g.emitBitmapPooled(s, 0, 0, w, h, decoded)
+					} else {
+						g.emitBitmap(s, 0, 0, w, h, decoded)
+					}
+				}
+			}
+		} else if g.onI420 != nil {
 			decoded, i420, avcRegions, ownedAVC := g.decodeAVC420WithI420(bmpData, destX, destY, w, h)
 			if i420 != nil {
 				if decoded != nil {

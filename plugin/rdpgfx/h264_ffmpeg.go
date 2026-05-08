@@ -54,6 +54,17 @@ static void grdp_set_hw_pix_fmt(AVCodecContext *ctx, enum AVPixelFormat fmt) {
     ctx->opaque = (void*)(intptr_t)fmt;
 }
 
+// grdp_hwframe_map attempts a zero-copy CPU mapping of a hardware frame.
+// On VideoToolbox (macOS), decoded frames live in IOSurface-backed memory that
+// is accessible from both CPU and GPU.  av_hwframe_map creates a mapped view
+// without copying the pixel data, allowing NV12 extraction without the extra
+// GPU→RAM copy that av_hwframe_transfer_data would perform.
+// Returns 0 on success; callers must fall back to av_hwframe_transfer_data
+// on negative return (hardware type does not support mapping).
+static int grdp_hwframe_map(AVFrame *dst, const AVFrame *src) {
+    return av_hwframe_map(dst, src, AV_HWFRAME_MAP_READ);
+}
+
 // Helper: convert AVFrame to BGRA via swscale.
 static int grdp_frame_to_bgra(struct SwsContext *sws,
     AVFrame *src, uint8_t *dst, int dst_stride) {
@@ -480,6 +491,8 @@ static void grdp_sws_set_src_range(struct SwsContext *sws, int full_range) {
 // grdp_copy_yuv420p_to_i420 copies an AVFrame in YUV420P or YUVJ420P format
 // to tightly-packed I420 planes (stride = width for Y, stride = (width+1)/2 for U/V).
 // ydst, udst, vdst must be pre-allocated by the caller.
+// When the source frame is tight-packed (linesize == stride), a single bulk
+// memcpy is used per plane instead of per-row copies.
 static void grdp_copy_yuv420p_to_i420(
     const AVFrame *f,
     uint8_t *ydst, uint8_t *udst, uint8_t *vdst,
@@ -487,16 +500,28 @@ static void grdp_copy_yuv420p_to_i420(
 {
     int pw = (w + 1) / 2;
     int ph = (h + 1) / 2;
-    for (int y = 0; y < h; y++)
-        memcpy(ydst + y * w, f->data[0] + y * f->linesize[0], w);
-    for (int y = 0; y < ph; y++)
-        memcpy(udst + y * pw, f->data[1] + y * f->linesize[1], pw);
-    for (int y = 0; y < ph; y++)
-        memcpy(vdst + y * pw, f->data[2] + y * f->linesize[2], pw);
+    if (f->linesize[0] == w)
+        memcpy(ydst, f->data[0], (size_t)w * h);
+    else
+        for (int y = 0; y < h; y++)
+            memcpy(ydst + y * w, f->data[0] + y * f->linesize[0], w);
+    if (f->linesize[1] == pw)
+        memcpy(udst, f->data[1], (size_t)pw * ph);
+    else
+        for (int y = 0; y < ph; y++)
+            memcpy(udst + y * pw, f->data[1] + y * f->linesize[1], pw);
+    if (f->linesize[2] == pw)
+        memcpy(vdst, f->data[2], (size_t)pw * ph);
+    else
+        for (int y = 0; y < ph; y++)
+            memcpy(vdst + y * pw, f->data[2] + y * f->linesize[2], pw);
 }
 
 // grdp_copy_nv12_to_i420 copies an AVFrame in NV12 format (Y plane + interleaved UV)
 // to tightly-packed I420 planes.
+// The Y plane is bulk-copied when tight-packed.
+// On ARM64 the UV deinterleave loop uses NEON vld2q_u8 to process 16 chroma
+// pairs per iteration, roughly halving the cost of the chroma plane copy.
 static void grdp_copy_nv12_to_i420(
     const AVFrame *f,
     uint8_t *ydst, uint8_t *udst, uint8_t *vdst,
@@ -504,15 +529,53 @@ static void grdp_copy_nv12_to_i420(
 {
     int pw = (w + 1) / 2;
     int ph = (h + 1) / 2;
-    for (int y = 0; y < h; y++)
-        memcpy(ydst + y * w, f->data[0] + y * f->linesize[0], w);
+    if (f->linesize[0] == w)
+        memcpy(ydst, f->data[0], (size_t)w * h);
+    else
+        for (int y = 0; y < h; y++)
+            memcpy(ydst + y * w, f->data[0] + y * f->linesize[0], w);
     for (int y = 0; y < ph; y++) {
         const uint8_t *row = f->data[1] + y * f->linesize[1];
-        for (int x = 0; x < pw; x++) {
-            udst[y * pw + x] = row[x * 2];
-            vdst[y * pw + x] = row[x * 2 + 1];
+        uint8_t *ud = udst + y * pw;
+        uint8_t *vd = vdst + y * pw;
+        int x = 0;
+#ifdef __ARM_NEON__
+        for (; x + 15 < pw; x += 16) {
+            uint8x16x2_t uv = vld2q_u8(row + x * 2);
+            vst1q_u8(ud + x, uv.val[0]);
+            vst1q_u8(vd + x, uv.val[1]);
+        }
+#endif
+        for (; x < pw; x++) {
+            ud[x] = row[x * 2];
+            vd[x] = row[x * 2 + 1];
         }
     }
+}
+
+// grdp_copy_nv12 copies an AVFrame in NV12 format to tightly-packed NV12
+// planes.  Unlike grdp_copy_nv12_to_i420, this keeps the interleaved UV plane
+// intact so SDL2 can upload it via SDL_UpdateNVTexture without CPU-side
+// deinterleaving.
+// When the source frame is tight-packed (linesize == stride), a single bulk
+// memcpy is used per plane instead of per-row copies.
+static void grdp_copy_nv12(
+    const AVFrame *f,
+    uint8_t *ydst, uint8_t *uvdst,
+    int w, int h)
+{
+    int uv_bytes = ((w + 1) / 2) * 2;
+    int ph = (h + 1) / 2;
+    if (f->linesize[0] == w)
+        memcpy(ydst, f->data[0], (size_t)w * h);
+    else
+        for (int y = 0; y < h; y++)
+            memcpy(ydst + y * w, f->data[0] + y * f->linesize[0], w);
+    if (f->linesize[1] == uv_bytes)
+        memcpy(uvdst, f->data[1], (size_t)uv_bytes * ph);
+    else
+        for (int y = 0; y < ph; y++)
+            memcpy(uvdst + y * uv_bytes, f->data[1] + y * f->linesize[1], uv_bytes);
 }
 */
 import "C"
@@ -601,6 +664,8 @@ type ffmpegDecoder struct {
 	packet                   *C.AVPacket
 	frame                    *C.AVFrame
 	swFrame                  *C.AVFrame
+	mapFrame                 *C.AVFrame  // reusable frame for av_hwframe_map zero-copy transfers
+	hwMapSupported           int8        // 0=unknown, 1=supported, -1=unsupported
 	swsCtx                   *C.struct_SwsContext
 	useHW                    bool
 	hwPixFmt                 C.enum_AVPixelFormat
@@ -661,11 +726,19 @@ type ffmpegDecoder struct {
 	outI420Enabled bool
 	lastI420       *h264FrameI420
 
+	// outNV12Ring holds native NV12 frames for SDL2 NV12 texture upload.
+	// This path is especially useful for VideoToolbox, whose transferred
+	// software frames are usually NV12.
+	outNV12Ring    [2]h264FrameNV12
+	outNV12RingIdx int
+	outNV12Enabled bool
+	lastNV12       *h264FrameNV12
+
 	// regionHint carries dirty-rect hints for region-aware YUV→BGRA conversion.
 	// setRegionHint populates these fields; Decode() captures them into local
 	// variables at entry (clearing nRegionHints) so stale hints can never
 	// carry over to a subsequent unrelated frame.
-	regionHint  []C.uint16_t // flat [left,top,right,bottom,...] per rect
+	regionHint   []C.uint16_t // flat [left,top,right,bottom,...] per rect
 	nRegionHints C.int        // number of valid rects in regionHint
 }
 
@@ -728,6 +801,50 @@ func (d *ffmpegDecoder) extractI420fromSrc(srcFrame *C.AVFrame) {
 	}
 
 	d.lastI420 = slot
+}
+
+// extractNV12fromSrc copies native NV12 planes from srcFrame into the ring
+// buffer and stores a pointer in d.lastNV12.  It intentionally does not
+// deinterleave chroma, so SDL2 NV12 texture uploads avoid the I420 conversion
+// work required by extractI420fromSrc.
+func (d *ffmpegDecoder) extractNV12fromSrc(srcFrame *C.AVFrame) {
+	if C.enum_AVPixelFormat(srcFrame.format) != C.AV_PIX_FMT_NV12 {
+		d.lastNV12 = nil
+		return
+	}
+
+	w := int(srcFrame.width)
+	h := int(srcFrame.height)
+	uvStride := ((w + 1) / 2) * 2
+	ph := (h + 1) / 2
+	ySize := w * h
+	uvSize := uvStride * ph
+
+	slot := &d.outNV12Ring[d.outNV12RingIdx]
+	d.outNV12RingIdx ^= 1
+
+	if cap(slot.Y) < ySize {
+		slot.Y = make([]byte, ySize)
+	} else {
+		slot.Y = slot.Y[:ySize]
+	}
+	if cap(slot.UV) < uvSize {
+		slot.UV = make([]byte, uvSize)
+	} else {
+		slot.UV = slot.UV[:uvSize]
+	}
+	slot.YStride = w
+	slot.UVStride = uvStride
+	slot.Width = w
+	slot.Height = h
+	slot.FullRange = srcFrame.color_range == 2
+
+	C.grdp_copy_nv12(srcFrame,
+		(*C.uint8_t)(unsafe.Pointer(&slot.Y[0])),
+		(*C.uint8_t)(unsafe.Pointer(&slot.UV[0])),
+		C.int(w), C.int(h))
+
+	d.lastNV12 = slot
 }
 
 func newH264Decoder() h264Decoder { return newH264DecoderWithWatchdog(nil) }
@@ -817,7 +934,8 @@ func newH264DecoderWithWatchdog(watchdogCh chan<- struct{}) h264Decoder {
 	d.packet = C.av_packet_alloc()
 	d.frame = C.av_frame_alloc()
 	d.swFrame = C.av_frame_alloc()
-	if d.packet == nil || d.frame == nil || d.swFrame == nil {
+	d.mapFrame = C.av_frame_alloc()
+	if d.packet == nil || d.frame == nil || d.swFrame == nil || d.mapFrame == nil {
 		d.Close()
 		return nil
 	}
@@ -926,6 +1044,12 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 
 	if len(h264Data) == 0 {
 		return nil, nil
+	}
+	if !d.outI420Enabled {
+		d.lastI420 = nil
+	}
+	if !d.outNV12Enabled {
+		d.lastNV12 = nil
 	}
 	if d.broken {
 		// HW decoder is unrecoverable.  Stop feeding packets so no frames
@@ -1205,9 +1329,9 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 		result = f
 	}
 
-	// I420 fast path returns nil for the BGRA frame but still represents a
-	// successfully decoded frame.  Count it as success for health tracking.
-	gotFrame := result != nil || d.lastI420 != nil
+	// I420/NV12 fast paths return nil for the BGRA frame but still represent a
+	// successfully decoded frame.  Count them as success for health tracking.
+	gotFrame := result != nil || d.lastI420 != nil || d.lastNV12 != nil
 	if gotFrame {
 		d.lastSuccessTime = time.Now()
 		if d.useHW {
@@ -1289,24 +1413,69 @@ func (d *ffmpegDecoder) DecodeWithI420(h264Data []byte) (*h264Frame, *h264FrameI
 	return frame, d.lastI420, err
 }
 
+// DecodeWithNV12 implements the nv12Decoder interface.  It decodes H.264 NAL
+// data and returns native NV12 output when FFmpeg produces NV12, avoiding the
+// extra NV12->I420 deinterleave used by DecodeWithI420.
+func (d *ffmpegDecoder) DecodeWithNV12(h264Data []byte) (*h264Frame, *h264FrameNV12, error) {
+	d.outNV12Enabled = true
+	d.lastNV12 = nil
+	frame, err := d.Decode(h264Data)
+	d.outNV12Enabled = false
+	return frame, d.lastNV12, err
+}
+
 func (d *ffmpegDecoder) convertFrame(regionHint []C.uint16_t, nRegions C.int) (*h264Frame, int64, error) {
 	srcFrame := d.frame
 	var transferNs int64
+	usedMapFrame := false
 
 	// Transfer from GPU to CPU memory if using hardware acceleration.
 	if d.useHW && d.frame.format == C.int(d.hwPixFmt) {
 		tStart := time.Now()
-		ret := C.av_hwframe_transfer_data(d.swFrame, d.frame, 0)
-		transferNs = time.Since(tStart).Nanoseconds()
-		if ret < 0 {
-			return nil, transferNs, fmt.Errorf("av_hwframe_transfer_data: error %d", int(ret))
+		// Prefer zero-copy CPU mapping (av_hwframe_map) over a copy
+		// (av_hwframe_transfer_data).  VideoToolbox on macOS stores decoded
+		// frames in IOSurface-backed shared memory, so mapping is supported
+		// and avoids a full GPU→RAM copy of the pixel data.
+		// hwMapSupported: 0=unknown (first frame), 1=ok, -1=unsupported.
+		if d.hwMapSupported >= 0 {
+			C.av_frame_unref(d.mapFrame)
+			if ret := C.grdp_hwframe_map(d.mapFrame, d.frame); ret >= 0 {
+				d.hwMapSupported = 1
+				srcFrame = d.mapFrame
+				usedMapFrame = true
+			} else if d.hwMapSupported == 0 {
+				// First attempt failed; mark unsupported and fall through.
+				d.hwMapSupported = -1
+			}
 		}
-		srcFrame = d.swFrame
+		if !usedMapFrame {
+			ret := C.av_hwframe_transfer_data(d.swFrame, d.frame, 0)
+			transferNs = time.Since(tStart).Nanoseconds()
+			if ret < 0 {
+				return nil, transferNs, fmt.Errorf("av_hwframe_transfer_data: error %d", int(ret))
+			}
+			srcFrame = d.swFrame
+		} else {
+			transferNs = time.Since(tStart).Nanoseconds()
+		}
 	}
 
 	w := srcFrame.width
 	h := srcFrame.height
 	srcFmt := C.enum_AVPixelFormat(srcFrame.format)
+
+	// Fast path for SDL2 NV12 texture upload.  VideoToolbox usually transfers
+	// hardware-decoded H.264 frames as NV12, so keeping the interleaved UV plane
+	// intact avoids the chroma deinterleave required by I420.
+	if d.outNV12Enabled && srcFmt == C.AV_PIX_FMT_NV12 {
+		d.extractNV12fromSrc(srcFrame)
+		if usedMapFrame {
+			C.av_frame_unref(d.mapFrame)
+		} else if srcFrame == d.swFrame {
+			C.av_frame_unref(d.swFrame)
+		}
+		return nil, transferNs, nil
+	}
 
 	// Fast path: when I420 output is requested and the source pixel format is
 	// directly convertible to I420 (YUV420P, YUVJ420P, NV12), skip the
@@ -1321,7 +1490,9 @@ func (d *ffmpegDecoder) convertFrame(regionHint []C.uint16_t, nRegions C.int) (*
 		if srcFmt == C.AV_PIX_FMT_YUV420P || srcFmt == C.AV_PIX_FMT_YUVJ420P ||
 			srcFmt == C.AV_PIX_FMT_NV12 {
 			d.extractI420fromSrc(srcFrame)
-			if srcFrame == d.swFrame {
+			if usedMapFrame {
+				C.av_frame_unref(d.mapFrame)
+			} else if srcFrame == d.swFrame {
 				C.av_frame_unref(d.swFrame)
 			}
 			return nil, transferNs, nil
@@ -1458,7 +1629,7 @@ func (d *ffmpegDecoder) convertFrame(regionHint []C.uint16_t, nRegions C.int) (*
 			d.swsCtx = C.sws_getContext(
 				w, h, swsFmt,
 				w, h, C.AV_PIX_FMT_BGRA,
-				C.SWS_BILINEAR, nil, nil, nil,
+				C.SWS_FAST_BILINEAR, nil, nil, nil,
 			)
 			if d.swsCtx == nil {
 				convErr = fmt.Errorf("sws_getContext failed for %dx%d fmt=%d", w, h, srcFmt)
@@ -1477,7 +1648,9 @@ func (d *ffmpegDecoder) convertFrame(regionHint []C.uint16_t, nRegions C.int) (*
 	if convErr == nil && d.outI420Enabled {
 		d.extractI420fromSrc(srcFrame)
 	}
-	if srcFrame == d.swFrame {
+	if usedMapFrame {
+		C.av_frame_unref(d.mapFrame)
+	} else if srcFrame == d.swFrame {
 		C.av_frame_unref(d.swFrame)
 	}
 	if convErr != nil {
@@ -1579,6 +1752,9 @@ func (d *ffmpegDecoder) Close() {
 	}
 	if d.swFrame != nil {
 		C.av_frame_free(&d.swFrame)
+	}
+	if d.mapFrame != nil {
+		C.av_frame_free(&d.mapFrame)
 	}
 	if d.packet != nil {
 		C.av_packet_free(&d.packet)

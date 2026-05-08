@@ -75,6 +75,7 @@ type RdpClient struct {
 	onAudioResetFn    func()
 	onH264RawFn       func(destX, destY, w, h int, isKey bool, data []byte)
 	onH264I420Fn      func(destX, destY, w, h int, y []byte, yStride int, u []byte, uStride int, v []byte, vStride int)
+	onH264NV12Fn      func(destX, destY, w, h int, y []byte, yStride int, uv []byte, uvStride int)
 	onDecoderBrokenFn func()
 
 	// clipboard callbacks and handler
@@ -403,6 +404,9 @@ func (g *RdpClient) doLogin(routingToken []byte) error {
 	}
 	if g.onH264I420Fn != nil {
 		gfxHandler.SetI420Callback(g.onH264I420Fn)
+	}
+	if g.onH264NV12Fn != nil {
+		gfxHandler.SetNV12Callback(g.onH264NV12Fn)
 	}
 	g.gfxHandler = gfxHandler
 	dvcClient.RegisterHandler(rdpgfx.ChannelName, gfxHandler)
@@ -762,6 +766,20 @@ func (g *RdpClient) OnH264Raw(fn func(destX, destY, w, h int, isKey bool, data [
 // if they need to be retained beyond the callback's return.
 func (g *RdpClient) OnH264I420(fn func(destX, destY, w, h int, y []byte, yStride int, u []byte, uStride int, v []byte, vStride int)) *RdpClient {
 	g.onH264I420Fn = fn
+	return g
+}
+
+// OnH264NV12 registers a callback that receives decoded H.264 frames in NV12
+// format (Y plane plus interleaved UV plane).  This is the fastest SDL2 path
+// on platforms whose hardware decoder already outputs NV12 (notably macOS
+// VideoToolbox), because callers can upload the planes directly with an NV12
+// texture and avoid NV12->I420 deinterleaving in grdp.  When NV12 extraction
+// is unavailable for a frame, grdp falls back to OnBitmap delivery.
+// destX, destY are top-left canvas coordinates; w, h are frame dimensions.
+// The plane slices are only valid for the duration of the callback; copy them
+// if they need to be retained beyond the callback's return.
+func (g *RdpClient) OnH264NV12(fn func(destX, destY, w, h int, y []byte, yStride int, uv []byte, uvStride int)) *RdpClient {
+	g.onH264NV12Fn = fn
 	return g
 }
 

@@ -43,6 +43,19 @@ type h264FrameI420 struct {
 	FullRange                 bool // true when the source used full-range (JPEG/PC) YUV
 }
 
+// h264FrameNV12 holds a decoded H.264 frame in NV12 format (Y plane plus
+// interleaved UV plane).  VideoToolbox commonly transfers hardware-decoded
+// H.264 frames as NV12; SDL2 can upload NV12 directly, avoiding the CPU-side
+// NV12->I420 deinterleave needed by the I420 path.
+type h264FrameNV12 struct {
+	Y, UV     []byte
+	YStride   int
+	UVStride  int
+	Width     int
+	Height    int
+	FullRange bool
+}
+
 // i420Decoder is an optional interface that an h264Decoder may implement to
 // produce I420 output alongside the normal BGRA frame.  Callers detect support
 // via a type assertion.
@@ -53,6 +66,13 @@ type i420Decoder interface {
 	// nil when the pixel format is not directly convertible (e.g. swscale
 	// paths); callers must fall back to the BGRA frame in that case.
 	DecodeWithI420(h264Data []byte) (*h264Frame, *h264FrameI420, error)
+}
+
+// nv12Decoder is an optional interface for decoders that can expose native
+// NV12 output.  Callers should fall back to I420 or BGRA when the returned
+// NV12 frame is nil.
+type nv12Decoder interface {
+	DecodeWithNV12(h264Data []byte) (*h264Frame, *h264FrameNV12, error)
 }
 
 // h264Decoder decodes H.264 Annex B bitstream data into BGRA frames.
