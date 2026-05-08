@@ -1193,6 +1193,14 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 		}
 	}
 
+	// If we previously proceeded without a keyframe (error-concealment path)
+	// and the server has now sent a proper IDR, the decoder is back to a clean
+	// state — clear the flag so a future send failure is not misattributed to
+	// the (long-past) keyframe wait exhaustion.
+	if d.proceededWithoutKeyframe && scan.hasKeyFrame {
+		d.proceededWithoutKeyframe = false
+	}
+
 	// Time-based stall detection for the HW decoder.
 	//
 	// hwReady=false: decoder has never produced a frame. If it keeps receiving
