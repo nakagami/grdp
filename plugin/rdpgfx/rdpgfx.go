@@ -984,29 +984,37 @@ func (g *GfxHandler) writeLoop() {
 
 // sendPdu sends a PDU synchronously.  Used for rare control messages
 // (CapsAdvertise, CacheImportReply) that must not be dropped.
+// pduBufPool reuses scratch byte slices for assembling outbound PDU frames,
+// avoiding per-call heap allocations on the sendPdu hot path.
+var pduBufPool = sync.Pool{
+	New: func() any { return make([]byte, 0, headerSize+256) },
+}
+
 func (g *GfxHandler) sendPdu(cmdId uint16, payload []byte) {
 	if g.sendFn == nil {
 		return
 	}
-	b := &bytes.Buffer{}
-	core.WriteUInt16LE(cmdId, b)
-	core.WriteUInt16LE(0, b) // flags
-	core.WriteUInt32LE(uint32(headerSize+len(payload)), b)
-	b.Write(payload)
-	g.sendFn(b.Bytes())
+	buf := pduBufPool.Get().([]byte)
+	buf = buf[:0]
+	buf = binary.LittleEndian.AppendUint16(buf, cmdId)
+	buf = binary.LittleEndian.AppendUint16(buf, 0) // flags
+	buf = binary.LittleEndian.AppendUint32(buf, uint32(headerSize+len(payload)))
+	buf = append(buf, payload...)
+	g.sendFn(buf)
+	pduBufPool.Put(buf[:0])
 }
 
 // sendPduAsync enqueues a PDU for the writeLoop goroutine to send.
 // Every ACK must be delivered to the server, so this uses a buffered
 // channel rather than a single-value "latest" slot.
 func (g *GfxHandler) sendPduAsync(cmdId uint16, payload []byte) {
-	b := &bytes.Buffer{}
-	core.WriteUInt16LE(cmdId, b)
-	core.WriteUInt16LE(0, b) // flags
-	core.WriteUInt32LE(uint32(headerSize+len(payload)), b)
-	b.Write(payload)
+	pdu := make([]byte, headerSize+len(payload))
+	binary.LittleEndian.PutUint16(pdu[0:], cmdId)
+	// pdu[2:4] = flags (0) — zero value
+	binary.LittleEndian.PutUint32(pdu[4:], uint32(headerSize+len(payload)))
+	copy(pdu[headerSize:], payload)
 	select {
-	case g.ackCh <- b.Bytes():
+	case g.ackCh <- pdu:
 	default:
 		slog.Warn("RDPGFX: ackCh full, ACK dropped")
 	}
@@ -1655,9 +1663,8 @@ func (g *GfxHandler) onEvictCacheEntry(data []byte) {
 }
 
 func (g *GfxHandler) onCacheImportOffer() {
-	p := &bytes.Buffer{}
-	core.WriteUInt16LE(0, p) // importedEntriesCount = 0
-	g.sendPdu(cmdidCacheImportReply, p.Bytes())
+	var p [2]byte // importedEntriesCount = 0 (little-endian zero)
+	g.sendPdu(cmdidCacheImportReply, p[:])
 }
 
 // --- Helpers ---

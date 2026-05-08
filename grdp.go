@@ -690,13 +690,14 @@ func (g *RdpClient) OnPointerUpdate(f func(uint16, uint16, uint16, uint16, uint1
 				xorStride := ((w*xorBpp + 15) / 16) * 2
 				xorData = make([]byte, len(p.Data))
 				copy(xorData, p.Data)
+				tmp := make([]byte, xorStride)
 				for y := 0; y < h/2; y++ {
 					top := y * xorStride
 					bot := (h - 1 - y) * xorStride
 					if top+xorStride <= len(xorData) && bot+xorStride <= len(xorData) {
-						for i := 0; i < xorStride; i++ {
-							xorData[top+i], xorData[bot+i] = xorData[bot+i], xorData[top+i]
-						}
+						copy(tmp, xorData[top:top+xorStride])
+						copy(xorData[top:top+xorStride], xorData[bot:bot+xorStride])
+						copy(xorData[bot:bot+xorStride], tmp)
 					}
 				}
 			} else {
@@ -710,13 +711,14 @@ func (g *RdpClient) OnPointerUpdate(f func(uint16, uint16, uint16, uint16, uint1
 				andStride := ((w + 15) / 16) * 2
 				andMask = make([]byte, len(p.Mask))
 				copy(andMask, p.Mask)
+				tmp := make([]byte, andStride)
 				for y := 0; y < h/2; y++ {
 					top := y * andStride
 					bot := (h - 1 - y) * andStride
 					if top+andStride <= len(andMask) && bot+andStride <= len(andMask) {
-						for i := 0; i < andStride; i++ {
-							andMask[top+i], andMask[bot+i] = andMask[bot+i], andMask[top+i]
-						}
+						copy(tmp, andMask[top:top+andStride])
+						copy(andMask[top:top+andStride], andMask[bot:bot+andStride])
+						copy(andMask[bot:bot+andStride], tmp)
 					}
 				}
 			} else {
