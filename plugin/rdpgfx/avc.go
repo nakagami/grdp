@@ -915,7 +915,11 @@ func (g *GfxHandler) maybeNotifyDecoderBroken() {
 				"attempt", g.softResetCount, "limit", softResetLimitNoIDR,
 				"reason", reason.String())
 			g.h264dec.Close()
-			g.h264dec = newH264DecoderWithWatchdog(g.watchdogCh)
+			if g.usingSWFallback {
+				g.h264dec = newH264DecoderSWWithWatchdog(g.watchdogCh)
+			} else {
+				g.h264dec = newH264DecoderWithWatchdog(g.watchdogCh)
+			}
 			if g.h264dec2 != nil && g.h264dec2.IsBroken() {
 				slog.Debug("H.264: aux decoder also broken on soft reset, waiting for IDR to recreate")
 				g.h264dec2.Close()

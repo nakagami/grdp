@@ -987,6 +987,19 @@ func newH264DecoderInternal(watchdogCh chan<- struct{}, forceSW bool) h264Decode
 		return nil
 	}
 
+	// Arm the keyframe-wait timer immediately so recovery is triggered even
+	// when the server sends no frames after a soft reset (e.g. static screen
+	// or ForceRefresh ignored by the server).  If an IDR arrives first,
+	// Decode() cancels the timer.  Decoders without a watchdog channel
+	// (e.g. h264dec2) are not armed here — they are managed separately.
+	if watchdogCh != nil {
+		d.kfWaitTimer = time.AfterFunc(keyframeWaitTimeout, func() {
+			d.timerBrokenReason.Store(int32(h264BrokenReasonNoIDR))
+			d.timerBroken.Store(true)
+			d.signalWatchdog()
+		})
+	}
+
 	runtime.SetFinalizer(d, func(dec *ffmpegDecoder) { dec.Close() })
 	return d
 }
@@ -1134,13 +1147,16 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 				d.keyframeWaitStart = time.Now()
 				if d.useHW {
 					slog.Debug("H.264: HW decoder waiting for IDR")
-					// Start a background timer so the timeout fires even when
-					// the server sends no frames (static screen → 0 fps).
-					d.kfWaitTimer = time.AfterFunc(keyframeWaitTimeout, func() {
-						d.timerBrokenReason.Store(int32(h264BrokenReasonNoIDR))
-						d.timerBroken.Store(true)
-						d.signalWatchdog()
-					})
+					// kfWaitTimer was armed at decoder creation; only start a new
+					// one here if the decoder was created without a watchdog channel
+					// (no timer was armed at creation time).
+					if d.kfWaitTimer == nil {
+						d.kfWaitTimer = time.AfterFunc(keyframeWaitTimeout, func() {
+							d.timerBrokenReason.Store(int32(h264BrokenReasonNoIDR))
+							d.timerBroken.Store(true)
+							d.signalWatchdog()
+						})
+					}
 				}
 			} else if d.keyframeWaitCount%30 == 0 {
 				slog.Debug("H.264: still waiting for IDR",
