@@ -280,6 +280,11 @@ type GfxHandler struct {
 	// "LC=2 never worked this session" (server may not support stream2 priming;
 	// gracefully degrade to LC=0 only without reconnecting).
 	lc2EverDecoded bool
+	// lc2Degraded is set permanently after maybeRenegotiateCapabilities decides
+	// to degrade to LC=0 only (lc2EverDecoded == false).  Once set, primeAuxDecoder
+	// will no longer create h264dec2 and the broken-timer will not be rearmed,
+	// preventing the same warning from being logged on every subsequent IDR.
+	lc2Degraded bool
 	// queueDepthHint is a minimum queueDepth to report in FRAME_ACKNOWLEDGE
 	// PDUs.  A higher value makes the server believe the client has a larger
 	// decode backlog, causing it to slow down or reduce encoding quality.
@@ -479,6 +484,7 @@ func (g *GfxHandler) maybeRenegotiateCapabilities() {
 		// the same failure.  Degrade gracefully: LC=2 is silently skipped for the
 		// remainder of this session and the main decoder continues at LC=0 quality.
 		slog.Warn("H.264: aux decoder absent and LC=2 never decoded — degrading to LC=0 only (no reconnect)")
+		g.lc2Degraded = true
 		return
 	}
 	// The timer firing is itself the auxDecoderBrokenTimeout signal.  Do not

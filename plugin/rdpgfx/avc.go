@@ -784,6 +784,9 @@ func clampByte(v int) byte {
 // (output discarded), h264dec2's DPB is always at the correct reference when
 // decodeAVC444LC2 decodes a standalone LC=2 P-frame.
 func (g *GfxHandler) primeAuxDecoder(h264Data []byte) {
+	if g.lc2Degraded {
+		return // permanently degraded to LC=0 only; do not recreate aux decoder
+	}
 	isIDR := h264PacketHasIDR(h264Data)
 	if g.h264dec2 == nil {
 		if !isIDR {
