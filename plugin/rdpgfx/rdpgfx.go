@@ -216,9 +216,9 @@ type GfxHandler struct {
 	// lc2SampleLogged is set after the first LC=2 combine output has been
 	// sampled for green/pink colour diagnostics.  Reset on each stream1 IDR so
 	// we can observe the combine quality at every GOP boundary.
-	lc2SampleLogged      bool
+	lc2SampleLogged       bool
 	lc2PFrameSampleLogged bool // logged first P-frame LC=2 combine after IDR
-	lc0SampleLogged      bool // logged first LC=0 IDR frame pixel samples
+	lc0SampleLogged       bool // logged first LC=0 IDR frame pixel samples
 	// framesDecoded is accessed from both read and decode goroutines.
 	framesDecoded atomic.Uint32
 	sendFn        func(data []byte)
@@ -812,7 +812,7 @@ func (g *GfxHandler) decompressMultipart(data []byte) ([]byte, bool) {
 	// buffer growths as each segment is appended.
 	buf := acquireBitmapBuf(int(uncompSize))
 	result := buf[:0]
-	for i := uint16(0); i < segCount; i++ {
+	for range segCount {
 		if offset+4 > len(data) {
 			break
 		}
@@ -1598,7 +1598,7 @@ func (g *GfxHandler) onSolidFill(data []byte) {
 	// Pre-compose a single BGRA pixel as a uint32 for one-shot writes.
 	pixelU32 := uint32(cb) | uint32(cg)<<8 | uint32(cr)<<16 | uint32(0xFF)<<24
 
-	for i := uint16(0); i < fillCount; i++ {
+	for range fillCount {
 		left, _ := core.ReadUint16LE(r)
 		top, _ := core.ReadUint16LE(r)
 		right, _ := core.ReadUint16LE(r)
@@ -1610,14 +1610,8 @@ func (g *GfxHandler) onSolidFill(data []byte) {
 		}
 
 		// Clamp to surface bounds
-		yEnd := int(bottom)
-		if yEnd > int(s.height) {
-			yEnd = int(s.height)
-		}
-		xEnd := int(right)
-		if xEnd > int(s.width) {
-			xEnd = int(s.width)
-		}
+		yEnd := min(int(bottom), int(s.height))
+		xEnd := min(int(right), int(s.width))
 
 		// Fill the first row with PutUint32 (single 32-bit store per pixel),
 		// then replicate it to subsequent rows with copy().
@@ -1676,7 +1670,7 @@ func (g *GfxHandler) onCacheToSurface(data []byte) {
 	ce, hasCE := g.cacheEntries[cacheSlot]
 	s, hasSurf := g.surfaces[surfId]
 
-	for i := uint16(0); i < destCount; i++ {
+	for range destCount {
 		dx, _ := core.ReadUint16LE(r)
 		dy, _ := core.ReadUint16LE(r)
 		if hasCE && hasSurf {
@@ -1703,7 +1697,7 @@ func (g *GfxHandler) onCacheImportOffer() {
 
 func blitToSurface(s *surface, x, y, w, h int, src []byte) {
 	stride := int(s.width) * 4
-	for row := 0; row < h; row++ {
+	for row := range h {
 		dy := y + row
 		if dy < 0 || dy >= int(s.height) {
 			continue
@@ -1913,7 +1907,7 @@ func applyDelta(plane []byte, w, h int) {
 		base := y * w
 		prev := plane[base-w : base : base]
 		cur := plane[base : base+w : base+w]
-		for x := 0; x < w; x++ {
+		for x := range w {
 			cur[x] ^= prev[x]
 		}
 	}
@@ -1947,7 +1941,7 @@ func (ctx *clearCodecCtx) decode(data []byte, w, h int) []byte {
 }
 
 func decodeResidual(data []byte, w, h int, out []byte) {
-	for y := 0; y < h; y++ {
+	for y := range h {
 		rowDstStart := y * w * 4
 		rowSrcStart := y * w * 3
 		rowDstEnd := rowDstStart + w*4
@@ -1957,7 +1951,7 @@ func decodeResidual(data []byte, w, h int, out []byte) {
 		}
 		dst := out[rowDstStart:rowDstEnd:rowDstEnd]
 		src := data[rowSrcStart:rowSrcEnd:rowSrcEnd]
-		for x := 0; x < w; x++ {
+		for x := range w {
 			si := x * 3
 			di := x * 4
 			dst[di] = src[si]
@@ -1985,7 +1979,7 @@ func (ctx *clearCodecCtx) decodeBands(data []byte, surfW int, out []byte) {
 			continue
 		}
 
-		for col := 0; col < colCount; col++ {
+		for col := range colCount {
 			if r.Len() < 2 {
 				return
 			}
@@ -2055,7 +2049,7 @@ func paintColumnBg(out []byte, surfW, x, yStart, height int, r, g, b uint8) {
 	if x < 0 || surfW <= 0 || x >= surfW {
 		return
 	}
-	for y := 0; y < height; y++ {
+	for y := range height {
 		dy := yStart + y
 		idx := (dy*surfW + x) * 4
 		if idx < 0 || idx+4 > len(out) {

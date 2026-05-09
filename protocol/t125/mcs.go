@@ -444,12 +444,12 @@ func (c *MCSClient) connectChannels() {
 		}
 		c.transport.On("data", c.recvData)
 		// send client and sever gcc informations callback to sec
-		clientData := make([]interface{}, 0)
+		clientData := make([]any, 0)
 		clientData = append(clientData, c.clientCoreData)
 		clientData = append(clientData, c.clientSecurityData)
 		clientData = append(clientData, c.clientNetworkData)
 
-		serverData := make([]interface{}, 0)
+		serverData := make([]any, 0)
 		serverData = append(serverData, c.serverCoreData)
 		serverData = append(serverData, c.serverSecurityData)
 		c.Emit("connect", clientData, serverData, c.userId, c.channels)

@@ -12,7 +12,7 @@ import (
 )
 
 var writePool = sync.Pool{
-	New: func() interface{} { return make([]byte, 0, 4096) },
+	New: func() any { return make([]byte, 0, 4096) },
 }
 
 // take idea from https://github.com/Madnikulin50/gordp

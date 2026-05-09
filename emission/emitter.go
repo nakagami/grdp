@@ -13,9 +13,9 @@ package emission
 import (
 	"errors"
 	"fmt"
-	"slices"
 	"os"
 	"reflect"
+	"slices"
 	"sync"
 )
 
@@ -26,28 +26,28 @@ const DefaultMaxListeners = 10
 var ErrNoneFunction = errors.New("Kind of Value for listener is not Func.")
 
 // RecoveryListener ...
-type RecoveryListener func(interface{}, interface{}, error)
+type RecoveryListener func(any, any, error)
 
 // listenerEntry pairs a pre-built dispatch wrapper with the original function
 // pointer so that RemoveListener can identify and remove it.
 type listenerEntry struct {
-	call func([]interface{}) // reflection-free dispatch wrapper
-	ptr  uintptr             // reflect.ValueOf(original).Pointer(); 0 if unavailable
+	call func([]any) // reflection-free dispatch wrapper
+	ptr  uintptr     // reflect.ValueOf(original).Pointer(); 0 if unavailable
 }
 
 // Pooled argument slices for the reflection fallback path.
 // Indexed by argument count (0–3); counts > 3 allocate directly.
 var rvPool = [4]*sync.Pool{
-	0: {New: func() interface{} { v := make([]reflect.Value, 0); return &v }},
-	1: {New: func() interface{} { v := make([]reflect.Value, 1); return &v }},
-	2: {New: func() interface{} { v := make([]reflect.Value, 2); return &v }},
-	3: {New: func() interface{} { v := make([]reflect.Value, 3); return &v }},
+	0: {New: func() any { v := make([]reflect.Value, 0); return &v }},
+	1: {New: func() any { v := make([]reflect.Value, 1); return &v }},
+	2: {New: func() any { v := make([]reflect.Value, 2); return &v }},
+	3: {New: func() any { v := make([]reflect.Value, 3); return &v }},
 }
 
 // Emitter is a reflect-minimal event emitter.
 type Emitter struct {
-	events       map[interface{}][]listenerEntry
-	onces        map[interface{}][]listenerEntry
+	events       map[any][]listenerEntry
+	onces        map[any][]listenerEntry
 	recoverer    RecoveryListener
 	maxListeners int
 }
@@ -57,21 +57,21 @@ type Emitter struct {
 // constant and initializing its events map.
 func NewEmitter() *Emitter {
 	return &Emitter{
-		events:       make(map[interface{}][]listenerEntry),
-		onces:        make(map[interface{}][]listenerEntry),
+		events:       make(map[any][]listenerEntry),
+		onces:        make(map[any][]listenerEntry),
 		maxListeners: DefaultMaxListeners,
 	}
 }
 
 // On is an alias for AddListener.
-func (e *Emitter) On(event, listener interface{}) *Emitter {
+func (e *Emitter) On(event, listener any) *Emitter {
 	return e.AddListener(event, listener)
 }
 
 // AddListener appends the listener argument to the event arguments slice.
 // If the reflect Value of the listener does not have a Kind of Func then
 // AddListener panics (or calls the RecoveryListener if one has been set).
-func (e *Emitter) AddListener(event, listener interface{}) *Emitter {
+func (e *Emitter) AddListener(event, listener any) *Emitter {
 	entry, ok := buildEntry(listener)
 	if !ok {
 		if e.recoverer == nil {
@@ -89,7 +89,7 @@ func (e *Emitter) AddListener(event, listener interface{}) *Emitter {
 }
 
 // RemoveListener removes the listener from the event's listener slice.
-func (e *Emitter) RemoveListener(event, listener interface{}) *Emitter {
+func (e *Emitter) RemoveListener(event, listener any) *Emitter {
 	rv := reflect.ValueOf(listener)
 	if rv.Kind() != reflect.Func {
 		if e.recoverer == nil {
@@ -113,12 +113,12 @@ func (e *Emitter) RemoveListener(event, listener interface{}) *Emitter {
 }
 
 // Off is an alias for RemoveListener.
-func (e *Emitter) Off(event, listener interface{}) *Emitter {
+func (e *Emitter) Off(event, listener any) *Emitter {
 	return e.RemoveListener(event, listener)
 }
 
 // Once registers a listener that fires at most once for the given event.
-func (e *Emitter) Once(event, listener interface{}) *Emitter {
+func (e *Emitter) Once(event, listener any) *Emitter {
 	entry, ok := buildEntry(listener)
 	if !ok {
 		if e.recoverer == nil {
@@ -136,7 +136,7 @@ func (e *Emitter) Once(event, listener interface{}) *Emitter {
 }
 
 // Emit calls each listener registered for event with the supplied arguments.
-func (e *Emitter) Emit(event interface{}, arguments ...interface{}) *Emitter {
+func (e *Emitter) Emit(event any, arguments ...any) *Emitter {
 	if entries, ok := e.events[event]; ok {
 		for _, ent := range entries {
 			e.dispatch(ent, event, arguments)
@@ -154,7 +154,7 @@ func (e *Emitter) Emit(event interface{}, arguments ...interface{}) *Emitter {
 	return e
 }
 
-func (e *Emitter) dispatch(ent listenerEntry, event interface{}, args []interface{}) {
+func (e *Emitter) dispatch(ent listenerEntry, event any, args []any) {
 	if e.recoverer != nil {
 		defer func() {
 			if r := recover(); r != nil {
@@ -179,7 +179,7 @@ func (e *Emitter) SetMaxListeners(max int) *Emitter {
 }
 
 // GetListenerCount returns the number of listeners registered for event.
-func (e *Emitter) GetListenerCount(event interface{}) (count int) {
+func (e *Emitter) GetListenerCount(event any) (count int) {
 	if entries, ok := e.events[event]; ok {
 		count = len(entries)
 	}
@@ -189,9 +189,9 @@ func (e *Emitter) GetListenerCount(event interface{}) (count int) {
 // On1 registers a typed listener with zero reflection at emit time.
 // Use instead of e.On(event, fn) when the argument type is not covered by the
 // built-in fast paths (func(), func(error), func([]byte), func(uint16)).
-func On1[T any](e *Emitter, event interface{}, fn func(T)) *Emitter {
+func On1[T any](e *Emitter, event any, fn func(T)) *Emitter {
 	e.events[event] = append(e.events[event], listenerEntry{
-		call: func(args []interface{}) {
+		call: func(args []any) {
 			if len(args) > 0 {
 				fn(args[0].(T))
 			}
@@ -201,9 +201,9 @@ func On1[T any](e *Emitter, event interface{}, fn func(T)) *Emitter {
 }
 
 // Once1 registers a typed one-shot listener with zero reflection at emit time.
-func Once1[T any](e *Emitter, event interface{}, fn func(T)) *Emitter {
+func Once1[T any](e *Emitter, event any, fn func(T)) *Emitter {
 	e.onces[event] = append(e.onces[event], listenerEntry{
-		call: func(args []interface{}) {
+		call: func(args []any) {
 			if len(args) > 0 {
 				fn(args[0].(T))
 			}
@@ -219,13 +219,13 @@ func Once1[T any](e *Emitter, event interface{}, fn func(T)) *Emitter {
 // that no reflection happens when the listener is actually called.
 // Slow path: an unknown function type is wrapped with a pooled-reflect
 // wrapper that avoids heap allocation for 0–3 argument calls.
-func buildEntry(listener interface{}) (listenerEntry, bool) {
+func buildEntry(listener any) (listenerEntry, bool) {
 	// Fast path — type-assert well-known signatures.
 	switch fn := listener.(type) {
 	case func():
-		return listenerEntry{call: func(_ []interface{}) { fn() }}, true
+		return listenerEntry{call: func(_ []any) { fn() }}, true
 	case func(error):
-		return listenerEntry{call: func(args []interface{}) {
+		return listenerEntry{call: func(args []any) {
 			var err error
 			if len(args) > 0 && args[0] != nil {
 				err = args[0].(error)
@@ -233,13 +233,13 @@ func buildEntry(listener interface{}) (listenerEntry, bool) {
 			fn(err)
 		}}, true
 	case func([]byte):
-		return listenerEntry{call: func(args []interface{}) {
+		return listenerEntry{call: func(args []any) {
 			if len(args) > 0 {
 				fn(args[0].([]byte))
 			}
 		}}, true
 	case func(uint16):
-		return listenerEntry{call: func(args []interface{}) {
+		return listenerEntry{call: func(args []any) {
 			if len(args) > 0 {
 				fn(args[0].(uint16))
 			}
@@ -262,7 +262,7 @@ func buildEntry(listener interface{}) (listenerEntry, bool) {
 		ins[i] = t.In(i)
 	}
 
-	call := func(args []interface{}) {
+	call := func(args []any) {
 		if numIn == 0 {
 			rv.Call(nil)
 			return

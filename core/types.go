@@ -7,9 +7,9 @@ type Transport interface {
 	Write(b []byte) (n int, err error)
 	Close() error
 
-	On(event, listener interface{}) *emission.Emitter
-	Once(event, listener interface{}) *emission.Emitter
-	Emit(event interface{}, arguments ...interface{}) *emission.Emitter
+	On(event, listener any) *emission.Emitter
+	Once(event, listener any) *emission.Emitter
+	Emit(event any, arguments ...any) *emission.Emitter
 }
 
 type FastPathListener interface {

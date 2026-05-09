@@ -223,7 +223,7 @@ func (c *CliprdrClient) readFormatList(b []byte) (*CliprdrFormatList, bool) {
 		formatId, _ := core.ReadUInt32LE(r)
 		bs := make([]uint16, 0, 20)
 		ln := r.Len()
-		for j := 0; j < ln; j++ {
+		for range ln {
 			b, _ := core.ReadUint16LE(r)
 			if b == 0 {
 				break

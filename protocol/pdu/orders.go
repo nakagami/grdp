@@ -1200,13 +1200,13 @@ func update_decompress_brush(in []uint8, bpp int) []uint8 {
 	for y := 7; y >= 0; y-- {
 		/* 2 bytes per row */
 		x := 0
-		for do2 := 0; do2 < 2; do2++ {
+		for range 2 {
 			/* 4 pixels per byte */
 			shift = 6
 			for shift >= 0 {
 				pal_index = int((in[in_index] >> shift) & 3)
 				/* size of palette entries depends on bpp */
-				for i := 0; i < bpp; i++ {
+				for i := range bpp {
 					out[(y*8+x)*bpp+i] = pal[pal_index*bpp+i]
 				}
 				x++

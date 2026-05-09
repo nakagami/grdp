@@ -1,5 +1,4 @@
 //go:build ignore
-// +build ignore
 
 // addins.go
 package plugin

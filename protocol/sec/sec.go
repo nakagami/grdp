@@ -248,8 +248,8 @@ type SEC struct {
 	transport   core.Transport
 	info        *RDPInfo
 	machineName string
-	clientData  []interface{}
-	serverData  []interface{}
+	clientData  []any
+	serverData  []any
 
 	enableEncryption bool
 	//Enable Secure Mac generation
@@ -511,7 +511,7 @@ func (c *Client) SetDomain(domain string) {
 	c.info.Domain = buff.Bytes()
 }
 
-func (c *Client) connect(clientData []interface{}, serverData []interface{}, userId uint16, channels []t125.MCSChannelInfo) {
+func (c *Client) connect(clientData []any, serverData []any, userId uint16, channels []t125.MCSChannelInfo) {
 	slog.Debug("connected!", "clientData", clientData, "serverData", serverData, "userId", userId, "channels", channels)
 	c.clientData = clientData
 	c.serverData = serverData
@@ -855,7 +855,7 @@ func (c *Client) sendClientChallengeResponse(data []byte) {
 	b := &bytes.Buffer{}
 	b.Write(c.ClientCoreData().ClientName[:])
 	b.Write(c.info.UserName)
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		b.Write([]byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00})
 	}
 	hwid := b.Bytes()[:20]

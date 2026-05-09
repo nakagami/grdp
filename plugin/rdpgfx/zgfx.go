@@ -94,7 +94,7 @@ func init() {
 		shift := uint(9 - t.prefixLen)
 		base := uint32(t.prefixCode) << shift
 		span := uint32(1) << shift
-		for j := uint32(0); j < span; j++ {
+		for j := range span {
 			idx := base | j
 			if zgfxTokenLut[idx].prefixLen == 0 {
 				zgfxTokenLut[idx] = tokenLutEntry{
@@ -235,7 +235,7 @@ func (br *bitReader) getBits(n uint8) uint32 {
 	}
 	// Slow path: span byte boundaries (n can be up to 24).
 	var result uint32
-	for i := uint8(0); i < n; i++ {
+	for range n {
 		result = (result << 1) | br.getBit()
 	}
 	return result
@@ -454,10 +454,10 @@ func (z *zgfxContext) decodeToken(br *bitReader) (zgfxToken, bool) {
 	}
 	br.consumeBits(e.prefixLen)
 	return zgfxToken{
-		prefixLen:  e.prefixLen,
-		valueBits:  e.valueBits,
-		tokenType:  e.tokenType,
-		valueBase:  e.valueBase,
+		prefixLen: e.prefixLen,
+		valueBits: e.valueBits,
+		tokenType: e.tokenType,
+		valueBase: e.valueBase,
 	}, true
 }
 

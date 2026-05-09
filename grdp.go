@@ -66,7 +66,7 @@ type RdpClient struct {
 	// stored callbacks for re-registration on reconnect
 	onErrorFn         func(e error)
 	onCloseFn         func()
-	onSuccessFn        func()
+	onSuccessFn       func()
 	onReadyFn         func()
 	onBitmapPaintFn   func([]Bitmap)
 	onPointerHideFn   func()
@@ -1025,10 +1025,7 @@ func (g *RdpClient) sendWheelLocked(now time.Time) {
 	// must store the 9-bit two's-complement form, not the raw magnitude.
 	// Send as many 0xFF-capped events as needed (same loop as FreeRDP).
 	for iaccum > 0 {
-		cval := iaccum
-		if cval > 0xFF {
-			cval = 0xFF
-		}
+		cval := min(iaccum, 0xFF)
 		iaccum -= cval
 
 		p := &pdu.PointerEvent{}

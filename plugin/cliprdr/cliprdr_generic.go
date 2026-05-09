@@ -145,7 +145,7 @@ func GetFileNames() []string {
 	return []string{}
 }
 
-func GetFileInfo(sys interface{}) (uint32, []byte, uint32, uint32) {
+func GetFileInfo(sys any) (uint32, []byte, uint32, uint32) {
 	return 0, []byte{}, 0, 0
 }
 

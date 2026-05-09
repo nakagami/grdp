@@ -96,7 +96,7 @@ func (d *rfxProgressiveDecoder) parseRegion(data []byte, surfData []byte, outW, 
 
 	// Parse rects (8 bytes each: x, y, width, height as uint16)
 	rects := make([]rfxRect, numRects)
-	for i := uint16(0); i < numRects; i++ {
+	for i := range numRects {
 		if offset+8 > len(data) {
 			return nil, nil
 		}
@@ -110,7 +110,7 @@ func (d *rfxProgressiveDecoder) parseRegion(data []byte, surfData []byte, outW, 
 
 	// Parse quant values (5 bytes each)
 	quants := make([]rfxQuant, numQuant)
-	for i := uint8(0); i < numQuant; i++ {
+	for i := range numQuant {
 		if offset+5 > len(data) {
 			return nil, nil
 		}
@@ -341,7 +341,7 @@ func rfxIDWT2DLevel(buf []int16, n int) {
 	tmp := bufs.tmp[:size*size]
 
 	// Step 1: Horizontal IDWT on each row
-	for row := 0; row < n; row++ {
+	for row := range n {
 		rowOff := row * n
 		lDstOff := row * size
 		hDstOff := (row + n) * size
@@ -375,14 +375,14 @@ func rfxIDWT2DLevel(buf []int16, n int) {
 	const blk = 4
 	col := 0
 	for ; col+blk <= size; col += blk {
-		for b := 0; b < blk; b++ {
+		for b := range blk {
 			c := col + b
 			lVal := int32(tmp[c])
 			hVal := int32(tmp[n*size+c])
 			buf[c] = int16(lVal - ((hVal*2 + 1) >> 1))
 		}
 		for row := 1; row < n; row++ {
-			for b := 0; b < blk; b++ {
+			for b := range blk {
 				c := col + b
 				lIdx := row*size + c
 				hIdx := (row+n)*size + c
@@ -396,7 +396,7 @@ func rfxIDWT2DLevel(buf []int16, n int) {
 				buf[(2*row-1)*size+c] = int16(odd)
 			}
 		}
-		for b := 0; b < blk; b++ {
+		for b := range blk {
 			c := col + b
 			lastEven := int32(buf[(2*n-2)*size+c])
 			lastH := int32(tmp[(2*n-1)*size+c])
@@ -443,12 +443,12 @@ func ictToBGRA(yRow, cbRow, crRow []int16, dst []byte, n int) {
 	full := (n / batch) * batch
 	for base := 0; base < full; base += batch {
 		var yv, cb, cr [batch]int32
-		for k := 0; k < batch; k++ {
+		for k := range batch {
 			yv[k] = int32(yRow[base+k])
 			cb[k] = int32(cbRow[base+k])
 			cr[k] = int32(crRow[base+k])
 		}
-		for k := 0; k < batch; k++ {
+		for k := range batch {
 			ys := (yv[k] + 4096) << 16
 			bv := uint32(max(0, min((cb[k]*115992+ys)>>21, 255)))
 			gv := uint32(max(0, min((ys-cb[k]*22527-cr[k]*46819)>>21, 255)))

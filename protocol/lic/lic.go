@@ -76,7 +76,7 @@ type LicensePacket struct {
 	BMsgtype         uint8
 	Flag             uint8
 	WMsgSize         uint16
-	LicensingMessage interface{}
+	LicensingMessage any
 }
 
 func ReadLicensePacket(r io.Reader) *LicensePacket {

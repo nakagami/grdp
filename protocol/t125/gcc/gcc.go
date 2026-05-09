@@ -614,8 +614,8 @@ type ScData interface {
 	Unpack(io.Reader) error
 }
 
-func ReadConferenceCreateResponse(data []byte) []interface{} {
-	ret := make([]interface{}, 0, 3)
+func ReadConferenceCreateResponse(data []byte) []any {
+	ret := make([]any, 0, 3)
 
 	r := bytes.NewReader(data)
 	per.ReadChoice(r)

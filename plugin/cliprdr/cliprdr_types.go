@@ -193,11 +193,11 @@ func (f *FileGroupDescriptor) Unpack(b []byte) error {
 func (f *FileDescriptor) serialize() []byte {
 	b := &bytes.Buffer{}
 	core.WriteUInt32LE(f.Flags, b)
-	for i := 0; i < 32; i++ {
+	for range 32 {
 		core.WriteByte(0, b)
 	}
 	core.WriteUInt32LE(f.FileAttributes, b)
-	for i := 0; i < 16; i++ {
+	for range 16 {
 		core.WriteByte(0, b)
 	}
 	core.WriteBytes(f.LastWriteTime[:], b)

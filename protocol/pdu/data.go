@@ -1176,7 +1176,7 @@ func decodeSurfaceBitsCmd(r io.Reader) (*BitmapData, error) {
 		for y := 0; y < h/2; y++ {
 			top := y * stride
 			bot := (h - 1 - y) * stride
-			for i := 0; i < stride; i++ {
+			for i := range stride {
 				pixels[top+i], pixels[bot+i] = pixels[bot+i], pixels[top+i]
 			}
 		}
@@ -1294,7 +1294,7 @@ func decodeNSCodec(data []byte, width, height int) []byte {
 	if chromaSubsamplingLevel > 0 {
 		// 2:1 horizontal chroma subsampling: each Co/Cg sample covers 2 pixels.
 		// Process 2 pixels per iteration to eliminate the px%2 modulo.
-		for py := 0; py < height; py++ {
+		for py := range height {
 			yRowOff := py * yRowWidth
 			coIdx := (py >> 1) * coRowWidth
 			cgIdx := coIdx
@@ -1368,13 +1368,13 @@ func decodeNSCodec(data []byte, width, height int) []byte {
 		}
 	} else {
 		// No subsampling, but with alpha plane.
-		for py := 0; py < height; py++ {
+		for py := range height {
 			yRowOff := py * yRowWidth
 			coIdx := py * coRowWidth
 			cgIdx := coIdx
 			outBase := py * width
 
-			for px := 0; px < width; px++ {
+			for px := range width {
 				yVal, coVal, cgVal := int16(0), int16(0), int16(0)
 				if yIdx := yRowOff + px; yIdx < len(yPlane) {
 					yVal = int16(yPlane[yIdx])
@@ -1477,10 +1477,7 @@ func nrleDecode(input []byte, originalSize int) []byte {
 				runLen = left
 			}
 			// Exponential-doubling copy for large runs is O(log n) instead of O(n).
-			n := runLen
-			if n > originalSize-outPos {
-				n = originalSize - outPos
-			}
+			n := min(runLen, originalSize-outPos)
 			output[outPos] = value
 			wrote := 1
 			for wrote < n {

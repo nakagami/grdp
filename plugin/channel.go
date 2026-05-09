@@ -71,24 +71,24 @@ type ChannelDef struct {
 	Name    string
 	Options uint32
 }
-type CHANNEL_INIT_EVENT_EX_FN func(lpUserParam interface{},
-	pInitHandle interface{}, event uint, pData uintptr, dataLength uint)
-type VIRTUALCHANNELINITEX func(lpUserParam interface{}, clientContext interface{},
-	pInitHandle interface{}, pChannel []ChannelDef,
+type CHANNEL_INIT_EVENT_EX_FN func(lpUserParam any,
+	pInitHandle any, event uint, pData uintptr, dataLength uint)
+type VIRTUALCHANNELINITEX func(lpUserParam any, clientContext any,
+	pInitHandle any, pChannel []ChannelDef,
 	channelCount int, versionRequested uint32,
 	pChannelInitEventProcEx CHANNEL_INIT_EVENT_EX_FN) uint
 
 type CHANNEL_OPEN_EVENT_EX_FN func(lpUserParam uintptr,
 	openHandle uint32, event uint,
 	pData uintptr, dataLength uint32, totalLength uint32, dataFlags uint32)
-type VIRTUALCHANNELOPENEX func(pInitHandle interface{}, pOpenHandle *uint32,
+type VIRTUALCHANNELOPENEX func(pInitHandle any, pOpenHandle *uint32,
 	pChannelName string,
 	pChannelOpenEventProcEx *CHANNEL_OPEN_EVENT_EX_FN) uint
 
-type VIRTUALCHANNELCLOSEEX func(pInitHandle interface{}, openHandle uint32) uint
+type VIRTUALCHANNELCLOSEEX func(pInitHandle any, openHandle uint32) uint
 
-type VIRTUALCHANNELWRITEEX func(pInitHandle interface{}, openHandle uint32, pData interface{},
-	dataLength uint32, pUserData interface{}) uint
+type VIRTUALCHANNELWRITEEX func(pInitHandle any, openHandle uint32, pData any,
+	dataLength uint32, pUserData any) uint
 
 type ChannelEntryPointsEx struct {
 	CbSize                 uint32
@@ -107,7 +107,7 @@ func NewChannelEntryPointsEx() *ChannelEntryPointsEx {
 }
 
 type VIRTUALCHANNELENTRYEX func(pEntryPointsEx *ChannelEntryPointsEx,
-	pInitHandle interface{}) error
+	pInitHandle any) error
 
 /*
 type ChannelEntryPoints struct {

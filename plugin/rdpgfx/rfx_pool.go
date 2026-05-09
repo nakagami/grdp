@@ -7,7 +7,7 @@ import "sync"
 // and several temporary buffers for the IDWT.
 
 var coeffPool = sync.Pool{
-	New: func() interface{} { return make([]int16, 4096) },
+	New: func() any { return make([]int16, 4096) },
 }
 
 // idwtBufs holds reusable scratch buffers for one rfxIDWT2DLevel call.
@@ -17,7 +17,7 @@ type idwtBufs struct {
 }
 
 var idwtBufPool = sync.Pool{
-	New: func() interface{} {
+	New: func() any {
 		b := &idwtBufs{}
 		for i := range b.sub {
 			b.sub[i] = make([]int16, 1024)

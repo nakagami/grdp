@@ -63,7 +63,7 @@ func rlgr1Encode(coeffs []int16) []byte {
 			remainder := code & ((1 << kr) - 1)
 
 			// leading 1-bits
-			for j := uint32(0); j < vk2; j++ {
+			for range vk2 {
 				bw.writeBit(1)
 			}
 			bw.writeBit(0) // terminator
@@ -126,7 +126,7 @@ func rlgr1Encode(coeffs []int16) []byte {
 			remainder := code & ((1 << kr) - 1)
 
 			// leading 1-bits
-			for j := uint32(0); j < vk; j++ {
+			for range vk {
 				bw.writeBit(1)
 			}
 			bw.writeBit(0) // terminator
@@ -239,7 +239,7 @@ func TestRLGR1RoundTrip_SingleDC(t *testing.T) {
 func TestRLGR1RoundTrip_MultipleNonZero(t *testing.T) {
 	// Coefficients with non-zero values in various subbands
 	coeffs := make([]int16, 4096)
-	coeffs[0] = 5    // HL1[0]
+	coeffs[0] = 5     // HL1[0]
 	coeffs[100] = -3  // HL1[100]
 	coeffs[1024] = 7  // LH1[0]
 	coeffs[4032] = 10 // LL3[0]
@@ -332,7 +332,7 @@ func rlgr3Encode(coeffs []int16) []byte {
 
 			vk := code >> kr
 			remainder := code & ((1 << kr) - 1)
-			for j := uint32(0); j < vk; j++ {
+			for range vk {
 				bw.writeBit(1)
 			}
 			bw.writeBit(0)
@@ -389,7 +389,7 @@ func rlgr3Encode(coeffs []int16) []byte {
 			// GR encode the sum
 			vk := code >> kr
 			remainder := code & ((1 << kr) - 1)
-			for j := uint32(0); j < vk; j++ {
+			for range vk {
 				bw.writeBit(1)
 			}
 			bw.writeBit(0)
@@ -527,7 +527,7 @@ func TestRLGR3RoundTrip_MultipleNonZero(t *testing.T) {
 func TestRLGR3RoundTrip_ConsecutiveNonZero(t *testing.T) {
 	// Test GR mode with many consecutive non-zero pairs
 	coeffs := make([]int16, 64)
-	for i := 0; i < 64; i++ {
+	for i := range 64 {
 		coeffs[i] = int16(i%7 - 3) // values: -3,-2,-1,0,1,2,3
 	}
 
@@ -545,37 +545,37 @@ func TestRLGR3RoundTrip_ConsecutiveNonZero(t *testing.T) {
 
 // BenchmarkRLGR1Decode benchmarks RLGR1 decode on a 64x64 coefficient block.
 func BenchmarkRLGR1Decode(b *testing.B) {
-// Create coefficients representative of a natural image tile (mostly zeros, some non-zero)
-coeffs := make([]int16, 4096)
-for i := range coeffs {
-if i%17 == 0 {
-coeffs[i] = int16(i%256 - 128)
-}
-}
-data := rlgr1Encode(coeffs)
+	// Create coefficients representative of a natural image tile (mostly zeros, some non-zero)
+	coeffs := make([]int16, 4096)
+	for i := range coeffs {
+		if i%17 == 0 {
+			coeffs[i] = int16(i%256 - 128)
+		}
+	}
+	data := rlgr1Encode(coeffs)
 
-b.ResetTimer()
-var dst []int16
-for b.Loop() {
-dst = rlgr1Decode(data, len(coeffs), dst)
-}
-_ = dst
+	b.ResetTimer()
+	var dst []int16
+	for b.Loop() {
+		dst = rlgr1Decode(data, len(coeffs), dst)
+	}
+	_ = dst
 }
 
 // BenchmarkRLGR3Decode benchmarks RLGR3 decode on a 64x64 coefficient block.
 func BenchmarkRLGR3Decode(b *testing.B) {
-coeffs := make([]int16, 4096)
-for i := range coeffs {
-if i%17 == 0 {
-coeffs[i] = int16(i%256 - 128)
-}
-}
-data := rlgr3Encode(coeffs)
+	coeffs := make([]int16, 4096)
+	for i := range coeffs {
+		if i%17 == 0 {
+			coeffs[i] = int16(i%256 - 128)
+		}
+	}
+	data := rlgr3Encode(coeffs)
 
-b.ResetTimer()
-var dst []int16
-for b.Loop() {
-dst = rlgr3Decode(data, len(coeffs), dst)
-}
-_ = dst
+	b.ResetTimer()
+	var dst []int16
+	for b.Loop() {
+		dst = rlgr3Decode(data, len(coeffs), dst)
+	}
+	_ = dst
 }

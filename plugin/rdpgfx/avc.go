@@ -46,7 +46,7 @@ func parseAVC420Stream(data []byte) (*avc420Stream, error) {
 
 	off := 4
 	regions := make([]avcRect, numRegions)
-	for i := uint32(0); i < numRegions; i++ {
+	for i := range numRegions {
 		regions[i] = avcRect{
 			left:   binary.LittleEndian.Uint16(data[off:]),
 			top:    binary.LittleEndian.Uint16(data[off+2:]),
@@ -654,12 +654,12 @@ func combineAVC444v2BGRA(
 	auxYStride := i420aux.YStride
 	auxUStride := i420aux.UStride
 	auxVStride := i420aux.VStride
-	for row := 0; row < h; row++ {
+	for row := range h {
 		yRow := yPlane[row*yStride:]
 		outRow := out[row*w*4:]
 		auxYRow := i420aux.Y[row*auxYStride:]
 		uvRow := row >> 1
-		for col := 0; col < w; col++ {
+		for col := range w {
 			Y := yRow[col]
 			var Cb, Cr byte
 			if col&1 == 1 {
@@ -699,9 +699,9 @@ func i420ToBGRA(src *h264FrameI420) ([]byte, bool) {
 	}
 	w, h := src.Width, src.Height
 	out := acquireBitmapBuf(w * h * 4)
-	for row := 0; row < h; row++ {
+	for row := range h {
 		uvRow := row >> 1
-		for col := 0; col < w; col++ {
+		for col := range w {
 			Y := src.Y[row*src.YStride+col]
 			U := src.U[uvRow*src.UStride+(col>>1)]
 			V := src.V[uvRow*src.VStride+(col>>1)]

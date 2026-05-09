@@ -45,7 +45,7 @@ func rlgr1Decode(data []byte, outputSize int, dst []int16) []int16 {
 
 			// Each leading 0 adds (1 << k) to run, with k adapting upward
 			run := uint32(0)
-			for i := uint32(0); i < vk; i++ {
+			for range vk {
 				run += 1 << k
 				kp += rlgrUPGR
 				if kp > rlgrKPMax {
@@ -115,10 +115,7 @@ func rlgr1Decode(data []byte, outputSize int, dst []int16) []int16 {
 			}
 
 			// Output: run zeros (already 0 from init), then the non-zero value
-			runEnd := cnt + int(run)
-			if runEnd > outputSize {
-				runEnd = outputSize
-			}
+			runEnd := min(cnt+int(run), outputSize)
 			cnt = runEnd
 			if cnt < outputSize {
 				output[cnt] = mag
@@ -227,7 +224,7 @@ func rlgr3Decode(data []byte, outputSize int, dst []int16) []int16 {
 			}
 
 			run := uint32(0)
-			for i := uint32(0); i < vk; i++ {
+			for range vk {
 				run += 1 << k
 				kp += rlgrUPGR
 				if kp > rlgrKPMax {
@@ -289,10 +286,7 @@ func rlgr3Decode(data []byte, outputSize int, dst []int16) []int16 {
 				mag = -mag
 			}
 
-			runEnd3 := cnt + int(run)
-			if runEnd3 > outputSize {
-				runEnd3 = outputSize
-			}
+			runEnd3 := min(cnt+int(run), outputSize)
 			cnt = runEnd3
 			if cnt < outputSize {
 				output[cnt] = mag
@@ -427,10 +421,7 @@ func (br *rlgrBitReader) readBits(n int) uint32 {
 	if br.bitsInAcc < n {
 		br.fill(n)
 	}
-	avail := br.bitsInAcc
-	if avail > n {
-		avail = n
-	}
+	avail := min(br.bitsInAcc, n)
 	var val uint32
 	if avail > 0 {
 		val = uint32(br.acc >> uint(64-avail))
