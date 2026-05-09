@@ -114,7 +114,7 @@ func (d *rfxDecoder) parseRegion(data []byte, left, top int) []rfxRect {
 
 	rects := make([]rfxRect, numRects)
 	off := 3
-	for i := uint16(0); i < numRects; i++ {
+	for i := range numRects {
 		rects[i] = rfxRect{
 			x: left + int(binary.LittleEndian.Uint16(data[off:])),
 			y: top + int(binary.LittleEndian.Uint16(data[off+2:])),
@@ -206,16 +206,14 @@ func (d *rfxDecoder) decodeTileset(data []byte, left, top int, surfData []byte, 
 	const parallelTileThreshold = 12
 	if len(tiles) >= parallelTileThreshold {
 		workers := min(runtime.NumCPU(), len(tiles))
-		var wg sync.WaitGroup
 		ch := make(chan tileWork, len(tiles))
 		for _, t := range tiles {
 			ch <- t
 		}
 		close(ch)
-		wg.Add(workers)
+		var wg sync.WaitGroup
 		for range workers {
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				defer func() {
 					if r := recover(); r != nil {
 						slog.Error("RFX: tile decode panic", "err", r)
@@ -224,7 +222,7 @@ func (d *rfxDecoder) decodeTileset(data []byte, left, top int, surfData []byte, 
 				for t := range ch {
 					d.decodeTile(t.content, quants, rlgrMode, left, top, surfData, width, height)
 				}
-			}()
+			})
 		}
 		wg.Wait()
 	} else {
