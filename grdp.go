@@ -478,7 +478,6 @@ func (g *RdpClient) doLogin(routingToken []byte) error {
 	type connResult struct {
 		err      error
 		redirect *pdu.ServerRedirectionPDU
-		retry    bool // deactivateAll → need GFX retry
 	}
 
 	ch := make(chan connResult, 4)
@@ -502,6 +501,10 @@ func (g *RdpClient) doLogin(routingToken []byte) error {
 	g.pdu.On("error", func(err error) {
 		if !readyFired {
 			send(connResult{err: err})
+		} else {
+			// Mid-session error: stop accepting input so we don't
+			// try to write to the now-dead transport.
+			g.eventReady.Store(false)
 		}
 	})
 
@@ -517,18 +520,18 @@ func (g *RdpClient) doLogin(routingToken []byte) error {
 		}
 	})
 
+	// DeactivateAllPDU during an active session means the server is
+	// reactivating (e.g. desktop resize). Pause input until "ready"
+	// fires again after the reactivation handshake completes.
+	g.pdu.On("deactivateAll", func() {
+		g.eventReady.Store(false)
+	})
+
 	select {
 	case r := <-ch:
 		if r.err != nil {
 			g.tpkt.Close()
 			return fmt.Errorf("[connection err] %v", r.err)
-		}
-		if r.retry {
-			slog.Debug("Server requires GFX, retrying with GFX flag")
-			g.tpkt.Close()
-			g.eventReady.Store(false)
-			time.Sleep(2 * time.Second)
-			return g.doLogin(nil)
 		}
 		if r.redirect != nil {
 			slog.Debug("Server redirect", "loadBalanceInfo", string(r.redirect.LoadBalanceInfo))

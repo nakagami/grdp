@@ -178,8 +178,12 @@ func (c *Client) recvDemandActivePDU(s []byte) {
 	}
 	if pdu.ShareCtrlHeader.PDUType != PDUTYPE_DEMANDACTIVEPDU {
 		if pdu.ShareCtrlHeader.PDUType == PDUTYPE_DEACTIVATEALLPDU {
-			slog.Error("server sent DeactivateAllPDU before session was established; the server likely failed to create a session (check xrdp/sesman logs on the server)")
-			c.Emit("deactivateAll")
+			// Per [MS-RDPBCGR] the server may send DeactivateAllPDU before
+			// DemandActivePDU (e.g. GNOME RDP after RDPGFX capability
+			// exchange). Stay on the same connection and keep waiting,
+			// exactly as FreeRDP does.
+			slog.Debug("received DeactivateAllPDU while waiting for DemandActivePDU; continuing to wait")
+			c.transport.Once("data", c.recvDemandActivePDU)
 			return
 		}
 		if pdu.ShareCtrlHeader.PDUType == PDUTYPE_SERVER_REDIR_PKT {
@@ -406,6 +410,10 @@ func (c *Client) recvPDU(s []byte) {
 			return
 		}
 		if p.ShareCtrlHeader.PDUType == PDUTYPE_DEACTIVATEALLPDU {
+			// Server is reactivating the session (e.g. desktop resize).
+			// Signal callers to pause input until "ready" fires again.
+			slog.Debug("received DeactivateAllPDU during active session, waiting for reactivation")
+			c.Emit("deactivateAll")
 			c.transport.Once("data", c.recvDemandActivePDU)
 		} else if p.ShareCtrlHeader.PDUType == PDUTYPE_SERVER_REDIR_PKT {
 			if redir, ok := p.Message.(*ServerRedirectionPDU); ok {
