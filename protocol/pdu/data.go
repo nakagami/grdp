@@ -496,9 +496,9 @@ func readServerRedirectionPDU(r io.Reader) (*ServerRedirectionPDU, error) {
 	}
 
 	slog.Debug("Server Redirection PDU",
-		"flags", fmt.Sprintf("0x%04x", redir.Flags),
+		"flags", redir.Flags,
 		"sessionID", redir.SessionID,
-		"redirFlags", fmt.Sprintf("0x%08x", redir.RedirFlags),
+		"redirFlags", redir.RedirFlags,
 		"loadBalanceInfo", string(redir.LoadBalanceInfo))
 	return redir, nil
 }
@@ -563,7 +563,7 @@ func readDataPDU(r io.Reader) (*DataPDU, error) {
 		d = &PointerDataPDU{}
 
 	default:
-		err = errors.New(fmt.Sprintf("Unknown data pdu type2 0x%02x", header.PDUType2))
+		err = fmt.Errorf("Unknown data pdu type2 0x%02x", header.PDUType2)
 		slog.Error("readDataPDU", "err", err)
 		return nil, err
 	}
@@ -613,7 +613,7 @@ func (d *UpdateDataPDU) Unpack(r io.Reader) (err error) {
 			return err
 		}
 	} else {
-		return errors.New(fmt.Sprintf("Unsupport slow update type 0x%x", d.UpdateType))
+		return fmt.Errorf("Unsupport slow update type 0x%x", d.UpdateType)
 	}
 
 	d.Udata = p
@@ -870,7 +870,7 @@ func (s *SaveSessionInfo) logonInfoV1(r io.Reader) (err error) {
 
 	sessionId, _ := core.ReadUInt32LE(r)
 	s.LogonId = sessionId
-	slog.Debug(fmt.Sprintf("SessionId:[%d] UserName:[%s] Domain:[%s]", s.LogonId, userName, domain))
+	slog.Debug("logonInfo", "sessionId", s.LogonId, "userName", userName, "domain", domain)
 	return err
 }
 func (s *SaveSessionInfo) logonInfoV2(r io.Reader) (err error) {
@@ -886,7 +886,7 @@ func (s *SaveSessionInfo) logonInfoV2(r io.Reader) (err error) {
 	domain := core.UnicodeDecode(b)
 	b, _ = core.ReadBytes(int(cbUserName), r)
 	userName := core.UnicodeDecode(b)
-	slog.Debug(fmt.Sprintf("SessionId:[%d] UserName:[ %s] Domain:[ %s]", s.LogonId, userName, domain))
+	slog.Debug("logonInfoV2", "sessionId", s.LogonId, "userName", userName, "domain", domain)
 
 	return err
 }
@@ -903,11 +903,11 @@ func (s *SaveSessionInfo) logonInfoExtended(r io.Reader) (err error) {
 		core.ReadUInt32LE(r)
 		b, _ := core.ReadUInt32LE(r)
 		if b != 28 {
-			return errors.New(fmt.Sprintf("invalid length in Auto-Reconnect packet"))
+			return errors.New("invalid length in Auto-Reconnect packet")
 		}
 		b, _ = core.ReadUInt32LE(r)
 		if b != 1 {
-			return errors.New(fmt.Sprintf("unsupported version of Auto-Reconnect packet"))
+			return errors.New("unsupported version of Auto-Reconnect packet")
 		}
 		b, _ = core.ReadUInt32LE(r)
 		s.LogonId = b
@@ -933,7 +933,6 @@ func (s *SaveSessionInfo) Unpack(r io.Reader) (err error) {
 	case INFOTYPE_LOGON_EXTENDED_INFO:
 		err = s.logonInfoExtended(r)
 	default:
-		slog.Error(fmt.Sprintf("Unhandled saveSessionInfo type 0x%x", s.InfoType))
 		return fmt.Errorf("Unhandled saveSessionInfo type 0x%x", s.InfoType)
 	}
 
@@ -1139,8 +1138,8 @@ func decodeSurfaceBitsCmd(r io.Reader) (*BitmapData, error) {
 	}
 
 	slog.Debug("decodeSurfaceBitsCmd",
-		"dest", fmt.Sprintf("(%d,%d)-(%d,%d)", destLeft, destTop, destRight, destBottom),
-		"size", fmt.Sprintf("%dx%d", width, height),
+		"destLeft", destLeft, "destTop", destTop, "destRight", destRight, "destBottom", destBottom,
+		"width", width, "height", height,
 		"bpp", bpp, "codecID", codecID, "flags", flags, "dataLen", bitmapDataLength)
 
 	var pixels []byte
@@ -1611,7 +1610,7 @@ func readFastPathUpdatePDU(r io.Reader, code uint8) (*FastPathUpdatePDU, error) 
 		d = &FastPathUpdatePointerPDU{}
 	case FASTPATH_UPDATETYPE_LARGE_POINTER:
 	default:
-		return f, errors.New(fmt.Sprintf("Unknown FastPathPDU type 0x%x", code))
+		return f, fmt.Errorf("Unknown FastPathPDU type 0x%x", code)
 	}
 	if d != nil {
 		err = d.Unpack(r)
@@ -1620,7 +1619,7 @@ func readFastPathUpdatePDU(r io.Reader, code uint8) (*FastPathUpdatePDU, error) 
 			return nil, err
 		}
 	} else {
-		return nil, errors.New(fmt.Sprintf("Unsupport FastPathPDU type 0x%x", code))
+		return nil, fmt.Errorf("Unsupport FastPathPDU type 0x%x", code)
 	}
 
 	f.Data = d
@@ -1678,7 +1677,7 @@ func readPDU(r io.Reader) (*PDU, error) {
 		slog.Debug("readPDU:PDUTYPE_SERVER_REDIR_PKT")
 		d, err = readServerRedirectionPDU(r)
 	default:
-		slog.Error(fmt.Sprintf("PDU invalid pdu type: 0x%02x", pdu.ShareCtrlHeader.PDUType))
+		slog.Error("PDU invalid pdu type", "type", fmt.Sprintf("0x%02x", pdu.ShareCtrlHeader.PDUType))
 	}
 	if err != nil {
 		return nil, err

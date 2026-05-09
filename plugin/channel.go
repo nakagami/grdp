@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"log/slog"
+	"slices"
 	"unsafe"
 
 	"github.com/nakagami/grdp/core"
@@ -243,35 +244,32 @@ func (c *Channels) SendToChannel(channel string, s []byte) (int, error) {
 		slog.Warn("No register", "channel", channel)
 		return 0, fmt.Errorf("No register channel: %s", channel)
 	}
-	idx := 0
-	ln := len(s)
+	totalLen := len(s)
+	baseFlag := uint32(0)
+	if cli.Options&CHANNEL_OPTION_SHOW_PROTOCOL != 0 {
+		baseFlag |= CHANNEL_FLAG_SHOW_PROTOCOL
+	}
 	b := &bytes.Buffer{}
-	for ln > 0 {
-		var flag uint32 = 0
-		if cli.Options&CHANNEL_OPTION_SHOW_PROTOCOL != 0 {
-			flag |= CHANNEL_FLAG_SHOW_PROTOCOL
-		}
-		if idx == 0 {
+	first := true
+	remaining := totalLen
+	for chunk := range slices.Chunk(s, CHANNEL_CHUNK_LENGTH) {
+		flag := baseFlag
+		if first {
 			flag |= CHANNEL_FLAG_FIRST
+			first = false
 		}
-
-		var ss []byte
-		if ln > CHANNEL_CHUNK_LENGTH {
-			ss = s[idx : idx+CHANNEL_CHUNK_LENGTH]
-			idx += CHANNEL_CHUNK_LENGTH
-		} else {
+		remaining -= len(chunk)
+		if remaining == 0 {
 			flag |= CHANNEL_FLAG_LAST
-			ss = s[idx : idx+ln]
 		}
-		slog.Debug("SendToChannel", "len", len(ss), "flag", flag)
-		ln -= len(ss)
+		slog.Debug("SendToChannel", "len", len(chunk), "flag", flag)
 		b.Reset()
-		core.WriteUInt32LE(uint32(len(s)), b)
+		core.WriteUInt32LE(uint32(totalLen), b)
 		core.WriteUInt32LE(flag, b)
-		b.Write(ss)
+		b.Write(chunk)
 		c.channelSender.SendToChannel(channel, b.Bytes())
 	}
-	return ln, nil
+	return 0, nil
 }
 
 func (c *Channels) process(channel string, s []byte) {
@@ -280,22 +278,22 @@ func (c *Channels) process(channel string, s []byte) {
 		slog.Warn("process No found channel", "channel", channel)
 		return
 	}
-	r := bytes.NewReader(s)
-	_, _ = core.ReadUInt32LE(r)
-	flags, _ := core.ReadUInt32LE(r)
+	if len(s) < 8 {
+		return
+	}
+	// Parse 8-byte header directly: totalLen(4) + flags(4)
+	flags := uint32(s[4]) | uint32(s[5])<<8 | uint32(s[6])<<16 | uint32(s[7])<<24
+	payload := s[8:]
 	if flags&CHANNEL_FLAG_FIRST == 0 || flags&CHANNEL_FLAG_LAST == 0 {
 		if flags&CHANNEL_FLAG_FIRST != 0 {
 			c.buff.Reset()
 		}
-		b, _ := core.ReadBytes(r.Len(), r)
-		c.buff.Write(b)
+		c.buff.Write(payload)
 		if flags&CHANNEL_FLAG_LAST == 0 {
 			return
 		}
-		s = c.buff.Bytes()
+		cli.t.Process(c.buff.Bytes())
 	} else {
-		s, _ = core.ReadBytes(r.Len(), r)
+		cli.t.Process(payload)
 	}
-
-	cli.t.Process(s)
 }

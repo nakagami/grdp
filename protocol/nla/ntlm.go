@@ -475,43 +475,49 @@ type NTLMv2Security struct {
 func (n *NTLMv2Security) GssEncrypt(s []byte) []byte {
 	p := make([]byte, len(s))
 	n.EncryptRC4.XORKeyStream(p, s)
-	b := &bytes.Buffer{}
 
-	//signature
-	core.WriteUInt32LE(n.SeqNum, b)
-	core.WriteBytes(s, b)
-	s1 := HMAC_MD5(n.SigningKey, b.Bytes())[:8]
+	// HMAC input: SeqNum(4) + plaintext
+	sigInput := make([]byte, 4+len(s))
+	binary.LittleEndian.PutUint32(sigInput, n.SeqNum)
+	copy(sigInput[4:], s)
+	s1 := HMAC_MD5(n.SigningKey, sigInput)[:8]
+
 	checksum := make([]byte, 8)
 	n.EncryptRC4.XORKeyStream(checksum, s1)
-	b.Reset()
-	core.WriteUInt32LE(0x00000001, b)
-	core.WriteBytes(checksum, b)
-	core.WriteUInt32LE(n.SeqNum, b)
 
-	core.WriteBytes(p, b)
+	// Output: version(4) + checksum(8) + SeqNum(4) + encrypted(len(p))
+	out := make([]byte, 16+len(p))
+	binary.LittleEndian.PutUint32(out[0:], 0x00000001)
+	copy(out[4:], checksum)
+	binary.LittleEndian.PutUint32(out[12:], n.SeqNum)
+	copy(out[16:], p)
 
 	n.SeqNum++
-
-	return b.Bytes()
+	return out
 }
+
 func (n *NTLMv2Security) GssDecrypt(s []byte) []byte {
-	r := bytes.NewReader(s)
-	core.ReadUInt32LE(r) //version
-	checksum, _ := core.ReadBytes(8, r)
-	seqNum, _ := core.ReadUInt32LE(r)
-	data, _ := core.ReadBytes(r.Len(), r)
+	if len(s) < 16 {
+		return nil
+	}
+	// s[0:4] = version (ignored), s[4:12] = checksum, s[12:16] = seqNum, s[16:] = data
+	checksum := s[4:12]
+	seqNum := binary.LittleEndian.Uint32(s[12:16])
+	data := s[16:]
 
 	p := make([]byte, len(data))
 	n.DecryptRC4.XORKeyStream(p, data)
 
-	check := make([]byte, len(checksum))
+	check := make([]byte, 8)
 	n.DecryptRC4.XORKeyStream(check, checksum)
 
-	b := &bytes.Buffer{}
-	core.WriteUInt32LE(seqNum, b)
-	core.WriteBytes(p, b)
-	verify := HMAC_MD5(n.VerifyKey, b.Bytes())[:8]
-	if string(verify) != string(check) {
+	// HMAC input: seqNum(4) + decrypted(len(p))
+	verifyInput := make([]byte, 4+len(p))
+	binary.LittleEndian.PutUint32(verifyInput, seqNum)
+	copy(verifyInput[4:], p)
+	verify := HMAC_MD5(n.VerifyKey, verifyInput)[:8]
+
+	if !bytes.Equal(verify, check) {
 		return nil
 	}
 	return p

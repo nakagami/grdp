@@ -147,10 +147,7 @@ func decompress1(output *[]uint8, width, height int, input []uint8, size int) bo
 					count--
 					x++
 				}
-				n := count
-				if n > width-x {
-					n = width - x
-				}
+				n := min(count, width-x)
 				if prevline == 0 {
 					clear(out[x+line : x+line+n])
 				} else {
@@ -160,10 +157,7 @@ func decompress1(output *[]uint8, width, height int, input []uint8, size int) bo
 				x += n
 				break
 			case 1: /* Mix */
-				n := count
-				if n > width-x {
-					n = width - x
-				}
+				n := min(count, width-x)
 				if prevline == 0 {
 					seg := out[x+line : x+line+n]
 					for i := range seg {
@@ -221,10 +215,7 @@ func decompress1(output *[]uint8, width, height int, input []uint8, size int) bo
 				}
 				break
 			case 3: /* Colour */
-				n := count
-				if n > width-x {
-					n = width - x
-				}
+				n := min(count, width-x)
 				seg := out[x+line : x+line+n]
 				for i := range seg {
 					seg[i] = colour2
@@ -261,10 +252,7 @@ func decompress1(output *[]uint8, width, height int, input []uint8, size int) bo
 				break
 
 			case 0xd: /* White */
-				n := count
-				if n > width-x {
-					n = width - x
-				}
+				n := min(count, width-x)
 				seg := out[x+line : x+line+n]
 				for i := range seg {
 					seg[i] = 0xff
@@ -273,10 +261,7 @@ func decompress1(output *[]uint8, width, height int, input []uint8, size int) bo
 				x += n
 				break
 			case 0xe: /* Black */
-				n := count
-				if n > width-x {
-					n = width - x
-				}
+				n := min(count, width-x)
 				clear(out[x+line : x+line+n])
 				count -= n
 				x += n
@@ -425,10 +410,7 @@ func decompress2(output *[]uint8, width, height int, input []uint8, size int) bo
 					count--
 					x++
 				}
-				n := count
-				if n > width-x {
-					n = width - x
-				}
+				n := min(count, width-x)
 				if prevline == 0 {
 					clear(out[x+line : x+line+n])
 				} else {
@@ -438,10 +420,7 @@ func decompress2(output *[]uint8, width, height int, input []uint8, size int) bo
 				x += n
 				break
 			case 1: /* Mix */
-				n := count
-				if n > width-x {
-					n = width - x
-				}
+				n := min(count, width-x)
 				if prevline == 0 {
 					seg := out[x+line : x+line+n]
 					for i := range seg {
@@ -499,10 +478,7 @@ func decompress2(output *[]uint8, width, height int, input []uint8, size int) bo
 				}
 				break
 			case 3: /* Colour */
-				n := count
-				if n > width-x {
-					n = width - x
-				}
+				n := min(count, width-x)
 				seg := out[x+line : x+line+n]
 				for i := range seg {
 					seg[i] = colour2
@@ -538,10 +514,7 @@ func decompress2(output *[]uint8, width, height int, input []uint8, size int) bo
 
 				break
 			case 0xd: /* White */
-				n2 := count
-				if n2 > width-x {
-					n2 = width - x
-				}
+				n2 := min(count, width-x)
 				seg2 := out[x+line : x+line+n2]
 				for i := range seg2 {
 					seg2[i] = 0xffff
@@ -550,10 +523,7 @@ func decompress2(output *[]uint8, width, height int, input []uint8, size int) bo
 				x += n2
 				break
 			case 0xe: /* Black */
-				n3 := count
-				if n3 > width-x {
-					n3 = width - x
-				}
+				n3 := min(count, width-x)
 				clear(out[x+line : x+line+n3])
 				count -= n3
 				x += n3
@@ -693,10 +663,7 @@ func decompress3(output *[]uint8, width, height int, input []uint8, size int) bo
 					count--
 					x++
 				}
-				n := count
-				if n > width-x {
-					n = width - x
-				}
+				n := min(count, width-x)
 				if prevline == 0 {
 					clear(out[3*x+line : 3*x+line+3*n])
 				} else {
@@ -708,10 +675,7 @@ func decompress3(output *[]uint8, width, height int, input []uint8, size int) bo
 				x += n
 				break
 			case 1: /* Mix */
-				n := count
-				if n > width-x {
-					n = width - x
-				}
+				n := min(count, width-x)
 				dst1 := out[3*x+line : 3*x+line+3*n]
 				if prevline == 0 {
 					// Exponential-doubling copy: O(log n) memcpy calls
@@ -784,10 +748,7 @@ func decompress3(output *[]uint8, width, height int, input []uint8, size int) bo
 				}
 				break
 			case 3: /* Colour */
-				n := count
-				if n > width-x {
-					n = width - x
-				}
+				n := min(count, width-x)
 				seg3 := out[3*x+line : 3*x+line+3*n]
 				seg3[0], seg3[1], seg3[2] = colour2[0], colour2[1], colour2[2]
 				for wrote := 3; wrote < len(seg3); {
@@ -831,10 +792,7 @@ func decompress3(output *[]uint8, width, height int, input []uint8, size int) bo
 				}
 				break
 			case 0xd: /* White */
-				n3 := count
-				if n3 > width-x {
-					n3 = width - x
-				}
+				n3 := min(count, width-x)
 				seg3 := out[3*x+line : 3*x+line+3*n3]
 				for i := range seg3 {
 					seg3[i] = 0xff
@@ -843,10 +801,7 @@ func decompress3(output *[]uint8, width, height int, input []uint8, size int) bo
 				x += n3
 				break
 			case 0xe: /* Black */
-				n2 := count
-				if n2 > width-x {
-					n2 = width - x
-				}
+				n2 := min(count, width-x)
 				clear(out[3*x+line : 3*x+line+3*n2])
 				count -= n2
 				x += n2

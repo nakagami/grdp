@@ -13,6 +13,7 @@ package emission
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"os"
 	"reflect"
 	"sync"
@@ -98,23 +99,15 @@ func (e *Emitter) RemoveListener(event, listener interface{}) *Emitter {
 		return e
 	}
 	ptr := rv.Pointer()
-	if entries, ok := e.events[event]; ok {
-		out := entries[:0]
-		for _, ent := range entries {
-			if ent.ptr != ptr {
-				out = append(out, ent)
-			}
-		}
-		e.events[event] = out
+	if _, ok := e.events[event]; ok {
+		e.events[event] = slices.DeleteFunc(e.events[event], func(ent listenerEntry) bool {
+			return ent.ptr == ptr
+		})
 	}
-	if entries, ok := e.onces[event]; ok {
-		out := entries[:0]
-		for _, ent := range entries {
-			if ent.ptr != ptr {
-				out = append(out, ent)
-			}
-		}
-		e.onces[event] = out
+	if _, ok := e.onces[event]; ok {
+		e.onces[event] = slices.DeleteFunc(e.onces[event], func(ent listenerEntry) bool {
+			return ent.ptr == ptr
+		})
 	}
 	return e
 }
@@ -285,7 +278,7 @@ func buildEntry(listener interface{}) (listenerEntry, bool) {
 			vals = make([]reflect.Value, numIn)
 		}
 
-		for i := 0; i < numIn; i++ {
+		for i := range numIn {
 			if i < len(args) && args[i] != nil {
 				vals[i] = reflect.ValueOf(args[i])
 			} else {

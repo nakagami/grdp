@@ -310,10 +310,7 @@ func (z *zgfxContext) outputMatch(distance, count int, out *[]byte) {
 	// Grow output by `count` bytes in a single allocation step.
 	if cap(o)-base < count {
 		// Standard slice-growth: at least double cap or fit count, whichever larger.
-		newCap := cap(o) * 2
-		if newCap < base+count {
-			newCap = base + count
-		}
+		newCap := max(cap(o)*2, base+count)
 		grown := make([]byte, base+count, newCap)
 		copy(grown, o)
 		o = grown

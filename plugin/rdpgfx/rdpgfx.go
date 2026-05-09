@@ -3,7 +3,6 @@ package rdpgfx
 import (
 	"bytes"
 	"encoding/binary"
-	"fmt"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -709,7 +708,7 @@ func (g *GfxHandler) Process(data []byte) {
 	case zgfxMultipart:
 		decompressed, decompPooled = g.decompressMultipart(data[1:])
 	default:
-		slog.Warn("RDPGFX: unknown ZGFX descriptor", "descriptor", fmt.Sprintf("0x%02X", descriptor))
+		slog.Warn("RDPGFX: unknown ZGFX descriptor", "descriptor", descriptor)
 		decompressed = data
 	}
 
@@ -964,7 +963,7 @@ func (g *GfxHandler) dispatchDecode(cmdId uint16, data []byte, skipHeavy bool) {
 	case cmdidMapSurfaceToScaledOutput, cmdidMapSurfaceToScaledOutputV2:
 		g.onMapSurfaceToScaledOutput(data)
 	default:
-		slog.Debug("RDPGFX: unhandled cmd", "cmdId", fmt.Sprintf("0x%04X", cmdId))
+		slog.Debug("RDPGFX: unhandled cmd", "cmdId", cmdId)
 	}
 }
 
@@ -1049,7 +1048,7 @@ func (g *GfxHandler) onCapsConfirm(data []byte) {
 	if dataLen >= 4 {
 		flags, _ = core.ReadUInt32LE(r)
 	}
-	slog.Debug("RDPGFX: CAPS_CONFIRM", "version", fmt.Sprintf("0x%08X", version), "flags", fmt.Sprintf("0x%08X", flags))
+	slog.Debug("RDPGFX: CAPS_CONFIRM", "version", version, "flags", flags)
 }
 
 func (g *GfxHandler) onResetGraphics(data []byte) {
@@ -1211,7 +1210,7 @@ func (g *GfxHandler) onWireToSurface1Decode(data []byte, skipHeavy bool) {
 	bmpData := data[17 : 17+int(bmpLen)]
 
 	if slog.Default().Enabled(nil, slog.LevelDebug) {
-		slog.Debug("RDPGFX: WTS1", "surfId", surfId, "codecId", fmt.Sprintf("0x%04X", codecId),
+		slog.Debug("RDPGFX: WTS1", "surfId", surfId, "codecId", codecId,
 			"w", right-left, "h", bottom-top, "bmpLen", bmpLen)
 	}
 
@@ -1335,7 +1334,7 @@ func (g *GfxHandler) onWireToSurface1Decode(data []byte, skipHeavy bool) {
 			owned = ownedAVC
 		}
 	default:
-		slog.Warn("RDPGFX: unsupported codec in WTS1", "codecId", fmt.Sprintf("0x%04X", codecId), "surfId", surfId, "w", w, "h", h, "bmpLen", bmpLen)
+		slog.Warn("RDPGFX: unsupported codec in WTS1", "codecId", codecId, "surfId", surfId, "w", w, "h", h, "bmpLen", bmpLen)
 		return
 	}
 	if decoded == nil {
@@ -1384,7 +1383,7 @@ func (g *GfxHandler) onWireToSurface2Decode(data []byte, skipHeavy bool) {
 	h := int(s.height)
 
 	if slog.Default().Enabled(nil, slog.LevelDebug) {
-		slog.Debug("RDPGFX: WTS2", "surfId", surfId, "codecId", fmt.Sprintf("0x%04X", codecId),
+		slog.Debug("RDPGFX: WTS2", "surfId", surfId, "codecId", codecId,
 			"w", w, "h", h, "bmpLen", bmpLen)
 	}
 
@@ -1573,7 +1572,7 @@ func (g *GfxHandler) onWireToSurface2Decode(data []byte, skipHeavy bool) {
 			regionPool.Put(region)
 		}
 	default:
-		slog.Debug("RDPGFX: WTS2 unsupported codec", "codecId", fmt.Sprintf("0x%04X", codecId), "ctxId", codecCtxId)
+		slog.Debug("RDPGFX: WTS2 unsupported codec", "codecId", codecId, "ctxId", codecCtxId)
 		return
 	}
 }
@@ -1759,9 +1758,7 @@ func decodeUncompressed(data []byte, w, h int, pixFmt uint8) []byte {
 	} else {
 		copy(out[:len(data)], data)
 		// Zero the unfilled tail in case the slice was reused from the pool.
-		for i := len(data); i < n; i++ {
-			out[i] = 0
-		}
+		clear(out[len(data):n])
 	}
 	return out
 }
@@ -1812,7 +1809,7 @@ func decodePlanar(data []byte, w, h int) []byte {
 	hasAlpha := ap != nil && len(ap) >= planeSize
 	if hasAlpha {
 		ap = ap[:planeSize]
-		for i := 0; i < planeSize; i++ {
+		for i := range planeSize {
 			j := i * 4
 			out[j] = bp[i]
 			out[j+1] = gp[i]
@@ -1820,7 +1817,7 @@ func decodePlanar(data []byte, w, h int) []byte {
 			out[j+3] = ap[i]
 		}
 	} else {
-		for i := 0; i < planeSize; i++ {
+		for i := range planeSize {
 			j := i * 4
 			out[j] = bp[i]
 			out[j+1] = gp[i]
@@ -1879,10 +1876,10 @@ func decodeNRLE(data []byte, offset, planeSize int) ([]byte, int) {
 				offset += 2
 			}
 		}
-		for i := 0; i < runLen && pos < planeSize; i++ {
-			out[pos] = 0
-			pos++
-		}
+		// Bulk-zero the run (clear is a runtime intrinsic; much faster than byte-by-byte).
+		end := min(pos+runLen, planeSize)
+		clear(out[pos:end])
+		pos = end
 
 		if rawLen == 15 {
 			if offset >= len(data) {
@@ -1899,11 +1896,11 @@ func decodeNRLE(data []byte, offset, planeSize int) ([]byte, int) {
 				offset += 2
 			}
 		}
-		for i := 0; i < rawLen && pos < planeSize && offset < len(data); i++ {
-			out[pos] = data[offset]
-			pos++
-			offset++
-		}
+		// Bulk-copy the raw run (copy is a runtime intrinsic; much faster than byte-by-byte).
+		n := min(rawLen, min(planeSize-pos, len(data)-offset))
+		copy(out[pos:pos+n], data[offset:offset+n])
+		pos += n
+		offset += n
 	}
 	return out, offset
 }

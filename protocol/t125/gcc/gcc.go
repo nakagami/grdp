@@ -317,8 +317,8 @@ func (n *ClientNetworkData) Pack() []byte {
 	core.WriteUInt32LE(n.ChannelCount, buff)
 	for i := 0; i < int(n.ChannelCount); i++ {
 		v := n.ChannelDefArray[i]
-		name := make([]byte, 8)
-		copy(name, []byte(v.Name))
+		var name [8]byte
+		copy(name[:], v.Name)
 		core.WriteBytes(name[:], buff)
 		core.WriteUInt32LE(v.Options, buff)
 	}
