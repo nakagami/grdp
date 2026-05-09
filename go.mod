@@ -1,8 +1,6 @@
 module github.com/nakagami/grdp
 
-go 1.24.0
-
-toolchain go1.24.3
+go 1.26.3
 
 require (
 	github.com/lunixbochs/struc v0.0.0-20200707160740-784aaebc1d40
