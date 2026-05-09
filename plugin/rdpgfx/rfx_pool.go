@@ -10,19 +10,14 @@ var coeffPool = sync.Pool{
 	New: func() any { return make([]int16, 4096) },
 }
 
-// idwtBufs holds reusable scratch buffers for one rfxIDWT2DLevel call.
+// idwtBufs holds the temporary buffer for one rfxIDWT2DLevel call.
+// The subbands (HL/LH/HH/LL) are read directly from the input buf without copying.
 type idwtBufs struct {
-	sub [4][]int16 // hl, lh, hh, ll (max 1024 each at level 1)
-	tmp []int16    // max 64*64 = 4096
+	tmp []int16 // intermediate row-interleaved buffer; max 64×64 = 4096
 }
 
 var idwtBufPool = sync.Pool{
 	New: func() any {
-		b := &idwtBufs{}
-		for i := range b.sub {
-			b.sub[i] = make([]int16, 1024)
-		}
-		b.tmp = make([]int16, 4096)
-		return b
+		return &idwtBufs{tmp: make([]int16, 4096)}
 	},
 }

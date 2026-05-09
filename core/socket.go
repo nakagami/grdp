@@ -6,7 +6,6 @@ import (
 	"crypto/tls"
 	"encoding/asn1"
 	"errors"
-	"log/slog"
 	"math/big"
 	"net"
 	"time"
@@ -61,12 +60,9 @@ func (s *SocketLayer) Read(b []byte) (n int, err error) {
 
 func (s *SocketLayer) Write(b []byte) (n int, err error) {
 	if s.tlsConn != nil {
-		n, err = s.tlsConn.Write(b)
-	} else {
-		n, err = s.conn.Write(b)
+		return s.tlsConn.Write(b)
 	}
-	slog.Debug("socket Write", "n", n, "len", len(b), "err", err)
-	return
+	return s.conn.Write(b)
 }
 
 func (s *SocketLayer) Close() error {

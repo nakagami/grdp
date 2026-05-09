@@ -7,6 +7,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log/slog"
+	"runtime"
+	"sync"
 	"unsafe"
 )
 
@@ -121,25 +123,65 @@ func (d *rfxProgressiveDecoder) parseRegion(data []byte, surfData []byte, outW, 
 	// Skip progressive quant values (RFX_PROGRESSIVE_CODEC_QUANT, 16 bytes each)
 	offset += int(numProgQuant) * 16
 
-	// Decode tile sub-blocks embedded within this region block.
+	// Collect all decodable tiles before dispatching, so we can parallelise
+	// when there are enough to amortise goroutine overhead (same threshold as
+	// non-progressive decodeTileset in rfx.go).
+	type progTileWork struct {
+		tileType uint16
+		data     []byte
+	}
+	var tiles []progTileWork
 	for offset+6 <= len(data) {
 		tileType := binary.LittleEndian.Uint16(data[offset:])
 		tileLen := binary.LittleEndian.Uint32(data[offset+2:])
 		if tileLen < 6 || offset+int(tileLen) > len(data) {
 			break
 		}
-		tileData := data[offset+6 : offset+int(tileLen)]
 		switch tileType {
-		case progWBTTileSimple:
-			d.decodeTileSimple(tileData, quants, surfData, outW, outH)
-		case progWBTTileFirst:
-			d.decodeTileFirst(tileData, quants, surfData, outW, outH)
+		case progWBTTileSimple, progWBTTileFirst:
+			tiles = append(tiles, progTileWork{tileType: tileType, data: data[offset+6 : offset+int(tileLen)]})
 		case progWBTTileUpgrade:
 			// Progressive upgrade pass — first pass is sufficient for display.
 		default:
 			slog.Debug(fmt.Sprintf("RFX: unknown progressive tile type 0x%04X", tileType))
 		}
 		offset += int(tileLen)
+	}
+
+	const parallelTileThreshold = 12
+	decodeTile := func(tw progTileWork) {
+		switch tw.tileType {
+		case progWBTTileSimple:
+			d.decodeTileSimple(tw.data, quants, surfData, outW, outH)
+		case progWBTTileFirst:
+			d.decodeTileFirst(tw.data, quants, surfData, outW, outH)
+		}
+	}
+	if len(tiles) >= parallelTileThreshold {
+		workers := min(runtime.NumCPU(), len(tiles))
+		ch := make(chan progTileWork, len(tiles))
+		for _, tw := range tiles {
+			ch <- tw
+		}
+		close(ch)
+		var wg sync.WaitGroup
+		for range workers {
+			wg.Go(func() {
+				defer func() {
+					if r := recover(); r != nil {
+						slog.Error("RFX progressive: tile decode panic", "err", r)
+					}
+				}()
+				for tw := range ch {
+					decodeTile(tw)
+				}
+			})
+		}
+		wg.Wait()
+	} else {
+		for _, tw := range tiles {
+			decodeTile(tw)
+		}
 	}
 
 	return rects, quants
@@ -272,13 +314,23 @@ func rfxDecodeComponent(data []byte, quant rfxQuant, rlgrMode int) []int16 {
 		coeffs = rlgr1Decode(data, tilePixels, coeffs)
 	}
 
-	// 2. Differential decode LL3 (positions 4032..4095)
-	for i := 4033; i < 4096; i++ {
-		coeffs[i] += coeffs[i-1]
+	// 2. Differential decode LL3 and dequantize LL3 in a single pass.
+	// Mathematical identity: cumsum(x) * 2^s == cumsum_of(x * 2^s)
+	// so we can left-shift each element before accumulating.
+	if quant.LL3 > 1 {
+		shift := quant.LL3 - 1
+		coeffs[4032] <<= shift
+		for i := 4033; i < 4096; i++ {
+			coeffs[i] = coeffs[i-1] + coeffs[i]<<shift
+		}
+	} else {
+		for i := 4033; i < 4096; i++ {
+			coeffs[i] += coeffs[i-1]
+		}
 	}
 
-	// 3. Dequantize (left-shift by quant-1 per subband)
-	rfxDequantize(coeffs, quant)
+	// 3. Dequantize all subbands except LL3 (handled above)
+	rfxDequantizeSkipLL3(coeffs, quant)
 
 	// 4. Inverse DWT (3 levels)
 	rfxInverseDWT2D(coeffs)
@@ -286,8 +338,9 @@ func rfxDecodeComponent(data []byte, quant rfxQuant, rlgrMode int) []int16 {
 	return coeffs
 }
 
-// rfxDequantize applies dequantization (left shift by factor-1) per subband.
-func rfxDequantize(coeffs []int16, q rfxQuant) {
+// rfxDequantizeSkipLL3 applies dequantization per subband, skipping LL3
+// (which is handled together with differential decode in rfxDecodeComponent).
+func rfxDequantizeSkipLL3(coeffs []int16, q rfxQuant) {
 	rfxShiftSubband(coeffs[0:1024], q.HL1)    // HL1
 	rfxShiftSubband(coeffs[1024:2048], q.LH1) // LH1
 	rfxShiftSubband(coeffs[2048:3072], q.HH1) // HH1
@@ -297,7 +350,6 @@ func rfxDequantize(coeffs []int16, q rfxQuant) {
 	rfxShiftSubband(coeffs[3840:3904], q.HL3) // HL3
 	rfxShiftSubband(coeffs[3904:3968], q.LH3) // LH3
 	rfxShiftSubband(coeffs[3968:4032], q.HH3) // HH3
-	rfxShiftSubband(coeffs[4032:4096], q.LL3) // LL3
 }
 
 func rfxShiftSubband(data []int16, factor uint8) {
@@ -328,16 +380,14 @@ func rfxIDWT2DLevel(buf []int16, n int) {
 	nn := n * n
 	size := 2 * n
 
-	bufs := idwtBufPool.Get().(*idwtBufs)
-	hl := bufs.sub[0][:nn]
-	lh := bufs.sub[1][:nn]
-	hh := bufs.sub[2][:nn]
-	ll := bufs.sub[3][:nn]
-	copy(hl, buf[0:nn])
-	copy(lh, buf[nn:2*nn])
-	copy(hh, buf[2*nn:3*nn])
-	copy(ll, buf[3*nn:4*nn])
+	// Read subbands directly from buf — no copy needed because the horizontal
+	// pass only reads from them and writes exclusively to tmp.
+	hl := buf[0:nn]
+	lh := buf[nn : 2*nn]
+	hh := buf[2*nn : 3*nn]
+	ll := buf[3*nn : 4*nn]
 
+	bufs := idwtBufPool.Get().(*idwtBufs)
 	tmp := bufs.tmp[:size*size]
 
 	// Step 1: Horizontal IDWT on each row

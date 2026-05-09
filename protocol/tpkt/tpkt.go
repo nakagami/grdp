@@ -1,7 +1,9 @@
 package tpkt
 
 import (
+	"encoding/binary"
 	"fmt"
+	"io"
 	"log/slog"
 	"sync"
 	"time"
@@ -35,8 +37,6 @@ type TPKT struct {
 	emission.Emitter
 	Conn             *core.SocketLayer
 	ntlm             *nla.NTLMv2
-	secFlag          byte
-	lastShortLength  int
 	fastPathListener core.FastPathListener
 	ntlmSec          *nla.NTLMv2Security
 }
@@ -45,10 +45,76 @@ func New(s *core.SocketLayer, ntlm *nla.NTLMv2) *TPKT {
 	t := &TPKT{
 		Emitter: *emission.NewEmitter(),
 		Conn:    s,
-		secFlag: 0,
-		ntlm:    ntlm}
-	core.StartReadBytes(2, s, t.recvHeader)
+		ntlm:    ntlm,
+	}
+	go t.readLoop()
 	return t
+}
+
+// readLoop is the single goroutine that reads all incoming TPKT/FastPath packets.
+// It replaces the previous callback-chain pattern (StartReadBytes → recvHeader →
+// StartReadBytes → recvExtendedHeader → …) which spawned a new goroutine for each
+// individual read.  By using a single blocking loop with io.ReadFull, we eliminate
+// goroutine creation/destruction overhead on the hot receive path.
+func (t *TPKT) readLoop() {
+	var hdr [2]byte
+	for {
+		if _, err := io.ReadFull(t.Conn, hdr[:]); err != nil {
+			t.Emit("error", err)
+			return
+		}
+
+		version := hdr[0]
+		if version == FASTPATH_ACTION_X224 {
+			// TPKT packet: 4-byte header total (version, reserved, length-hi, length-lo)
+			var extHdr [2]byte
+			if _, err := io.ReadFull(t.Conn, extHdr[:]); err != nil {
+				t.Emit("error", err)
+				return
+			}
+			size := binary.BigEndian.Uint16(extHdr[:])
+			if size < 4 {
+				t.Emit("error", fmt.Errorf("TPKT: invalid packet size %d", size))
+				return
+			}
+			body := make([]byte, int(size)-4)
+			if _, err := io.ReadFull(t.Conn, body); err != nil {
+				t.Emit("error", err)
+				return
+			}
+			t.Emit("data", body)
+		} else {
+			// FastPath packet: 2- or 3-byte header
+			secFlag := (version >> 6) & 0x3
+			length := int(hdr[1])
+			slog.Debug("TPKT FastPath", "secFlag", secFlag, "length", length)
+
+			var packetSize int
+			if length&0x80 != 0 {
+				// Extended 3-byte header: high 7 bits from hdr[1], low 8 from next byte
+				var extByte [1]byte
+				if _, err := io.ReadFull(t.Conn, extByte[:]); err != nil {
+					slog.Error("TPKT recvExtendedFastPathHeader", "err", err)
+					return
+				}
+				leftPart := length & ^0x80
+				packetSize = (leftPart<<8) + int(extByte[0]) - 3
+			} else {
+				packetSize = length - 2
+			}
+
+			if packetSize < 0 {
+				t.Emit("error", fmt.Errorf("TPKT FastPath: invalid packet size %d", packetSize))
+				return
+			}
+			body := make([]byte, packetSize)
+			if _, err := io.ReadFull(t.Conn, body); err != nil {
+				slog.Debug("TPKT recvFastPath error", "err", err)
+				return
+			}
+			t.fastPathListener.RecvFastPath(secFlag, body)
+		}
+	}
 }
 
 func (t *TPKT) StartTLS() error {
@@ -178,69 +244,3 @@ func (t *TPKT) SendFastPath(secFlag byte, data []byte) (n int, err error) {
 	return
 }
 
-func (t *TPKT) recvHeader(s []byte, err error) {
-	if err != nil {
-		t.Emit("error", err)
-		return
-	}
-	if len(s) < 2 {
-		t.Emit("error", fmt.Errorf("TPKT recvHeader: short read %d", len(s)))
-		return
-	}
-	version := s[0]
-	if version == FASTPATH_ACTION_X224 {
-		core.StartReadBytes(2, t.Conn, t.recvExtendedHeader)
-	} else {
-		t.secFlag = (version >> 6) & 0x3
-		length := int(s[1])
-		t.lastShortLength = length
-		slog.Debug("TPKT FastPath", "secFlag", t.secFlag, "length", t.lastShortLength)
-		if t.lastShortLength&0x80 != 0 {
-			core.StartReadBytes(1, t.Conn, t.recvExtendedFastPathHeader)
-		} else {
-			core.StartReadBytes(t.lastShortLength-2, t.Conn, t.recvFastPath)
-		}
-	}
-}
-
-func (t *TPKT) recvExtendedHeader(s []byte, err error) {
-	if err != nil {
-		return
-	}
-	if len(s) < 2 {
-		return
-	}
-	size := uint16(s[0])<<8 | uint16(s[1])
-	core.StartReadBytes(int(size-4), t.Conn, t.recvData)
-}
-
-func (t *TPKT) recvData(s []byte, err error) {
-	if err != nil {
-		return
-	}
-	t.Emit("data", s)
-	core.StartReadBytes(2, t.Conn, t.recvHeader)
-}
-
-func (t *TPKT) recvExtendedFastPathHeader(s []byte, err error) {
-	if err != nil {
-		slog.Error("TPTK recvExtendedFastPathHeader", "err", err)
-		return
-	}
-	if len(s) < 1 {
-		return
-	}
-	rightPart := int(s[0])
-	leftPart := t.lastShortLength & ^0x80
-	packetSize := (leftPart << 8) + rightPart
-	core.StartReadBytes(packetSize-3, t.Conn, t.recvFastPath)
-}
-
-func (t *TPKT) recvFastPath(s []byte, err error) {
-	if err != nil {
-		slog.Debug("TPKT recvFastPath error", "err", err)
-		return
-	}
-	t.fastPathListener.RecvFastPath(t.secFlag, s)
-	core.StartReadBytes(2, t.Conn, t.recvHeader)
-}

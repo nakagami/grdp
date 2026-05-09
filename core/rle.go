@@ -537,10 +537,9 @@ func decompress2(output *[]uint8, width, height int, input []uint8, size int) bo
 			}
 		}
 	}
-	j := 0
-	for _, v := range out {
-		(*output)[j], (*output)[j+1] = PutUint16BE(v)
-		j += 2
+	for i, v := range out {
+		(*output)[i*2] = byte(v >> 8)
+		(*output)[i*2+1] = byte(v)
 	}
 	return true
 }
@@ -869,6 +868,10 @@ func processPlane(in *[]uint8, width, height int, output *[]uint8, j int) int {
 				}
 			}
 		} else {
+			// prevOffset is constant per row: indexw*4+lastline == i+(lastline-thisline)
+			// because i == thisline+indexw*4. Pre-computing it eliminates a multiply
+			// per pixel in both inner loops.
+			prevOffset := lastline - thisline
 			for indexw < width {
 				code = CVAL(in)
 				replen = int(code & 0xf)
@@ -888,14 +891,14 @@ func processPlane(in *[]uint8, width, height int, output *[]uint8, j int) int {
 						x = x >> 1
 						color = x
 					}
-					x = out[indexw*4+lastline] + color
+					x = out[i+prevOffset] + color
 					out[i] = x
 					i += 4
 					indexw++
 					collen--
 				}
 				for replen > 0 {
-					x = out[indexw*4+lastline] + color
+					x = out[i+prevOffset] + color
 					out[i] = x
 					i += 4
 					indexw++

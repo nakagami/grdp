@@ -553,10 +553,11 @@ func update() {
 					break drain
 				}
 			}
+			snap := screenImage // capture pointer while holding screenMu
 			screenMu.Unlock()
 
 			driverc.Call(func() {
-				texture := driverc.CreateTexture(screenImage, 1)
+				texture := driverc.CreateTexture(snap, 1)
 				img.SetTexture(texture)
 			})
 		}
