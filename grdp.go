@@ -114,6 +114,11 @@ type RdpClient struct {
 	// Stored here so closeTransport() can stop its goroutines.
 	gfxHandler *rdpgfx.GfxHandler
 
+	// avc444Disabled, when true, limits CAPS_ADVERTISE to v8.1 so the server
+	// uses AVC420 only.  Set via DisableAVC444() before Connect(); preserved
+	// across reconnects.
+	avc444Disabled bool
+
 	// dispHandler is the active MS-RDPEDISP handler; nil when not connected.
 	// Used by SetResolution to send MONITOR_LAYOUT PDUs.
 	dispHandler *rdpedisp.Handler
@@ -258,6 +263,17 @@ func (g *RdpClient) SetKeyboardType(keyboardType string) {
 		slog.Warn("Unknown keyboard type, falling back to IBM_101_102_KEYS", "keyboardType", keyboardType)
 		g.keyboardType = uint32(gcc.KT_IBM_101_102_KEYS)
 	}
+}
+
+// DisableAVC444 prevents the client from advertising AVC444/AVC444v2 support.
+// When called before Login, the RDPGFX CAPS_ADVERTISE is limited to v8.1
+// (AVC420 only), so the server will never send LC=2 chroma-upgrade frames.
+// This avoids the colour distortion seen with VirtualBox VRDE, which sends
+// LC=2 data but does not include stream2 in LC=0 IDR packets.
+// The setting is preserved across automatic reconnects.
+func (g *RdpClient) DisableAVC444() *RdpClient {
+	g.avc444Disabled = true
+	return g
 }
 
 func bpp(BitsPerPixel uint16) (pixel int) {
@@ -414,6 +430,9 @@ func (g *RdpClient) doLogin(routingToken []byte) error {
 	}
 	if g.onH264NV12Fn != nil {
 		gfxHandler.SetNV12Callback(g.onH264NV12Fn)
+	}
+	if g.avc444Disabled {
+		gfxHandler.SetAVC444Disabled(true)
 	}
 	g.gfxHandler = gfxHandler
 	dvcClient.RegisterHandler(rdpgfx.ChannelName, gfxHandler)

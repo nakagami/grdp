@@ -285,6 +285,10 @@ type GfxHandler struct {
 	// will no longer create h264dec2 and the broken-timer will not be rearmed,
 	// preventing the same warning from being logged on every subsequent IDR.
 	lc2Degraded bool
+	// avc444Disabled, when true, limits the CAPS_ADVERTISE to v8.0 and v8.1
+	// (AVC420 only).  The server will never send AVC444/AVC444v2 frames, which
+	// avoids the LC=2 colour degradation seen with VirtualBox VRDE.
+	avc444Disabled bool
 	// queueDepthHint is a minimum queueDepth to report in FRAME_ACKNOWLEDGE
 	// PDUs.  A higher value makes the server believe the client has a larger
 	// decode backlog, causing it to slow down or reduce encoding quality.
@@ -594,6 +598,16 @@ func (g *GfxHandler) SetNV12Callback(fn func(destX, destY, w, h int, y []byte, y
 	g.onNV12 = fn
 }
 
+// SetAVC444Disabled controls whether AVC444/AVC444v2 is advertised to the
+// server.  When disabled, CAPS_ADVERTISE only includes v8.0 and v8.1, so the
+// server will encode frames using AVC420 (4:2:0) only and never send LC=2
+// chroma-upgrade data.  This avoids the colour degradation caused by servers
+// (e.g. VirtualBox VRDE) that send LC=2 frames without including stream2 in
+// LC=0 IDR packets.  Must be called before the channel is opened.
+func (g *GfxHandler) SetAVC444Disabled(v bool) {
+	g.avc444Disabled = v
+}
+
 // OnChannelCreated is called after the DVC CREATE_RSP has been sent.
 // It sends CAPS_ADVERTISE to the server to initiate the RDPGFX pipeline.
 func (g *GfxHandler) OnChannelCreated() {
@@ -612,70 +626,89 @@ func (g *GfxHandler) sendCapsAdvertise() {
 	// either, the v8.0+AVCDisabled fallback below forces the server to
 	// reject RDPGFX and use legacy bitmap PDUs.
 	if g.h264dec != nil || g.onH264Raw != nil {
-		// Advertise capsets in ascending order (v8.0 → v10.7), matching
-		// rdpyqt / FreeRDP layout so servers pick the highest common version.
-		core.WriteUInt16LE(11, p) // capsSetCount
+		if g.avc444Disabled {
+			// AVC444 disabled: advertise only v8.0 and v8.1 so the server
+			// uses AVC420 (4:2:0) exclusively and never sends LC=2 data.
+			core.WriteUInt16LE(2, p) // capsSetCount
 
-		// v8.0 — baseline fallback (no AVC)
-		core.WriteUInt32LE(capVersion8, p)
-		core.WriteUInt32LE(4, p)
-		core.WriteUInt32LE(capFlagThinClient, p)
+			// v8.0 — baseline fallback (no AVC)
+			core.WriteUInt32LE(capVersion8, p)
+			core.WriteUInt32LE(4, p)
+			core.WriteUInt32LE(capFlagThinClient, p)
 
-		// v8.1 — AVC420 via explicit flag
-		core.WriteUInt32LE(capVersion81, p)
-		core.WriteUInt32LE(4, p)
-		core.WriteUInt32LE(capFlagSmallCache|capFlagAVC420Enabled, p)
+			// v8.1 — AVC420 via explicit flag
+			core.WriteUInt32LE(capVersion81, p)
+			core.WriteUInt32LE(4, p)
+			core.WriteUInt32LE(capFlagSmallCache|capFlagAVC420Enabled, p)
 
-		// v10.0
-		core.WriteUInt32LE(capVersion10, p)
-		core.WriteUInt32LE(4, p)
-		core.WriteUInt32LE(capFlagSmallCache, p)
+			g.sendPdu(cmdidCapsAdvertise, p.Bytes())
+			slog.Debug("RDPGFX: sent CAPS_ADVERTISE (v8.1..v8.0, AVC444 disabled)")
+		} else {
+			// Advertise capsets in ascending order (v8.0 → v10.7), matching
+			// rdpyqt / FreeRDP layout so servers pick the highest common version.
+			core.WriteUInt16LE(11, p) // capsSetCount
 
-		// v10.1 — 16-byte capsData (12 zero bytes after flags)
-		core.WriteUInt32LE(capVersion101, p)
-		core.WriteUInt32LE(16, p)
-		core.WriteUInt32LE(0, p)
-		core.WriteUInt32LE(0, p)
-		core.WriteUInt32LE(0, p)
-		core.WriteUInt32LE(0, p)
+			// v8.0 — baseline fallback (no AVC)
+			core.WriteUInt32LE(capVersion8, p)
+			core.WriteUInt32LE(4, p)
+			core.WriteUInt32LE(capFlagThinClient, p)
 
-		// v10.2
-		core.WriteUInt32LE(capVersion102, p)
-		core.WriteUInt32LE(4, p)
-		core.WriteUInt32LE(capFlagSmallCache, p)
+			// v8.1 — AVC420 via explicit flag
+			core.WriteUInt32LE(capVersion81, p)
+			core.WriteUInt32LE(4, p)
+			core.WriteUInt32LE(capFlagSmallCache|capFlagAVC420Enabled, p)
 
-		// v10.3
-		core.WriteUInt32LE(capVersion103, p)
-		core.WriteUInt32LE(4, p)
-		core.WriteUInt32LE(0, p)
+			// v10.0
+			core.WriteUInt32LE(capVersion10, p)
+			core.WriteUInt32LE(4, p)
+			core.WriteUInt32LE(capFlagSmallCache, p)
 
-		// v10.4
-		core.WriteUInt32LE(capVersion104, p)
-		core.WriteUInt32LE(4, p)
-		core.WriteUInt32LE(capFlagSmallCache, p)
+			// v10.1 — 16-byte capsData (12 zero bytes after flags)
+			core.WriteUInt32LE(capVersion101, p)
+			core.WriteUInt32LE(16, p)
+			core.WriteUInt32LE(0, p)
+			core.WriteUInt32LE(0, p)
+			core.WriteUInt32LE(0, p)
+			core.WriteUInt32LE(0, p)
 
-		// v10.5
-		core.WriteUInt32LE(capVersion105, p)
-		core.WriteUInt32LE(4, p)
-		core.WriteUInt32LE(capFlagSmallCache, p)
+			// v10.2
+			core.WriteUInt32LE(capVersion102, p)
+			core.WriteUInt32LE(4, p)
+			core.WriteUInt32LE(capFlagSmallCache, p)
 
-		// v10.6
-		core.WriteUInt32LE(capVersion106, p)
-		core.WriteUInt32LE(4, p)
-		core.WriteUInt32LE(capFlagSmallCache, p)
+			// v10.3
+			core.WriteUInt32LE(capVersion103, p)
+			core.WriteUInt32LE(4, p)
+			core.WriteUInt32LE(0, p)
 
-		// v10.6.1
-		core.WriteUInt32LE(capVersion1061, p)
-		core.WriteUInt32LE(4, p)
-		core.WriteUInt32LE(capFlagSmallCache, p)
+			// v10.4
+			core.WriteUInt32LE(capVersion104, p)
+			core.WriteUInt32LE(4, p)
+			core.WriteUInt32LE(capFlagSmallCache, p)
 
-		// v10.7
-		core.WriteUInt32LE(capVersion107, p)
-		core.WriteUInt32LE(4, p)
-		core.WriteUInt32LE(capFlagSmallCache, p)
+			// v10.5
+			core.WriteUInt32LE(capVersion105, p)
+			core.WriteUInt32LE(4, p)
+			core.WriteUInt32LE(capFlagSmallCache, p)
 
-		g.sendPdu(cmdidCapsAdvertise, p.Bytes())
-		slog.Debug("RDPGFX: sent CAPS_ADVERTISE (v10.7..v8.0, AVC enabled)")
+			// v10.6
+			core.WriteUInt32LE(capVersion106, p)
+			core.WriteUInt32LE(4, p)
+			core.WriteUInt32LE(capFlagSmallCache, p)
+
+			// v10.6.1
+			core.WriteUInt32LE(capVersion1061, p)
+			core.WriteUInt32LE(4, p)
+			core.WriteUInt32LE(capFlagSmallCache, p)
+
+			// v10.7
+			core.WriteUInt32LE(capVersion107, p)
+			core.WriteUInt32LE(4, p)
+			core.WriteUInt32LE(capFlagSmallCache, p)
+
+			g.sendPdu(cmdidCapsAdvertise, p.Bytes())
+			slog.Debug("RDPGFX: sent CAPS_ADVERTISE (v10.7..v8.0, AVC enabled)")
+		}
 	} else {
 		core.WriteUInt16LE(1, p) // capsSetCount
 		core.WriteUInt32LE(capVersion8, p)
