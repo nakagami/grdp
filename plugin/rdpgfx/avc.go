@@ -1146,18 +1146,12 @@ func cropBGRA(src []byte, srcW, srcH, dstW, dstH int) ([]byte, bool) {
 		return src, false
 	}
 	out := acquireBitmapBuf(dstW * dstH * 4)
-	copyW := dstW
-	if srcW < copyW {
-		copyW = srcW
-	}
-	copyH := dstH
-	if srcH < copyH {
-		copyH = srcH
-	}
+	copyW := min(dstW, srcW)
+	copyH := min(dstH, srcH)
 	srcStride := srcW * 4
 	dstStride := dstW * 4
 	rowBytes := copyW * 4
-	for y := 0; y < copyH; y++ {
+	for y := range copyH {
 		copy(out[y*dstStride:y*dstStride+rowBytes], src[y*srcStride:y*srcStride+rowBytes])
 	}
 	return out, true

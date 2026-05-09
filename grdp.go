@@ -177,7 +177,7 @@ func (bm *Bitmap) RGBA() *image.RGBA {
 			// BGR24 (stride==3) and any other depth: scalar fallback.
 			// Write each pixel as a single 32-bit store to let the compiler
 			// vectorise the loop (avoids 4 separate byte stores per pixel).
-			for i := 0; i < n; i++ {
+			for i := range n {
 				s := i * stride
 				*(*uint32)(unsafe.Pointer(&pix[i*4])) =
 					uint32(data[s+2]) | uint32(data[s+1])<<8 | uint32(data[s])<<16 | 0xFF000000
@@ -1114,13 +1114,9 @@ func (g *RdpClient) SetResolution(width, height int) {
 	if w%2 != 0 {
 		w++
 	}
-	if w < 200 {
-		w = 200
-	}
+	w = max(w, 200)
 	h := uint32(height)
-	if h < 200 {
-		h = 200
-	}
+	h = max(h, 200)
 	g.dispHandler.SendMonitorLayout([]rdpedisp.Monitor{
 		{
 			Flags:              rdpedisp.MonitorFlagPrimary,

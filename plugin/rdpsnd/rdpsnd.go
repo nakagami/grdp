@@ -280,10 +280,7 @@ func (h *Handler) processServerFormats(body []byte) {
 }
 
 func (h *Handler) sendClientFormats(serverVersion uint16) {
-	version := serverVersion
-	if version > RDPSND_VERSION_MAJOR {
-		version = RDPSND_VERSION_MAJOR
-	}
+	version := min(serverVersion, RDPSND_VERSION_MAJOR)
 
 	formatData := &bytes.Buffer{}
 	for _, idx := range h.clientFormatIndices {

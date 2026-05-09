@@ -178,7 +178,7 @@ func ReadObjectIdentifier(r io.Reader, oid []byte) bool {
 	a_oid[4], _ = core.ReadByte(r)
 	a_oid[5], _ = core.ReadByte(r)
 
-	for i, _ := range oid {
+	for i := range oid {
 		if oid[i] != a_oid[i] {
 			return false
 		}
@@ -191,7 +191,7 @@ func ReadOctetStream(r io.Reader, s string, min int) bool {
 	if size != len(s) {
 		return false
 	}
-	for i := 0; i < size; i++ {
+	for i := range size {
 		b, _ := core.ReadByte(r)
 		if b != s[i] {
 			return false

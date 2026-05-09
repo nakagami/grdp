@@ -171,7 +171,7 @@ func (d *rfxDecoder) decodeTileset(data []byte, left, top int, surfData []byte, 
 		return nil
 	}
 	quants := make([]rfxQuant, numQuant)
-	for i := 0; i < numQuant; i++ {
+	for i := range numQuant {
 		quants[i] = parseRfxQuant(data[off:])
 		off += 5
 	}
@@ -181,7 +181,7 @@ func (d *rfxDecoder) decodeTileset(data []byte, left, top int, surfData []byte, 
 		content []byte
 	}
 	var tiles []tileWork
-	for i := 0; i < numTiles; i++ {
+	for range numTiles {
 		if off+6 > len(data) {
 			break
 		}
@@ -205,10 +205,7 @@ func (d *rfxDecoder) decodeTileset(data []byte, left, top int, surfData []byte, 
 	// per-tile work, so fall back to serial decoding below the threshold.
 	const parallelTileThreshold = 12
 	if len(tiles) >= parallelTileThreshold {
-		workers := runtime.NumCPU()
-		if workers > len(tiles) {
-			workers = len(tiles)
-		}
+		workers := min(runtime.NumCPU(), len(tiles))
 		var wg sync.WaitGroup
 		ch := make(chan tileWork, len(tiles))
 		for _, t := range tiles {
@@ -216,7 +213,7 @@ func (d *rfxDecoder) decodeTileset(data []byte, left, top int, surfData []byte, 
 		}
 		close(ch)
 		wg.Add(workers)
-		for w := 0; w < workers; w++ {
+		for range workers {
 			go func() {
 				defer wg.Done()
 				defer func() {

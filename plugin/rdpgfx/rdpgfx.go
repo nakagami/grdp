@@ -1842,10 +1842,7 @@ func planeOrZero(plane []byte, size int) []byte {
 
 func readRawPlane(data []byte, offset, size int) ([]byte, int) {
 	plane := make([]byte, size)
-	end := offset + size
-	if end > len(data) {
-		end = len(data)
-	}
+	end := min(offset+size, len(data))
 	if offset < end {
 		copy(plane, data[offset:end])
 	}

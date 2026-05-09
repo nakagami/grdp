@@ -1,8 +1,8 @@
 module github.com/nakagami/grdp/example
 
-go 1.24.0
+go 1.26.3
 
-toolchain go1.24.3
+toolchain go1.26.3
 
 require (
 	github.com/ebitengine/oto/v3 v3.4.0

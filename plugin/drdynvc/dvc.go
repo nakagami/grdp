@@ -334,9 +334,7 @@ func (c *DvcClient) processCapsPdu(hdr *DvcHeader, s []byte) {
 
 	// Respond with the server's version (up to 3).
 	// Version 3 is required for some servers to activate RDPGFX.
-	if ver > 3 {
-		ver = 3
-	}
+	ver = min(ver, 3)
 
 	// Client CAPS response: header(1) + pad(1) + version(2) = 4 bytes
 	// Priority charges are only in the server's CAPS request, not the client response.
