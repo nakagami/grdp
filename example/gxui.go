@@ -18,6 +18,7 @@ import (
 	"github.com/ebitengine/oto/v3"
 	"github.com/google/gxui"
 	"github.com/google/gxui/drivers/gl"
+	"github.com/google/gxui/drivers/gl/platform"
 	"github.com/google/gxui/samples/flags"
 	"github.com/google/gxui/themes/light"
 	"golang.design/x/clipboard"
@@ -422,7 +423,10 @@ func appMain(driver gxui.Driver) {
 		if rdpClient == nil {
 			return
 		}
-		rdpClient.MouseWheel(e.ScrollY)
+		// Normalize gxui scroll units to notch counts (1.0 per physical notch).
+		// gxui multiplies the raw GLFW yoff by platform.ScrollSpeed, so we
+		// divide it back out.  MouseWheel handles the RDP WHEEL_DELTA scaling.
+		rdpClient.MouseWheel(float64(e.ScrollY) / platform.ScrollSpeed)
 	})
 	window.OnKeyDown(func(e gxui.KeyboardEvent) {
 		if rdpClient == nil {

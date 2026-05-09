@@ -99,8 +99,9 @@ type RdpClient struct {
 	// Wheel-scroll coalescing.  Rapid scroll events are accumulated over
 	// mouseCoalesceInterval and sent as a single PDU whose rotation value
 	// is the sum of all deltas received in that window.
+	// wheelAccum is stored in RDP WHEEL_DELTA units (120 per physical notch).
 	wheelMu     sync.Mutex
-	wheelAccum  int
+	wheelAccum  float64
 	wheelTimer  *time.Timer
 	wheelLastTx time.Time
 
@@ -934,15 +935,22 @@ func (g *RdpClient) sendMouseMoveLocked(now time.Time) {
 	g.pdu.SendInputEvents(pdu.INPUT_EVENT_MOUSE, []pdu.InputEventsInterface{p})
 }
 
-func (g *RdpClient) MouseWheel(scroll int) {
+// MouseWheel sends a vertical scroll event to the remote desktop.
+// delta is the rotation amount in physical notches (1.0 = one click of a
+// scroll wheel = Windows WHEEL_DELTA).  Fractional values are accepted for
+// smooth / high-resolution input devices such as trackpads.
+// Positive values scroll up (away from the user); negative values scroll down.
+func (g *RdpClient) MouseWheel(delta float64) {
 	if !g.eventReady {
 		return
 	}
-	slog.Debug("MouseWheel", "scroll", scroll)
+	slog.Debug("MouseWheel", "delta", delta)
 	g.flushMouseMove()
 
+	// Convert notch count to RDP WHEEL_DELTA units (120 per notch).
+	const wheelDelta = 120
 	g.wheelMu.Lock()
-	g.wheelAccum += scroll
+	g.wheelAccum += delta * wheelDelta
 	if g.wheelAccum == 0 {
 		// Opposite deltas cancelled out; nothing to send.
 		g.wheelMu.Unlock()
@@ -989,33 +997,50 @@ func (g *RdpClient) flushWheelTimer() {
 }
 
 // sendWheelLocked must be called with wheelMu held.
+// Modelled on FreeRDP's send_mouse_wheel in client/SDL/SDL2/sdl_touch.cpp.
 func (g *RdpClient) sendWheelLocked(now time.Time) {
-	accum := g.wheelAccum
-	g.wheelAccum = 0
+	// Truncate the accumulated float to a whole WHEEL_DELTA integer; keep the
+	// fractional remainder so sub-notch trackpad movements aren't discarded.
+	iaccum := int(g.wheelAccum)
+	g.wheelAccum -= float64(iaccum)
 	g.wheelLastTx = now
 
-	// FreeRDP uses 120 (0x78) per scroll notch, matching the Windows
-	// WHEEL_DELTA convention.  Scale the accumulated notch count accordingly.
-	const wheelDelta = 120
-	accum *= wheelDelta
-
-	// The RDP wheel rotation field is 9 bits (WheelRotationMask = 0x01FF).
-	// If the accumulated delta exceeds 0x1FF, clamp it.
-	const maxWheel = int(pdu.WheelRotationMask)
-	p := &pdu.PointerEvent{}
-	p.PointerFlags |= pdu.PTRFLAGS_WHEEL
-	if accum < 0 {
-		p.PointerFlags |= pdu.PTRFLAGS_WHEEL_NEGATIVE
-		if -accum > maxWheel {
-			accum = maxWheel
-		} else {
-			accum = -accum
-		}
-	} else if accum > maxWheel {
-		accum = maxWheel
+	if iaccum == 0 {
+		return
 	}
-	p.PointerFlags |= pdu.WheelRotationMask & uint16(accum)
-	g.pdu.SendInputEvents(pdu.INPUT_EVENT_MOUSE, []pdu.InputEventsInterface{p})
+
+	negative := iaccum < 0
+	if negative {
+		iaccum = -iaccum
+	}
+
+	baseFlags := uint16(pdu.PTRFLAGS_WHEEL)
+	if negative {
+		baseFlags |= uint16(pdu.PTRFLAGS_WHEEL_NEGATIVE)
+	}
+
+	// The WheelRotation field is 9 bits.  Bits 0–7 hold the unsigned
+	// magnitude (max 0xFF per event); bit 8 is the sign (PTRFLAGS_WHEEL_NEGATIVE).
+	// For negative values the receiver computes -(0x100 - bits[0:7]), so we
+	// must store the 9-bit two's-complement form, not the raw magnitude.
+	// Send as many 0xFF-capped events as needed (same loop as FreeRDP).
+	for iaccum > 0 {
+		cval := iaccum
+		if cval > 0xFF {
+			cval = 0xFF
+		}
+		iaccum -= cval
+
+		p := &pdu.PointerEvent{}
+		if negative {
+			// 9-bit two's complement: keep flags in bits 8–15, set bits 0–7
+			// to (0x100 - cval) so the receiver recovers the correct magnitude.
+			p.PointerFlags = (baseFlags & 0xFF00) | uint16(0x100-cval)
+		} else {
+			p.PointerFlags = baseFlags | uint16(cval)
+		}
+		g.pdu.SendInputEvents(pdu.INPUT_EVENT_MOUSE, []pdu.InputEventsInterface{p})
+	}
 	g.notifyGfxLocalInput()
 }
 
