@@ -225,13 +225,14 @@ func decompress1(output *[]uint8, width, height int, input []uint8, size int) bo
 				break
 			case 4: /* Copy */
 				for count > 0 && x < width {
-					if len(input) == 0 {
+					n := min(count, width-x)
+					if len(input) < n {
 						return false
 					}
-					out[x+line] = uint8(CVAL(&input))
-				
-					count--
-					x++
+					copy(out[x+line:x+line+n], input[:n])
+					input = input[n:]
+					count -= n
+					x += n
 				}
 				break
 			case 8: /* Bicolour */
@@ -488,12 +489,14 @@ func decompress2(output *[]uint8, width, height int, input []uint8, size int) bo
 				break
 			case 4: /* Copy */
 				for count > 0 && x < width {
-					var a uint16
-					CVAL2(&input, &a)
-					out[x+line] = a
-				
-					count--
-					x++
+					n := min(count, width-x)
+					if len(input) < n*2 {
+						return false
+					}
+					copy(out[x+line:x+line+n], unsafe.Slice((*uint16)(unsafe.Pointer(&input[0])), n))
+					input = input[n*2:]
+					count -= n
+					x += n
 				}
 
 				break
@@ -758,17 +761,15 @@ func decompress3(output *[]uint8, width, height int, input []uint8, size int) bo
 				x += n
 				break
 			case 4: /* Copy */
-				base4 := 3*x + line
 				for count > 0 && x < width {
-					if len(input) < 3 {
+					n := min(count, width-x)
+					if len(input) < n*3 {
 						return false
 					}
-					out[base4] = uint8(CVAL(&input))
-					out[base4+1] = uint8(CVAL(&input))
-					out[base4+2] = uint8(CVAL(&input))
-					base4 += 3
-					count--
-					x++
+					copy(out[3*x+line:3*x+line+n*3], input[:n*3])
+					input = input[n*3:]
+					count -= n
+					x += n
 				}
 				break
 			case 8: /* Bicolour */
@@ -831,6 +832,7 @@ func processPlane(in *[]uint8, width, height int, output *[]uint8, j int) int {
 		thisline int
 	)
 	ln := len(*in)
+	out := *output // hoist pointer dereference; writes to out[i] affect the underlying array
 
 	lastline = 0
 	indexh = 0
@@ -853,14 +855,14 @@ func processPlane(in *[]uint8, width, height int, output *[]uint8, j int) int {
 				}
 				for collen > 0 {
 					color = uint8(CVAL(in))
-					(*output)[i] = uint8(color)
+					out[i] = color
 					i += 4
 
 					indexw++
 					collen--
 				}
 				for replen > 0 {
-					(*output)[i] = uint8(color)
+					out[i] = color
 					i += 4
 					indexw++
 					replen--
@@ -886,15 +888,15 @@ func processPlane(in *[]uint8, width, height int, output *[]uint8, j int) int {
 						x = x >> 1
 						color = x
 					}
-					x = (*output)[indexw*4+lastline] + color
-					(*output)[i] = uint8(x)
+					x = out[indexw*4+lastline] + color
+					out[i] = x
 					i += 4
 					indexw++
 					collen--
 				}
 				for replen > 0 {
-					x = (*output)[indexw*4+lastline] + color
-					(*output)[i] = uint8(x)
+					x = out[indexw*4+lastline] + color
+					out[i] = x
 					i += 4
 					indexw++
 					replen--
@@ -923,11 +925,12 @@ func decompress4(output *[]uint8, width, height int, input []uint8, size int) bo
 	}
 
 	total = 1
+	out := *output
 
 	if noAlpha {
 		// No alpha plane in the stream; fill alpha channel with 0xFF.
-		for i := 3; i < len(*output); i += 4 {
-			(*output)[i] = 0xFF
+		for i := 3; i < len(out); i += 4 {
+			out[i] = 0xFF
 		}
 	} else {
 		onceBytes = processPlane(&input, width, height, output, 3)
