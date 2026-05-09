@@ -7,6 +7,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -52,11 +53,11 @@ type RdpClient struct {
 	sec             *sec.Client
 	pdu             *pdu.Client
 	channels        *plugin.Channels
-	eventReady      bool
-	redirecting     bool      // true during async redirect reconnection
-	decompressPool  sync.Pool // pools []uint8 buffers for bitmap decompression
-	flipLinePool    sync.Pool // pools line-sized []uint8 buffers for bitmap vertical flip
-	closed          bool
+	eventReady      atomic.Bool
+	redirecting     atomic.Bool // true during async redirect reconnection
+	decompressPool  sync.Pool   // pools []uint8 buffers for bitmap decompression
+	flipLinePool    sync.Pool   // pools line-sized []uint8 buffers for bitmap vertical flip
+	closed          atomic.Bool
 
 	// credentials stored for reconnection
 	domain   string
@@ -107,7 +108,7 @@ type RdpClient struct {
 
 	// reconnectMu serialises concurrent Reconnect() calls.
 	reconnectMu  sync.Mutex
-	reconnecting bool
+	reconnecting atomic.Bool
 
 	// gfxHandler is the active RDPGFX handler; nil when not connected.
 	// Stored here so closeTransport() can stop its goroutines.
@@ -493,7 +494,7 @@ func (g *RdpClient) doLogin(routingToken []byte) error {
 	readyFired := false
 
 	g.pdu.On("ready", func() {
-		g.eventReady = true
+		g.eventReady.Store(true)
 		readyFired = true
 		send(connResult{})
 	})
@@ -525,14 +526,14 @@ func (g *RdpClient) doLogin(routingToken []byte) error {
 		if r.retry {
 			slog.Debug("Server requires GFX, retrying with GFX flag")
 			g.tpkt.Close()
-			g.eventReady = false
+			g.eventReady.Store(false)
 			time.Sleep(2 * time.Second)
 			return g.doLogin(nil)
 		}
 		if r.redirect != nil {
 			slog.Debug("Server redirect", "loadBalanceInfo", string(r.redirect.LoadBalanceInfo))
 			g.tpkt.Close()
-			g.eventReady = false
+			g.eventReady.Store(false)
 			return g.doLogin(r.redirect.LoadBalanceInfo)
 		}
 		// "ready" received — session established.
@@ -547,12 +548,12 @@ func (g *RdpClient) doLogin(routingToken []byte) error {
 // "ready" (e.g. GNOME Remote Desktop). Runs asynchronously.
 func (g *RdpClient) handleRedirect(redir *pdu.ServerRedirectionPDU) {
 	slog.Debug("Async server redirect", "loadBalanceInfo", string(redir.LoadBalanceInfo))
-	g.redirecting = true
+	g.redirecting.Store(true)
 	g.tpkt.Close()
-	g.eventReady = false
+	g.eventReady.Store(false)
 
 	err := g.doLogin(redir.LoadBalanceInfo)
-	g.redirecting = false
+	g.redirecting.Store(false)
 	if err != nil {
 		slog.Error("handleRedirect: login failed", "err", err)
 		if g.onErrorFn != nil {
@@ -575,7 +576,7 @@ func (g *RdpClient) OnError(f func(e error)) *RdpClient {
 	g.onErrorFn = f
 	if g.pdu != nil {
 		g.pdu.On("error", func(e error) {
-			if !g.redirecting {
+			if !g.redirecting.Load() {
 				f(e)
 			}
 		})
@@ -587,7 +588,7 @@ func (g *RdpClient) OnClose(f func()) *RdpClient {
 	g.onCloseFn = f
 	if g.pdu != nil {
 		g.pdu.On("close", func() {
-			if !g.redirecting && !g.reconnecting {
+			if !g.redirecting.Load() && !g.reconnecting.Load() {
 				f()
 			}
 		})
@@ -838,7 +839,7 @@ func (g *RdpClient) notifyGfxLocalInput() {
 }
 
 func (g *RdpClient) KeyUp(sc int) {
-	if !g.eventReady {
+	if !g.eventReady.Load() {
 		return
 	}
 	slog.Debug("KeyUp", "sc", sc)
@@ -853,7 +854,7 @@ func (g *RdpClient) KeyUp(sc int) {
 }
 
 func (g *RdpClient) KeyDown(sc int) {
-	if !g.eventReady {
+	if !g.eventReady.Load() {
 		return
 	}
 	slog.Debug("KeyDown", "sc", sc)
@@ -871,7 +872,7 @@ func (g *RdpClient) KeyDown(sc int) {
 // first move in a burst is sent immediately so the server sees no extra
 // latency for a single isolated motion.
 func (g *RdpClient) MouseMove(x, y int) {
-	if !g.eventReady {
+	if !g.eventReady.Load() {
 		return
 	}
 
@@ -917,7 +918,7 @@ func (g *RdpClient) flushMouseMove() {
 func (g *RdpClient) flushMouseMoveTimer() {
 	g.mouseMu.Lock()
 	g.mouseTimer = nil
-	if g.mousePending && g.eventReady {
+	if g.mousePending && g.eventReady.Load() {
 		g.sendMouseMoveLocked(time.Now())
 	}
 	g.mouseMu.Unlock()
@@ -941,7 +942,7 @@ func (g *RdpClient) sendMouseMoveLocked(now time.Time) {
 // smooth / high-resolution input devices such as trackpads.
 // Positive values scroll up (away from the user); negative values scroll down.
 func (g *RdpClient) MouseWheel(delta float64) {
-	if !g.eventReady {
+	if !g.eventReady.Load() {
 		return
 	}
 	slog.Debug("MouseWheel", "delta", delta)
@@ -990,7 +991,7 @@ func (g *RdpClient) flushWheel() {
 func (g *RdpClient) flushWheelTimer() {
 	g.wheelMu.Lock()
 	g.wheelTimer = nil
-	if g.wheelAccum != 0 && g.eventReady {
+	if g.wheelAccum != 0 && g.eventReady.Load() {
 		g.sendWheelLocked(time.Now())
 	}
 	g.wheelMu.Unlock()
@@ -1042,7 +1043,7 @@ func (g *RdpClient) sendWheelLocked(now time.Time) {
 }
 
 func (g *RdpClient) MouseUp(button int, x, y int) {
-	if !g.eventReady {
+	if !g.eventReady.Load() {
 		return
 	}
 	slog.Debug("MouseUp", "x", x, "y", y, "button", button)
@@ -1068,7 +1069,7 @@ func (g *RdpClient) MouseUp(button int, x, y int) {
 }
 
 func (g *RdpClient) MouseDown(button int, x, y int) {
-	if !g.eventReady {
+	if !g.eventReady.Load() {
 		return
 	}
 	slog.Debug("MouseDown", "x", x, "y", y, "button", button)
@@ -1149,21 +1150,21 @@ func (g *RdpClient) SetQueueDepthHint(depth uint32) {
 }
 
 func (g *RdpClient) Reconnect(width, height int) error {
-	if g.closed {
+	if g.closed.Load() {
 		return fmt.Errorf("client is closed")
 	}
 
 	g.reconnectMu.Lock()
 	defer g.reconnectMu.Unlock()
 
-	g.reconnecting = true
-	defer func() { g.reconnecting = false }()
+	g.reconnecting.Store(true)
+	defer func() { g.reconnecting.Store(false) }()
 
 	slog.Debug("Reconnect", "width", width, "height", height)
 	g.closeTransport()
 	g.width = width
 	g.height = height
-	g.eventReady = false
+	g.eventReady.Store(false)
 
 	const maxRetries = 3
 	for attempt := 1; attempt <= maxRetries; attempt++ {
@@ -1236,6 +1237,6 @@ func (g *RdpClient) closeTransport() {
 
 func (g *RdpClient) Close() {
 	slog.Debug("Close()")
-	g.closed = true
+	g.closed.Store(true)
 	g.closeTransport()
 }
