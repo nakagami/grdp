@@ -562,6 +562,9 @@ func readDataPDU(r io.Reader) (*DataPDU, error) {
 	case PDUTYPE2_POINTER:
 		d = &PointerDataPDU{}
 
+	case PDUTYPE2_SET_KEYBOARD_INDICATORS:
+		d = &SetKeyboardIndicatorsDataPDU{}
+
 	default:
 		err = fmt.Errorf("Unknown data pdu type2 0x%02x", header.PDUType2)
 		slog.Error("readDataPDU", "err", err)
@@ -781,6 +784,20 @@ func (d *FontMapDataPDU) Unpack(r io.Reader) error {
 		return nil
 	}
 	return err
+}
+
+// SetKeyboardIndicatorsDataPDU sets the state of keyboard indicator LEDs.
+// MS-RDPBCGR 2.2.8.2.1.3.3.1
+type SetKeyboardIndicatorsDataPDU struct {
+	UnitId   uint16 `struc:"little"`
+	LedFlags uint32 `struc:"little"`
+}
+
+func (*SetKeyboardIndicatorsDataPDU) Type2() uint8 {
+	return PDUTYPE2_SET_KEYBOARD_INDICATORS
+}
+func (d *SetKeyboardIndicatorsDataPDU) Unpack(r io.Reader) error {
+	return struc.Unpack(r, d)
 }
 
 // SuppressOutputPDU tells the server to start/stop sending display updates.
