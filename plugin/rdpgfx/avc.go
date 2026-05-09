@@ -917,6 +917,10 @@ func (g *GfxHandler) decodeAVC444LC2(stream2 *avc420Stream, destW, destH int) (d
 	if combined == nil {
 		return
 	}
+	// Mark that LC=2 has produced at least one frame this session.
+	// maybeRenegotiateCapabilities uses this to distinguish "was working then broke"
+	// (needs reconnect) from "never worked" (graceful LC=0 degradation).
+	g.lc2EverDecoded = true
 	// lc2Sample logs the actual Cb/Cr values used by combineAVC444v2BGRA for
 	// position (px,py), which depend on the B-area that pixel falls into.
 	halfW := w / 2

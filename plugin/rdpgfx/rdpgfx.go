@@ -274,6 +274,12 @@ type GfxHandler struct {
 	// flag is true, avoiding repeated VideoToolbox stalls that would
 	// otherwise trigger a full RDP reconnect.
 	usingSWFallback bool
+	// lc2EverDecoded is set to true after the first successful AVC444 LC=2
+	// chroma-upgrade decode.  maybeRenegotiateCapabilities uses this to
+	// distinguish "LC=2 was working and then broke" (reconnect needed) from
+	// "LC=2 never worked this session" (server may not support stream2 priming;
+	// gracefully degrade to LC=0 only without reconnecting).
+	lc2EverDecoded bool
 	// queueDepthHint is a minimum queueDepth to report in FRAME_ACKNOWLEDGE
 	// PDUs.  A higher value makes the server believe the client has a larger
 	// decode backlog, causing it to slow down or reduce encoding quality.
@@ -449,10 +455,10 @@ func (g *GfxHandler) stopAuxDecoderBrokenTimer() {
 
 // maybeRenegotiateCapabilities is called from decodeLoop when watchdogCh fires.
 // If h264dec2 has been nil since the timer was armed AND the server has been
-// actively sending LC=2 frames, the only recovery path is a full RDP reconnect:
-// the server will never send an LC=0 IDR on its own while in "LC=2 only" mode,
-// and sending CAPS_ADVERTISE mid-session causes the Windows server to immediately
-// RST the TCP connection.
+// actively sending LC=2 frames, we either reconnect (if LC=2 was previously
+// working) or degrade gracefully to LC=0 only (if LC=2 never worked this session).
+// Reconnecting mid-session when LC=2 never worked would just produce another
+// identical cycle, since the server appears to not include stream2 in LC=0 IDRs.
 func (g *GfxHandler) maybeRenegotiateCapabilities() {
 	if g.h264dec2 != nil {
 		return // aux decoder recovered while timer was in flight
@@ -464,6 +470,15 @@ func (g *GfxHandler) maybeRenegotiateCapabilities() {
 	// a genuinely idle server needs no intervention.
 	lastLC2NS := g.lastLC2RecvTime.Load()
 	if lastLC2NS == 0 || time.Since(time.Unix(0, lastLC2NS)) >= auxDecoderBrokenTimeout {
+		return
+	}
+	if !g.lc2EverDecoded {
+		// LC=2 has never successfully decoded a frame this session.  The server
+		// likely does not include stream2 in LC=0 IDR packets (and does not send
+		// standalone LC=2 IDR frames either), so reconnecting would only reproduce
+		// the same failure.  Degrade gracefully: LC=2 is silently skipped for the
+		// remainder of this session and the main decoder continues at LC=0 quality.
+		slog.Warn("H.264: aux decoder absent and LC=2 never decoded — degrading to LC=0 only (no reconnect)")
 		return
 	}
 	// The timer firing is itself the auxDecoderBrokenTimeout signal.  Do not
@@ -1064,6 +1079,7 @@ func (g *GfxHandler) onResetGraphics(data []byte) {
 	g.framesDecoded.Store(0)
 	g.softResetCount = 0
 	g.decoderBrokenNotified = false
+	g.lc2EverDecoded = false
 	g.lastKeyframeRequest = time.Time{}
 	g.lastDecodedFrame.Store(0)
 	g.stopInputWatchdog()
