@@ -211,6 +211,10 @@ func (g *GfxHandler) decodeAVC420(data []byte, destX, destY, destW, destH int) (
 		slog.Debug("RDPGFX: H.264 decode returned nil frame (buffering?)")
 		return nil, nil, false
 	}
+	if frame.Dropped {
+		slog.Debug("RDPGFX: AVC420 frame intentionally dropped (zero-fill)")
+		return nil, nil, false
+	}
 	slog.Debug("RDPGFX: AVC420 decoded", "frameW", frame.Width, "frameH", frame.Height, "destW", destW, "destH", destH, "regions", len(stream.regions), "h264Len", len(stream.h264Data))
 	g.noteSuccessfulDecode()
 	decoded, pooled := cropBGRA(frame.Data, frame.Width, frame.Height, destW, destH)
@@ -310,6 +314,10 @@ func (g *GfxHandler) decodeAVC444(data []byte, destX, destY, destW, destH int) (
 		}
 		frame = &h264Frame{Data: bgra, Width: i420out.Width, Height: i420out.Height}
 	}
+	if frame.Dropped {
+		slog.Debug("RDPGFX: AVC444 frame intentionally dropped (zero-fill)")
+		return nil, nil, false
+	}
 	if !g.lc0SampleLogged && isIDR {
 		g.lc0SampleLogged = true
 		bgraData := frame.Data
@@ -400,6 +408,10 @@ func (g *GfxHandler) decodeAVC420WithI420(data []byte, destX, destY, destW, dest
 		slog.Debug("RDPGFX: H.264 decode returned nil frame (buffering?)")
 		return
 	}
+	if frame != nil && frame.Dropped {
+		slog.Debug("RDPGFX: AVC420 (WithI420) frame intentionally dropped (zero-fill)")
+		return
+	}
 	g.noteSuccessfulDecode()
 	if frame != nil {
 		slog.Debug("RDPGFX: AVC420 decoded (WithI420)", "frameW", frame.Width, "frameH", frame.Height,
@@ -452,6 +464,10 @@ func (g *GfxHandler) decodeAVC420WithNV12(data []byte, destX, destY, destW, dest
 		g.maybeRequestKeyframe()
 		g.maybeNotifyDecoderBroken()
 		slog.Debug("RDPGFX: H.264 decode returned nil frame (buffering?)")
+		return
+	}
+	if frame != nil && frame.Dropped {
+		slog.Debug("RDPGFX: AVC420 (WithNV12) frame intentionally dropped (zero-fill)")
 		return
 	}
 	g.noteSuccessfulDecode()
@@ -518,6 +534,10 @@ func (g *GfxHandler) decodeAVC444WithI420(data []byte, destX, destY, destW, dest
 	if frame == nil && i420 == nil {
 		g.maybeRequestKeyframe()
 		g.maybeNotifyDecoderBroken()
+		return
+	}
+	if frame != nil && frame.Dropped {
+		slog.Debug("RDPGFX: AVC444 (WithI420) frame intentionally dropped (zero-fill)")
 		return
 	}
 	g.noteSuccessfulDecode()
@@ -751,40 +771,42 @@ func clampByte(v int) byte {
 	return byte(v)
 }
 
-// auxiliary H.264 sequence.  The IDR frame for the chroma-upgrade stream is
-// always carried in the LC=0 stream2; subsequent LC=2 standalone frames are
-// P-frames in the same sequence.  Decoding output is discarded — the only
-// purpose is to advance h264dec2's internal state past the IDR/SPS/PPS so it
-// can decode the subsequent LC=2 P-frames without waiting forever for a
-// keyframe that already passed.
+// primeAuxDecoder feeds stream2 data from an LC=0 packet to h264dec2 so that
+// the decoder's decoded-picture buffer (DPB) stays in sync with the full
+// stream2 H.264 sequence.  Stream2 frames are always part of one continuous
+// H.264 sequence: the IDR is carried in LC=0 (and duplicated in a standalone
+// LC=2 packet), and subsequent P-frames arrive via BOTH LC=0 packets and
+// standalone LC=2 packets.  If primeAuxDecoder only decoded IDRs, h264dec2's
+// DPB would be stuck at the IDR while the server advanced the sequence through
+// several LC=0 P-frames; the first standalone LC=2 P-frame would then be
+// decoded against the wrong reference, producing all-zero chroma (Cb=0,
+// Cr=0) and a full-screen green tint.  By decoding ALL stream2 frames here
+// (output discarded), h264dec2's DPB is always at the correct reference when
+// decodeAVC444LC2 decodes a standalone LC=2 P-frame.
 func (g *GfxHandler) primeAuxDecoder(h264Data []byte) {
-	// Only process IDR frames.  Standalone LC=2 P-frames are decoded
-	// exclusively by decodeAVC444LC2 and form their own H.264 reference chain
-	// (IDR → P1 → P2 → …).  If primeAuxDecoder also fed LC=0's stream2
-	// P-frames to h264dec2, the DPB would be advanced ahead of where the
-	// standalone LC=2 stream expects its reference, causing the first P-frame
-	// to be decoded against the wrong reference and producing Cb=0 (green tint).
-	if !h264PacketHasIDR(h264Data) {
-		return
-	}
+	isIDR := h264PacketHasIDR(h264Data)
 	if g.h264dec2 == nil {
-		// Aux decoder was torn down after a VT stall.  Recreate it only when
-		// the incoming stream2 carries an IDR so the new VT session starts with
-		// a clean reference frame.  This avoids the rapid create/destroy cycle
-		// that stresses macOS VideoToolbox and destabilises the main decoder.
+		if !isIDR {
+			// No aux decoder yet; wait for the stream2 IDR to create one.
+			return
+		}
+		// Recreate aux decoder on a stream2 IDR so it starts with a clean
+		// reference frame.  This avoids the rapid create/destroy cycle that
+		// can destabilise the decoder.
 		slog.Debug("H.264: recreating aux decoder on stream2 IDR")
 		g.h264dec2 = newH264DecoderSW()
 		g.stopAuxDecoderBrokenTimer() // LC=0 IDR arrived; cancel recovery timer
 		// Fall through to prime the freshly-created decoder with this IDR.
 	}
-	// If the aux decoder was already broken (e.g. from a prior pre-flight stall),
-	// tear it down and wait for the next IDR rather than immediately creating
-	// a new VT session.
+	// If the aux decoder is broken, reset it only on an IDR (P-frames cannot
+	// start a new decode sequence).
 	if g.h264dec2.IsBroken() {
-		slog.Debug("H.264: aux decoder broken, waiting for IDR to recreate")
-		g.h264dec2.Close()
-		g.h264dec2 = nil
-		g.startAuxDecoderBrokenTimer()
+		if isIDR {
+			slog.Debug("H.264: aux decoder broken, waiting for IDR to recreate")
+			g.h264dec2.Close()
+			g.h264dec2 = nil
+			g.startAuxDecoderBrokenTimer()
+		}
 		return
 	}
 	i420dec, ok := g.h264dec2.(i420Decoder)

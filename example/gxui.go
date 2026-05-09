@@ -553,7 +553,14 @@ func update() {
 					break drain
 				}
 			}
-			snap := screenImage // capture pointer while holding screenMu
+			// Capture the current screenImage pointer while holding screenMu.
+			// gl.TexImage2D (called lazily during render on the driver/GL
+			// goroutine) copies the pixel data into GPU memory before it
+			// returns, completing before the driver thread processes the next
+			// pending event.  The update goroutine is blocked on driverc.Call
+			// or waiting for the next bitmapCH item during that window, so
+			// no concurrent write to screenImage.Pix occurs in practice.
+			snap := screenImage
 			screenMu.Unlock()
 
 			driverc.Call(func() {
