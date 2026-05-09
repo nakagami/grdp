@@ -651,21 +651,21 @@ const avcHWEarlyFrameLimit = 50
 // a stall is detected (either from avcHWReadyFreezeThreshold or from the
 // early null-frame count detector).  After this window, if VT has not
 // produced a real frame, the decoder is declared broken and a soft reset
-// is triggered.  1 s is sufficient: any frame VT had buffered will have
-// surfaced well within 1 s, and YouTube / gnome-remote-desktop delivers a
+// is triggered.  500 ms is sufficient: any frame VT had buffered will have
+// surfaced well within 500 ms, and YouTube / gnome-remote-desktop delivers a
 // fresh IDR within ~2 s of the soft reset anyway.
-const avcHWRecoveryWindow = 1 * time.Second
+const avcHWRecoveryWindow = 500 * time.Millisecond
 
 // avcHWNullFrameStallLimit is the number of consecutive null (blank) frames
 // the HW decoder may produce before triggering an early stall-probe.
 // VideoToolbox legitimately outputs a handful of null frames at IDR
 // boundaries while it rebuilds its reference pipeline (observed max: ~10
-// frames / ~300 ms at 30 fps).  90 consecutive null frames (≈ 3 s at
+// frames / ~300 ms at 30 fps).  25 consecutive null frames (≈ 0.8 s at
 // 30 fps) is well beyond any normal IDR warm-up and safely below the
 // ~5.75-second CGo avcodec_send_packet deadlock boundary, so the early
 // probe can safely skip avcodec_send_packet until VT recovers or the
 // avcHWRecoveryWindow expires and the decoder is marked broken.
-const avcHWNullFrameStallLimit = 90
+const avcHWNullFrameStallLimit = 25
 
 // keyframeWaitLimit is the maximum number of non-IDR packets we drop while
 // waiting for a keyframe after a decoder reset or flush.  gnome-remote-desktop
