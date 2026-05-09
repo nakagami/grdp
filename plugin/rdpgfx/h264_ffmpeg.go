@@ -782,6 +782,20 @@ type ffmpegDecoder struct {
 	// carry over to a subsequent unrelated frame.
 	regionHint   []C.uint16_t // flat [left,top,right,bottom,...] per rect
 	nRegionHints C.int        // number of valid rects in regionHint
+
+	// hwNeedsZeroCheck is set to true on decoder creation and after each
+	// avcodec_flush_buffers call.  When set, convertFrame checks the first
+	// NV12 output frame for a zero-filled chroma plane (U=0, V=0).
+	//
+	// VideoToolbox sometimes returns a zero-initialised IOSurface for the
+	// first decoded frame after init or a pipeline flush.  The BT.601
+	// limited-range conversion of (Y=0, U=0, V=0) produces BGRA(0,135,0,255)
+	// — a full-screen dark-green frame that manifests as a brief "green
+	// curtain" in the UI.  Valid NV12 chroma always centres on 128
+	// (limited-range [16,240], full-range centred on 128), so U=0 and V=0
+	// occurring simultaneously at the centre pixel unambiguously signals an
+	// uninitialised buffer rather than real video content.
+	hwNeedsZeroCheck bool
 }
 
 // extractI420fromSrc extracts I420 planar data from srcFrame into the ring
@@ -918,11 +932,12 @@ func newH264DecoderInternal(watchdogCh chan<- struct{}, forceSW bool) h264Decode
 	}
 
 	d := &ffmpegDecoder{
-		codecCtx:      codecCtx,
-		hwPixFmt:      C.AV_PIX_FMT_NONE,
-		lastFmt:       C.AV_PIX_FMT_NONE,
-		needsKeyFrame: true, // always wait for a clean IDR before feeding packets
-		watchdogCh:    watchdogCh,
+		codecCtx:         codecCtx,
+		hwPixFmt:         C.AV_PIX_FMT_NONE,
+		lastFmt:          C.AV_PIX_FMT_NONE,
+		needsKeyFrame:    true, // always wait for a clean IDR before feeding packets
+		hwNeedsZeroCheck: true, // check first NV12 output for zero-filled IOSurface
+		watchdogCh:       watchdogCh,
 	}
 
 	// Always enable LOW_DELAY: RDP H.264 streams are transmitted in display
@@ -1433,6 +1448,7 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 			d.hwFirstSendTime = time.Time{} // restart stall clock after IDR
 			d.hwSentCount = 0
 			d.hwConsecNullFrames = 0
+			d.hwNeedsZeroCheck = true // re-check for zero-filled IOSurface after flush
 			if !d.hwReady && prev {
 				// We gave up waiting for an IDR and tried a P-frame anyway, and
 				// VideoToolbox rejected it.  There is no further recovery possible
@@ -1733,18 +1749,47 @@ func (d *ffmpegDecoder) convertFrame(regionHint []C.uint16_t, nRegions C.int) (*
 		}
 		frameIdx := d.hwFrameCount
 		logThis := d.hwFrameCount < 3
-		if d.hwFrameCount < 3 {
-			var sy, su, sv C.uint8_t
+		needZeroCheck := d.useHW && d.hwNeedsZeroCheck
+		var sy, su, sv C.uint8_t
+		if d.hwFrameCount < 3 || needZeroCheck {
 			C.grdp_sample_nv12(srcFrame, &sy, &su, &sv)
-			slog.Debug("H.264: frame sample (nv12)",
-				"hw", d.useHW,
-				"frame", d.hwFrameCount,
-				"fmt", int(srcFmt),
-				"colorRange", int(srcFrame.color_range),
-				"fullRange", int(fullRange),
-				"Y", int(sy), "U", int(su), "V", int(sv),
-				"w", int(w), "h", int(h))
-			d.hwFrameCount++
+			if d.hwFrameCount < 3 {
+				slog.Debug("H.264: frame sample (nv12)",
+					"hw", d.useHW,
+					"frame", d.hwFrameCount,
+					"fmt", int(srcFmt),
+					"colorRange", int(srcFrame.color_range),
+					"fullRange", int(fullRange),
+					"Y", int(sy), "U", int(su), "V", int(sv),
+					"w", int(w), "h", int(h))
+				d.hwFrameCount++
+			}
+		}
+		// Zero-filled IOSurface detection: VideoToolbox sometimes returns an
+		// uninitialised (all-zero) IOSurface on the first decoded frame after
+		// decoder init or avcodec_flush_buffers.  BT.601 limited-range
+		// conversion of (Y=0, U=0, V=0) yields BGRA(0,135,0,255), a
+		// full-screen dark-green frame.  Valid NV12 chroma always centres on
+		// 128, so U=0 and V=0 simultaneously at the centre pixel is an
+		// unambiguous indicator of an uninitialised buffer.  Drop the frame
+		// and keep hwNeedsZeroCheck set so we continue checking until a frame
+		// with valid chroma arrives.
+		if needZeroCheck {
+			if su == 0 && sv == 0 {
+				slog.Debug("H.264: dropping zero-filled HW frame (IOSurface not ready)",
+					"Y", int(sy))
+				if usedMapFrame {
+					C.av_frame_unref(d.mapFrame)
+				} else if srcFrame == d.swFrame {
+					C.av_frame_unref(d.swFrame)
+				}
+				// Return a non-nil Dropped frame so Decode() counts this as a
+				// successful VideoToolbox output (health tracking stays correct)
+				// and callers skip the keyframe-request / decoder-broken path.
+				return &h264Frame{Dropped: true, Width: int(w), Height: int(h)}, transferNs, nil
+			}
+			// Valid chroma seen — IOSurface is properly populated.
+			d.hwNeedsZeroCheck = false
 		}
 		if nRegions > 0 && len(regionHint) > 0 {
 			C.grdp_nv12_to_bgra_regions(srcFrame,

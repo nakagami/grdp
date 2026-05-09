@@ -27,8 +27,13 @@ func (r h264BrokenReason) String() string {
 
 // h264Frame holds a decoded H.264 frame in BGRA pixel format.
 type h264Frame struct {
-	Data          []byte // BGRA pixel data, 4 bytes per pixel
+	Data          []byte // BGRA pixel data, 4 bytes per pixel (nil when Dropped)
 	Width, Height int
+	// Dropped is true when the decoder intentionally discarded this frame
+	// (e.g. zero-filled VideoToolbox IOSurface) rather than experiencing a
+	// genuine codec stall.  Callers must skip bitmap updates but must NOT
+	// request a keyframe or flag the decoder as broken.
+	Dropped bool
 }
 
 // h264FrameI420 holds a decoded H.264 frame in planar I420 (YUV420P) format.
