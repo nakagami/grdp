@@ -658,13 +658,12 @@ const avcHWRecoveryWindow = 500 * time.Millisecond
 
 // avcHWNullFrameStallLimit is the number of consecutive null (blank) frames
 // the HW decoder may produce before triggering an early stall-probe.
-// VideoToolbox legitimately outputs a handful of null frames at IDR
-// boundaries while it rebuilds its reference pipeline (observed max: ~10
-// frames / ~300 ms at 30 fps).  25 consecutive null frames (≈ 0.8 s at
-// 30 fps) is well beyond any normal IDR warm-up and safely below the
-// ~5.75-second CGo avcodec_send_packet deadlock boundary, so the early
-// probe can safely skip avcodec_send_packet until VT recovers or the
-// avcHWRecoveryWindow expires and the decoder is marked broken.
+// This limit is only applied during the early phase (hwSentCount <
+// avcHWEarlyFrameLimit).  VideoToolbox legitimately outputs a handful of
+// null frames at IDR boundaries during the session-start unstable window
+// (observed: 5–25 frames / up to ~1 s at 30 fps); mid-session IDR stalls
+// are handled by the time-based avcHWReadyFreezeThreshold alone to avoid
+// false positives from normal GOP boundaries in long-running sessions.
 const avcHWNullFrameStallLimit = 25
 
 // keyframeWaitLimit is the maximum number of non-IDR packets we drop while
@@ -689,13 +688,17 @@ const keyframeWaitTimeout = 15 * time.Second
 // decoders (aux decoder h264dec2, no watchdog channel).  These decoders do not
 // have an external timer to terminate the wait, so we attempt error-concealment
 // sooner and let the caller tear down and recreate the decoder on the next IDR.
-//
-// Main-decoder SW fallbacks (created with a watchdog channel) intentionally use
-// keyframeWaitTimeout (15 s) instead so the server has time to respond to the
-// ForceRefresh request.  Error-concealment on a P-frame without reference frames
-// always fails for AVC444 streams, producing a spurious WARN and an unnecessary
-// reconnect.
 const keyframeWaitTimeoutSW = 5 * time.Second
+
+// keyframeWaitTimeoutSWFallback is the keyframe-wait timer for the main SW
+// fallback decoder (created after a VideoToolbox stall).  By the time SW
+// fallback is activated, the proactive ForceRefresh mechanism has already been
+// sending keyframe requests for ~4–7 s.  If the server has not delivered an IDR
+// in that time it is unlikely to do so quickly; using a shorter window here
+// triggers an automatic reconnect sooner (total freeze ≈ 7 s VT stall + 8 s
+// IDR wait = ~15 s) rather than waiting the full 15 s of keyframeWaitTimeout
+// (22 s total) before reconnecting.
+const keyframeWaitTimeoutSWFallback = 8 * time.Second
 
 // profileWindow is the number of HW frames over which Decode aggregates
 // timing measurements before logging an INFO summary.  At 30 fps this is
@@ -735,7 +738,8 @@ type ffmpegDecoder struct {
 	stallProbeStart          time.Time       // wall-clock time we entered the stall recovery-probe window
 	stallTimer               *time.Timer     // fires after avcHWRecoveryWindow to mark broken independently of frame rate
 	hwConsecNullFrames       int             // consecutive HW null frames since last real frame; for early stall detection
-	kfWaitTimer              *time.Timer     // fires after keyframeWaitTimeout to mark broken independently of frame rate
+	kfWaitTimer              *time.Timer     // fires after kfWaitTimeoutVal to mark broken independently of frame rate
+	kfWaitTimeoutVal         time.Duration   // per-decoder IDR wait limit (varies by decoder type)
 	watchdogCh               chan<- struct{} // signals GfxHandler.decodeLoop to call maybeNotifyDecoderBroken
 
 	// Profiling: aggregated timing stats over the last profileWindow frames
@@ -908,16 +912,24 @@ func (d *ffmpegDecoder) extractNV12fromSrc(srcFrame *C.AVFrame) {
 func newH264Decoder() h264Decoder { return newH264DecoderWithWatchdog(nil) }
 
 func newH264DecoderWithWatchdog(watchdogCh chan<- struct{}) h264Decoder {
-	return newH264DecoderInternal(watchdogCh, false)
+	return newH264DecoderInternal(watchdogCh, false, keyframeWaitTimeout)
 }
 
-func newH264DecoderSW() h264Decoder { return newH264DecoderSWWithWatchdog(nil) }
+// newH264DecoderSW creates a plain software decoder (no watchdog, no HW
+// fallback) used for auxiliary decoders such as the AVC444v2 stream2 chroma
+// decoder (h264dec2).  These are always software-only by design; forceSW is
+// false so the log reads "using software decoding" rather than the misleading
+// "using software decoding (SW fallback)" which is reserved for the main
+// decoder switching from HW to SW after a VideoToolbox stall.
+func newH264DecoderSW() h264Decoder {
+	return newH264DecoderInternal(nil, false, keyframeWaitTimeoutSW)
+}
 
 func newH264DecoderSWWithWatchdog(watchdogCh chan<- struct{}) h264Decoder {
-	return newH264DecoderInternal(watchdogCh, true)
+	return newH264DecoderInternal(watchdogCh, true, keyframeWaitTimeoutSWFallback)
 }
 
-func newH264DecoderInternal(watchdogCh chan<- struct{}, forceSW bool) h264Decoder {
+func newH264DecoderInternal(watchdogCh chan<- struct{}, forceSW bool, kfWaitTimeout time.Duration) h264Decoder {
 	// Suppress FFmpeg stderr output (e.g. "[h264 @ ...] sps_id out of range").
 	// grdp emits its own slog messages for H.264 recovery events.
 	avLogOnce.Do(func() { C.grdp_suppress_av_log() })
@@ -940,6 +952,7 @@ func newH264DecoderInternal(watchdogCh chan<- struct{}, forceSW bool) h264Decode
 		needsKeyFrame:    true, // always wait for a clean IDR before feeding packets
 		hwNeedsZeroCheck: true, // check first NV12 output for zero-filled IOSurface
 		watchdogCh:       watchdogCh,
+		kfWaitTimeoutVal: kfWaitTimeout,
 	}
 
 	// Always enable LOW_DELAY: RDP H.264 streams are transmitted in display
@@ -1028,7 +1041,7 @@ func newH264DecoderInternal(watchdogCh chan<- struct{}, forceSW bool) h264Decode
 	// Decode() cancels the timer.  Decoders without a watchdog channel
 	// (e.g. h264dec2) are not armed here — they are managed separately.
 	if watchdogCh != nil {
-		d.kfWaitTimer = time.AfterFunc(keyframeWaitTimeout, func() {
+		d.kfWaitTimer = time.AfterFunc(kfWaitTimeout, func() {
 			d.timerBrokenReason.Store(int32(h264BrokenReasonNoIDR))
 			d.timerBroken.Store(true)
 			d.signalWatchdog()
@@ -1186,7 +1199,7 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 					// one here if the decoder was created without a watchdog channel
 					// (no timer was armed at creation time).
 					if d.kfWaitTimer == nil {
-						d.kfWaitTimer = time.AfterFunc(keyframeWaitTimeout, func() {
+						d.kfWaitTimer = time.AfterFunc(d.kfWaitTimeoutVal, func() {
 							d.timerBrokenReason.Store(int32(h264BrokenReasonNoIDR))
 							d.timerBroken.Store(true)
 							d.signalWatchdog()
@@ -1198,7 +1211,7 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 					"waited", d.keyframeWaitCount,
 					"waitedFor", time.Since(d.keyframeWaitStart).Round(time.Millisecond))
 			}
-			kfTimeout := keyframeWaitTimeout // HW and watchdog-armed SW: 15 s
+			kfTimeout := d.kfWaitTimeoutVal // use per-decoder limit (HW: 15 s, SW fallback: 8 s)
 			if !d.useHW && d.watchdogCh == nil {
 				// Detached aux SW decoder (h264dec2): shorter wait so it is
 				// torn down and recreated quickly on the next stream2 IDR.
@@ -1570,11 +1583,17 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 			d.hwConsecNullFrames++
 			slog.Debug("H.264: HW null frame", "frozenFor", stalledFor,
 				"hwSentCount", d.hwSentCount)
-			// Early stall probe: if we have accumulated many consecutive null
-			// frames (well before the 7-second CGo-safe threshold), enter the
-			// probe window now.  This reduces visible freeze time from ~10 s to
-			// ~4 s for a genuine VideoToolbox stall.
-			if d.hwConsecNullFrames >= avcHWNullFrameStallLimit && d.stallProbeStart.IsZero() {
+			// Early stall probe: during the unstable session-start window
+			// (hwSentCount < avcHWEarlyFrameLimit), trigger a probe if we
+			// accumulate many consecutive null frames well before the 7-second
+			// CGo-safe threshold.  This reduces visible freeze time from ~10 s
+			// to ~4 s for a genuine VideoToolbox stall at session start.
+			// Mid-session IDR stalls (hwSentCount >= avcHWEarlyFrameLimit) are
+			// not subject to this early trigger because normal GOP boundaries
+			// can produce 25+ null frames (~1 s) and would cause false positives;
+			// the time-based avcHWReadyFreezeThreshold handles them instead.
+			if d.hwSentCount < avcHWEarlyFrameLimit &&
+				d.hwConsecNullFrames >= avcHWNullFrameStallLimit && d.stallProbeStart.IsZero() {
 				slog.Debug("H.264: HW decoder early stall detected (null frame count), entering probe",
 					"consecNullFrames", d.hwConsecNullFrames,
 					"frozenFor", stalledFor.Round(time.Millisecond),
