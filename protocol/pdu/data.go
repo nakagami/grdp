@@ -790,7 +790,7 @@ func (d *FontMapDataPDU) Unpack(r io.Reader) error {
 // MS-RDPBCGR 2.2.8.2.1.3.3.1
 type SetKeyboardIndicatorsDataPDU struct {
 	UnitId   uint16 `struc:"little"`
-	LedFlags uint32 `struc:"little"`
+	LedFlags uint16 `struc:"little"`
 }
 
 func (*SetKeyboardIndicatorsDataPDU) Type2() uint8 {
