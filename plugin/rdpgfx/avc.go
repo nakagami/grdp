@@ -314,6 +314,12 @@ func (g *GfxHandler) decodeAVC444(data []byte, destX, destY, destW, destH int) (
 		}
 		frame = &h264Frame{Data: bgra, Width: i420out.Width, Height: i420out.Height}
 	}
+	// Prime the aux decoder with stream2 IDR data even when the main frame
+	// was zero-filled: stream2 is independent of the VideoToolbox pipeline and
+	// its IDR must not be discarded just because the IOSurface wasn't ready.
+	if lc == 0 && stream2 != nil && len(stream2.h264Data) > 0 {
+		g.primeAuxDecoder(stream2.h264Data)
+	}
 	if frame.Dropped {
 		slog.Debug("RDPGFX: AVC444 frame intentionally dropped (zero-fill)")
 		return nil, nil, false
@@ -347,15 +353,6 @@ func (g *GfxHandler) decodeAVC444(data []byte, destX, destY, destW, destH int) (
 		"destW", destW, "destH", destH, "h264Len", len(stream1.h264Data))
 	g.noteSuccessfulDecode()
 	decoded, pooled := cropBGRA(frame.Data, frame.Width, frame.Height, destW, destH)
-
-	// For LC=0 frames prime h264dec2 with the auxiliary (chroma-upgrade) stream2
-	// so that subsequent standalone LC=2 P-frames can be decoded.  The IDR frame
-	// for the auxiliary H.264 sequence is always carried in an LC=0 stream2.
-	// Always call primeAuxDecoder even when h264dec2 is nil: the function
-	// gates recreation on an IDR being present in stream2.
-	if lc == 0 && stream2 != nil && len(stream2.h264Data) > 0 {
-		g.primeAuxDecoder(stream2.h264Data)
-	}
 
 	return decoded, stream1.regions, pooled
 }
@@ -529,6 +526,11 @@ func (g *GfxHandler) decodeAVC444WithI420(data []byte, destX, destY, destW, dest
 			return
 		}
 	}
+	// Prime the aux decoder before checking frame.Dropped: stream2 IDR data
+	// must not be lost when the main frame is discarded due to zero-fill.
+	if lc == 0 && stream2 != nil && len(stream2.h264Data) > 0 {
+		g.primeAuxDecoder(stream2.h264Data)
+	}
 	// I420 fast path: frame is nil but i420 is non-nil — decoder produced output
 	// via the direct NV12/YUV420P copy path.  Still counts as a successful decode.
 	if frame == nil && i420 == nil {
@@ -546,13 +548,6 @@ func (g *GfxHandler) decodeAVC444WithI420(data []byte, destX, destY, destW, dest
 			"destW", destW, "destH", destH, "hasI420", i420 != nil, "h264Len", len(stream1.h264Data))
 		decoded, pooled = cropBGRA(frame.Data, frame.Width, frame.Height, destW, destH)
 		regions = stream1.regions
-	}
-
-	// For LC=0 frames prime h264dec2 with the auxiliary (chroma-upgrade) stream2.
-	// Always call even when h264dec2 is nil: primeAuxDecoder gates recreation on
-	// an IDR being present in stream2.
-	if lc == 0 && stream2 != nil && len(stream2.h264Data) > 0 {
-		g.primeAuxDecoder(stream2.h264Data)
 	}
 
 	return
