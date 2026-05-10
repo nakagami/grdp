@@ -372,18 +372,13 @@ func appMain(driver gxui.Driver) {
 	keyboardLayout := os.Getenv("GRDP_KEYBOARD_LAYOUT")
 
 	// A/V sync offset — positive values delay the named medium.
-	// GRDP_AUDIO_DELAY_MS: delay audio (use when audio is ahead of video).
-	// GRDP_VIDEO_DELAY_MS: delay video (use when video is ahead of audio).
-	var audioDelayMs, videoDelayMs int
-	fmt.Sscanf(os.Getenv("GRDP_AUDIO_DELAY_MS"), "%d", &audioDelayMs)
-	fmt.Sscanf(os.Getenv("GRDP_VIDEO_DELAY_MS"), "%d", &videoDelayMs)
+	audioDelayMs := 0
+	videoDelayMs := 500
 	if audioDelayMs > 0 {
 		avSyncAudioDelay = time.Duration(audioDelayMs) * time.Millisecond
-		slog.Info("A/V sync: audio delayed", "delay", avSyncAudioDelay)
 	}
 	if videoDelayMs > 0 {
 		avSyncVideoDelay = time.Duration(videoDelayMs) * time.Millisecond
-		slog.Info("A/V sync: video delayed", "delay", avSyncVideoDelay)
 	}
 
 	audioStr = newAudioStream()
@@ -608,26 +603,47 @@ func startVideoStallWatchdog() {
 
 func update() {
 	go func() {
-		for tb := range bitmapCH {
+		// pending holds a frame consumed from bitmapCH whose displayAt is
+		// still in the future at the time the drain loop encountered it.
+		// It is processed first on the next outer-loop iteration.
+		var pending *timedBitmap
+		for {
+			var tb timedBitmap
+			if pending != nil {
+				tb = *pending
+				pending = nil
+			} else {
+				var ok bool
+				tb, ok = <-bitmapCH
+				if !ok {
+					return
+				}
+			}
+
 			if delay := time.Until(tb.displayAt); delay > 0 {
 				time.Sleep(delay)
 			}
 			screenMu.Lock()
 			paintBitmapsLocked(tb.frames)
+
+			// Drain any frames that are already due.  If we encounter a
+			// frame whose displayAt is in the future, save it as pending
+			// and repaint now — sleeping inside the drain loop would keep
+			// the channel filling up indefinitely.
 		drain:
 			for {
 				select {
 				case more := <-bitmapCH:
-					if delay := time.Until(more.displayAt); delay > 0 {
-						screenMu.Unlock()
-						time.Sleep(delay)
-						screenMu.Lock()
+					if time.Until(more.displayAt) > 0 {
+						pending = &more
+						break drain
 					}
 					paintBitmapsLocked(more.frames)
 				default:
 					break drain
 				}
 			}
+
 			// Capture the current screenImage pointer while holding screenMu.
 			// gl.TexImage2D (called lazily during render on the driver/GL
 			// goroutine) copies the pixel data into GPU memory before it
