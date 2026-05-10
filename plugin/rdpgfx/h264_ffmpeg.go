@@ -699,7 +699,7 @@ const keyframeWaitTimeoutSW = 5 * time.Second
 // reconnect forces a new IDR.  A short window here triggers reconnect quickly
 // (total freeze ≈ 7 s VT stall + 3 s IDR wait + ~4 s reconnect ≈ 14 s total)
 // rather than waiting the full 8 s (19 s total).
-const keyframeWaitTimeoutSWFallback = 3 * time.Second
+const keyframeWaitTimeoutSWFallback = 1 * time.Second
 
 // profileWindow is the number of HW frames over which Decode aggregates
 // timing measurements before logging an INFO summary.  At 30 fps this is
