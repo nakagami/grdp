@@ -1058,6 +1058,13 @@ const softResetLimit = 5
 // so that repeated nil-frame callbacks (e.g. while waiting for the IDR) don't
 // flood the server.  This covers both post-flush and post-soft-reset cases,
 // including the case where h264dec2 was reset independently of h264dec.
+//
+// Proactive stall recovery: even when NeedsKeyframe()==false (decoder has not
+// yet been reset), we send ForceRefresh early when the HW decoder appears to be
+// stalling — packets are arriving but no real frame has been produced for longer
+// than avc444YStaleness.  This gives the server a ~1 second head-start to
+// prepare an IDR before the stall detector fires and triggers SW fallback,
+// reducing the visible freeze from ~18 s to a few seconds.
 func (g *GfxHandler) maybeRequestKeyframe() {
 	if g.h264dec == nil || g.h264dec.IsBroken() {
 		return
@@ -1070,7 +1077,20 @@ func (g *GfxHandler) maybeRequestKeyframe() {
 	// with keyframe requests, causes the server to repeatedly send LC=1 IDRs,
 	// and can deadlock the main VideoToolbox decoder.
 	if !dec1NeedsKF {
-		return
+		// Proactive early request: if packets are flowing in but no real frame
+		// has been produced for avc444YStaleness, the HW decoder is likely
+		// producing null frames.  Request a keyframe now so the server has time
+		// to respond before the stall detector escalates to SW fallback.
+		recvTime := g.h264dec.LastReceiveTime()
+		if recvTime.IsZero() || time.Since(recvTime) >= avc444YStaleness {
+			// No packets arriving — server is idle, not a HW stall.
+			return
+		}
+		lastNS := g.lastDecodedFrame.Load()
+		if lastNS == 0 || time.Since(time.Unix(0, lastNS)) < avc444YStaleness {
+			// Frames are still being produced recently — not stalling.
+			return
+		}
 	}
 	const keyframeRequestInterval = 2 * time.Second
 	if time.Since(g.lastKeyframeRequest) < keyframeRequestInterval {
