@@ -916,14 +916,13 @@ func newH264DecoderWithWatchdog(watchdogCh chan<- struct{}) h264Decoder {
 	return newH264DecoderInternal(watchdogCh, false, keyframeWaitTimeout)
 }
 
-// newH264DecoderSW creates a plain software decoder (no watchdog, no HW
-// fallback) used for auxiliary decoders such as the AVC444v2 stream2 chroma
-// decoder (h264dec2).  These are always software-only by design; forceSW is
-// false so the log reads "using software decoding" rather than the misleading
-// "using software decoding (SW fallback)" which is reserved for the main
-// decoder switching from HW to SW after a VideoToolbox stall.
+// newH264DecoderSW creates a pure software (FFmpeg) decoder used for auxiliary
+// decoders such as the AVC444v2 stream2 chroma decoder (h264dec2).
+// forceSW=true ensures VideoToolbox is never opened for the aux stream, so
+// that when VT stalls on the main decoder (h264dec), h264dec2 remains
+// functional and LC=2 chroma decoding can continue independently.
 func newH264DecoderSW() h264Decoder {
-	return newH264DecoderInternal(nil, false, keyframeWaitTimeoutSW)
+	return newH264DecoderInternal(nil, true, keyframeWaitTimeoutSW)
 }
 
 func newH264DecoderSWWithWatchdog(watchdogCh chan<- struct{}) h264Decoder {
@@ -1001,9 +1000,11 @@ func newH264DecoderInternal(watchdogCh chan<- struct{}, forceSW bool, kfWaitTime
 	}
 
 	if !d.useHW {
-		if forceSW {
+		if d.watchdogCh != nil {
+			// Main decoder switching from VideoToolbox to FFmpeg after a stall.
 			slog.Debug("H.264: using software decoding (SW fallback)")
 		} else {
+			// Aux decoder (h264dec2) or initial SW-only decoder — always pure SW.
 			slog.Debug("H.264: using software decoding")
 		}
 		// Limit the decoded picture buffer to 1 reference frame so each frame
