@@ -1250,6 +1250,16 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 		d.proceededWithoutKeyframe = false
 	}
 
+	// VideoToolbox sometimes returns a zero-filled IOSurface on the first
+	// frame after any IDR — not only after decoder creation or flush — because
+	// the hardware pipeline must drain and reset its reference frames before it
+	// can produce the new intra frame.  Re-arm the zero-check whenever we
+	// receive an IDR so that convertFrame discards any spurious green frame that
+	// VideoToolbox outputs during that transition.
+	if d.useHW && scan.hasKeyFrame {
+		d.hwNeedsZeroCheck = true
+	}
+
 	// Time-based stall detection for the HW decoder.
 	//
 	// hwReady=false: decoder has never produced a frame. If it keeps receiving
