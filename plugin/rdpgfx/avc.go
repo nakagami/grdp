@@ -1168,15 +1168,20 @@ func (g *GfxHandler) maybeNotifyDecoderBroken() {
 	}
 	reason := g.h264dec.BrokenReason()
 	if reason == h264BrokenReasonNoIDR {
-		// Allow one no-IDR soft reset per decoder generation before escalating.
-		// softResetNoIDRCount is reset to 0 each time a new h264dec is created
-		// via the non-no-IDR path (SW fallback or general reset), so a prior
-		// HW-stall SW-fallback does not consume the new SW decoder's budget.
+		// Allow only one no-IDR soft reset before escalating to reconnect.
+		// ForceRefresh (SuppressOutput toggle) often fails to trigger a new
+		// AVC444 IDR from Windows servers; repeatedly retrying just prolongs
+		// the freeze.  One attempt gives the server a fair chance; after that
+		// a full reconnect is faster than waiting another 10+ seconds per try.
+		// Note: after a HW-stall SW-fallback (softResetCount=1), this budget
+		// is already consumed, so the new SW decoder reconnects immediately on
+		// its IDR timeout — this is intentional because the server consistently
+		// does not send IDR without a full reconnect in post-stall scenarios.
 		const softResetLimitNoIDR = 1
-		if g.softResetNoIDRCount < softResetLimitNoIDR {
-			g.softResetNoIDRCount++
+		if g.softResetCount < softResetLimitNoIDR {
+			g.softResetCount++
 			slog.Debug("H.264: soft decoder reset (no-IDR)",
-				"attempt", g.softResetNoIDRCount, "limit", softResetLimitNoIDR,
+				"attempt", g.softResetCount, "limit", softResetLimitNoIDR,
 				"reason", reason.String())
 			g.h264dec.Close()
 			if g.usingSWFallback {
@@ -1184,9 +1189,6 @@ func (g *GfxHandler) maybeNotifyDecoderBroken() {
 			} else {
 				g.h264dec = newH264DecoderWithWatchdog(g.watchdogCh)
 			}
-			// softResetNoIDRCount intentionally NOT reset here: the new decoder
-			// inherits the used no-IDR budget so it does not get another attempt.
-			// Only a non-no-IDR reset (SW fallback, general reset) resets it.
 			if g.h264dec2 != nil && g.h264dec2.IsBroken() {
 				slog.Debug("H.264: aux decoder also broken on soft reset, waiting for IDR to recreate")
 				g.h264dec2.Close()
@@ -1221,7 +1223,6 @@ func (g *GfxHandler) maybeNotifyDecoderBroken() {
 		} else {
 			g.h264dec = newH264DecoderWithWatchdog(g.watchdogCh)
 		}
-		g.softResetNoIDRCount = 0 // new decoder gets its own no-IDR budget
 		// Keep h264dec2 if healthy; tear it down if already broken so
 		// primeAuxDecoder can recreate it when the next stream2 IDR arrives,
 		// rather than spinning up a new VT session only to have it break again.
