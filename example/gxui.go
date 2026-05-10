@@ -373,7 +373,7 @@ func appMain(driver gxui.Driver) {
 
 	// A/V sync offset — positive values delay the named medium.
 	audioDelayMs := 0
-	videoDelayMs := 500
+	videoDelayMs := 700
 	if audioDelayMs > 0 {
 		avSyncAudioDelay = time.Duration(audioDelayMs) * time.Millisecond
 	}
@@ -658,6 +658,18 @@ func update() {
 				texture := driverc.CreateTexture(snap, 1)
 				img.SetTexture(texture)
 			})
+
+			// Flow control: when a video delay is configured we have a
+			// known-size display buffer.  Report bitmapCH occupancy as
+			// queueDepthHint so the server adjusts its send rate to match
+			// our actual consumption rate.
+			// • bitmapCH full  → large hint → server slows down / drops quality
+			// • bitmapCH empty → hint 0    → server sends freely
+			// When no delay is set we leave the hint at 0 (server uses real
+			// decoder queue depth reported by GfxHandler).
+			if avSyncVideoDelay > 0 && rdpClient != nil {
+				rdpClient.SetQueueDepthHint(uint32(len(bitmapCH)))
+			}
 		}
 	}()
 }
@@ -785,7 +797,7 @@ func transKey(in gxui.KeyboardKey) int {
 }
 
 func main() {
-	// handler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})
-	// slog.SetDefault(slog.New(handler))
+	handler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})
+	slog.SetDefault(slog.New(handler))
 	gl.StartDriver(appMain)
 }
