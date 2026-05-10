@@ -635,6 +635,40 @@ func (g *GfxHandler) copyAVC444YToIDRCache() {
 	dst.updatedAt = src.updatedAt
 }
 
+// isAuxChromaBlank returns true when i420aux.Y appears to be all-zero or
+// near-zero.  In AVC444v2 the Y plane of the auxiliary stream carries Cb (left
+// half) and Cr (right half) rather than luma, so near-zero means Cb≈0, Cr≈0
+// — the uninitialised state that Windows Server delivers in the stream2 IDR
+// and retains for static desktop regions until content changes.  Combining
+// zero chroma with any luma produces a bright green frame; detecting this
+// condition early lets decodeAVC444LC2 skip the combine and wait for real data.
+//
+// The check samples 6 positions spread across each half of the Y plane.
+// Threshold of 8 cleanly separates the zero-initialised state from real chroma
+// content (neutral desktop ≈128, dark content ≥16 for typical content).
+func isAuxChromaBlank(f *h264FrameI420) bool {
+	if f == nil || f.Width < 16 || f.Height < 4 || len(f.Y) == 0 {
+		return false
+	}
+	w, h, stride := f.Width, f.Height, f.YStride
+	halfW := w / 2
+	const threshold = 8
+	for i := range 6 {
+		row := (i + 1) * h / 7
+		col := (i + 1) * halfW / 7
+		if row >= h || col >= halfW {
+			continue
+		}
+		if f.Y[row*stride+col] >= threshold {
+			return false // non-blank Cb found
+		}
+		if halfW+col < w && f.Y[row*stride+halfW+col] >= threshold {
+			return false // non-blank Cr found
+		}
+	}
+	return true
+}
+
 // combineAVC444v2BGRA implements the AVC444v2 chroma reconstruction defined in
 // [MS-RDPEGFX 3.3.8.3.3] ("YUV420p Stream Combination for YUV444v2 mode").
 //
@@ -965,6 +999,15 @@ func (g *GfxHandler) decodeAVC444LC2(stream2 *avc420Stream, destW, destH int) (d
 			// no LC=0 IDR arrives within auxDecoderBrokenTimeout.
 			g.startAuxDecoderBrokenTimer()
 		}
+		return
+	}
+	// Detect near-zero aux chroma: Windows Server initialises stream2 IDR
+	// with Y/U/V ≈ 0 (Cb=0, Cr=0) and only updates regions that change.
+	// A static desktop can take minutes to converge to real values.
+	// Combining zero chroma with any luma produces BGRA(0,135,0,255) —
+	// a bright green screen.  Drop the frame and wait for real data.
+	if isAuxChromaBlank(i420aux) {
+		slog.Debug("RDPGFX: AVC444 LC=2 skipped (stream2 chroma not yet initialised, near-zero)")
 		return
 	}
 	// Select the luma plane for the combine.  When stream2 carries an IDR its

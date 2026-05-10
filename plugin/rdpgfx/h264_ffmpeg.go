@@ -658,14 +658,19 @@ const avcHWEarlyFrameLimit = 50
 const avcHWRecoveryWindow = 500 * time.Millisecond
 
 // avcHWNullFrameStallLimit is the number of consecutive null (blank) frames
-// the HW decoder may produce before triggering an early stall-probe.
-// This limit is only applied during the early phase (hwSentCount <
-// avcHWEarlyFrameLimit).  VideoToolbox legitimately outputs a handful of
-// null frames at IDR boundaries during the session-start unstable window
-// (observed: 5–25 frames / up to ~1 s at 30 fps); mid-session IDR stalls
-// are handled by the time-based avcHWReadyFreezeThreshold alone to avoid
-// false positives from normal GOP boundaries in long-running sessions.
+// the HW decoder may produce during the early session window (hwSentCount <
+// avcHWEarlyFrameLimit) before triggering a stall-probe.  VideoToolbox
+// legitimately outputs a handful of null frames at IDR boundaries during
+// session start (observed: 5–25 frames / up to ~1 s at 30 fps).
 const avcHWNullFrameStallLimit = 25
+
+// avcHWMidSessionNullFrameLimit is the null-frame count threshold used for
+// mid-session stall detection (hwSentCount >= avcHWEarlyFrameLimit).
+// Normal GOP / mid-session IDR boundaries produce at most ~25 null frames
+// (~1 s at 30 fps); a genuine VideoToolbox stall produces hundreds.  150
+// frames ≈ 5 s at 30 fps — well above normal GOP noise but 2 s before the
+// 7-second safety valve, reducing visible freeze duration by ~2 s.
+const avcHWMidSessionNullFrameLimit = 150
 
 // keyframeWaitLimit is the maximum number of non-IDR packets we drop while
 // waiting for a keyframe after a decoder reset or flush.  gnome-remote-desktop
@@ -1585,18 +1590,22 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 			d.hwConsecNullFrames++
 			slog.Debug("H.264: HW null frame", "frozenFor", stalledFor,
 				"hwSentCount", d.hwSentCount)
-			// Early stall probe: during the unstable session-start window
-			// (hwSentCount < avcHWEarlyFrameLimit), trigger a probe if we
-			// accumulate many consecutive null frames well before the 7-second
-			// CGo-safe threshold.  This reduces visible freeze time from ~10 s
-			// to ~4 s for a genuine VideoToolbox stall at session start.
-			// Mid-session IDR stalls (hwSentCount >= avcHWEarlyFrameLimit) are
-			// not subject to this early trigger because normal GOP boundaries
-			// can produce 25+ null frames (~1 s) and would cause false positives;
-			// the time-based avcHWReadyFreezeThreshold handles them instead.
-			if d.hwSentCount < avcHWEarlyFrameLimit &&
-				d.hwConsecNullFrames >= avcHWNullFrameStallLimit && d.stallProbeStart.IsZero() {
-				slog.Debug("H.264: HW decoder early stall detected (null frame count), entering probe",
+			// Stall probe: trigger a probe if we accumulate many consecutive
+			// null frames before the 7-second CGo-safe threshold.  Two tiers:
+			//   • Early window (hwSentCount < avcHWEarlyFrameLimit): use
+			//     avcHWNullFrameStallLimit (25).  Reduces visible freeze from
+			//     ~10 s to ~4 s for a genuine VT stall at session start.
+			//   • Mid-session (hwSentCount >= avcHWEarlyFrameLimit): use
+			//     avcHWMidSessionNullFrameLimit (150 ≈ 5 s at 30 fps).
+			//     Normal GOP boundaries produce ≤25 null frames so there is
+			//     comfortable headroom before the false-positive risk zone.
+			//     Reduces visible freeze from 7 s to ~5.5 s mid-session.
+			earlyStall := d.hwSentCount < avcHWEarlyFrameLimit &&
+				d.hwConsecNullFrames >= avcHWNullFrameStallLimit
+			midStall := d.hwSentCount >= avcHWEarlyFrameLimit &&
+				d.hwConsecNullFrames >= avcHWMidSessionNullFrameLimit
+			if (earlyStall || midStall) && d.stallProbeStart.IsZero() {
+				slog.Debug("H.264: HW decoder stall detected (null frame count), entering probe",
 					"consecNullFrames", d.hwConsecNullFrames,
 					"frozenFor", stalledFor.Round(time.Millisecond),
 					"hwSentCount", d.hwSentCount)
