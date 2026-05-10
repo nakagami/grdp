@@ -233,31 +233,28 @@ func (br *bitReader) getBits(n uint8) uint32 {
 		}
 		return v
 	}
-	// Slow path: span byte boundaries (n can be up to 24).
+	// Slow path: consume bits across byte boundaries byte-at-a-time.
+	// This replaces a bit-by-bit loop (up to 24 getBit() calls) with at most
+	// ⌈n/8⌉+1 iterations, significantly reducing branch and call overhead.
 	var result uint32
-	for range n {
-		result = (result << 1) | br.getBit()
+	for rem := n; rem > 0; {
+		if br.bytePos >= len(br.data) {
+			result <<= rem
+			break
+		}
+		take := rem
+		if take > br.bitPos {
+			take = br.bitPos
+		}
+		br.bitPos -= take
+		rem -= take
+		result = (result << take) | ((uint32(br.data[br.bytePos]) >> br.bitPos) & uint32((1<<take)-1))
+		if br.bitPos == 0 {
+			br.bytePos++
+			br.bitPos = 8
+		}
 	}
 	return result
-}
-
-// readBytes reads count raw bytes (byte-aligned). Used for unencoded sections.
-func (br *bitReader) readBytes(count int) []byte {
-	// Discard any partial-byte bits to align
-	if br.bitPos != 8 && br.bitPos != 0 {
-		br.bytePos++
-		br.bitPos = 8
-	}
-	if br.bytePos+count > len(br.data) {
-		count = len(br.data) - br.bytePos
-	}
-	if count <= 0 {
-		return nil
-	}
-	out := make([]byte, count)
-	copy(out, br.data[br.bytePos:br.bytePos+count])
-	br.bytePos += count
-	return out
 }
 
 // historyWrite copies data into the ring history buffer.  Hot path — called
