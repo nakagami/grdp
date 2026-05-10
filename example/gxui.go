@@ -228,16 +228,33 @@ func clipboardWatcher(client *grdp.RdpClient, stopCh <-chan struct{}) {
 	}
 }
 
+// timedBitmap pairs a set of decoded bitmap regions with the earliest wall-
+// clock time at which they should be composited on screen.  When
+// avSyncVideoDelay is zero displayAt is the zero value and the frame is
+// rendered immediately.
+type timedBitmap struct {
+	frames    []grdp.Bitmap
+	displayAt time.Time
+}
+
+// audioDelayItem is a chunk of decoded PCM audio together with the earliest
+// wall-clock time at which it should be written to the audio output stream.
+type audioDelayItem struct {
+	data   []byte
+	playAt time.Time
+}
+
 var (
 	rdpClient              *grdp.RdpClient
 	driverc                gxui.Driver
 	screenImage            *image.RGBA
 	screenMu               sync.Mutex
 	img                    gxui.Image
-	bitmapCH               chan []grdp.Bitmap
+	bitmapCH               chan timedBitmap
 	lastMouseX, lastMouseY int
 	resizeTimer            *time.Timer
 	audioStr               *audioStream
+	audioDelayCh           chan audioDelayItem // non-nil when avSyncAudioDelay > 0
 	otoCtx                 *oto.Context
 	otoPlayer              *oto.Player
 	clipStopCh             chan struct{}
@@ -246,10 +263,17 @@ var (
 	// distinguish a truly stuck stream from a legitimately idle desktop.
 	// Stored as UnixNano; zero means no activity yet (watchdog disarmed).
 	lastServerActivity atomic.Int64
+
+	// avSyncAudioDelay / avSyncVideoDelay are set from GRDP_AUDIO_DELAY_MS /
+	// GRDP_VIDEO_DELAY_MS.  A positive audio delay shifts audio output later
+	// in time (use when audio is perceived as leading video).  A positive
+	// video delay shifts video display later (use when video leads audio).
+	avSyncAudioDelay time.Duration
+	avSyncVideoDelay time.Duration
 )
 
 func uiRdp(hostPort, domain, user, password string, width, height int, keyboardType, keyboardLayout string) (error, *grdp.RdpClient) {
-	bitmapCH = make(chan []grdp.Bitmap, 500)
+	bitmapCH = make(chan timedBitmap, 500)
 	g := grdp.NewRdpClient(hostPort, width, height, func(hp string) (net.Conn, error) {
 		return net.DialTimeout("tcp", hp, 30*time.Second)
 	})
@@ -262,7 +286,13 @@ func uiRdp(hostPort, domain, user, password string, width, height int, keyboardT
 
 	g.OnAudio(func(af rdpsnd.AudioFormat, data []byte) {
 		lastServerActivity.Store(time.Now().UnixNano())
-		audioStr.Write(data)
+		if audioDelayCh != nil {
+			d := make([]byte, len(data))
+			copy(d, data)
+			audioDelayCh <- audioDelayItem{data: d, playAt: time.Now().Add(avSyncAudioDelay)}
+		} else {
+			audioStr.Write(data)
+		}
 	})
 
 	g.OnAudioReset(func() {
@@ -319,7 +349,7 @@ func uiRdp(hostPort, domain, user, password string, width, height int, keyboardT
 		// keep up.  This prevents the decode goroutine from blocking on
 		// downstream rendering, which would stall frame ACKs.
 		select {
-		case bitmapCH <- bs:
+		case bitmapCH <- timedBitmap{frames: bs, displayAt: time.Now().Add(avSyncVideoDelay)}:
 		default:
 		}
 	})
@@ -341,7 +371,25 @@ func appMain(driver gxui.Driver) {
 	keyboardType := os.Getenv("GRDP_KEYBOARD_TYPE")
 	keyboardLayout := os.Getenv("GRDP_KEYBOARD_LAYOUT")
 
+	// A/V sync offset — positive values delay the named medium.
+	// GRDP_AUDIO_DELAY_MS: delay audio (use when audio is ahead of video).
+	// GRDP_VIDEO_DELAY_MS: delay video (use when video is ahead of audio).
+	var audioDelayMs, videoDelayMs int
+	fmt.Sscanf(os.Getenv("GRDP_AUDIO_DELAY_MS"), "%d", &audioDelayMs)
+	fmt.Sscanf(os.Getenv("GRDP_VIDEO_DELAY_MS"), "%d", &videoDelayMs)
+	if audioDelayMs > 0 {
+		avSyncAudioDelay = time.Duration(audioDelayMs) * time.Millisecond
+		slog.Info("A/V sync: audio delayed", "delay", avSyncAudioDelay)
+	}
+	if videoDelayMs > 0 {
+		avSyncVideoDelay = time.Duration(videoDelayMs) * time.Millisecond
+		slog.Info("A/V sync: video delayed", "delay", avSyncVideoDelay)
+	}
+
 	audioStr = newAudioStream()
+	if avSyncAudioDelay > 0 {
+		startAudioDelayLoop(audioStr)
+	}
 
 	if err := clipboard.Init(); err != nil {
 		slog.Error("Clipboard init failed", "err", err)
@@ -504,6 +552,25 @@ func appMain(driver gxui.Driver) {
 // while still catching a truly frozen session.
 const videoStallTimeout = 10 * time.Second
 
+// --- A/V sync helpers -------------------------------------------------------
+
+// startAudioDelayLoop starts a background goroutine that drains audioDelayCh
+// and writes each chunk to dst at its scheduled playAt time.  Items are
+// processed strictly in order so sequential Wave2 blocks are never reordered.
+func startAudioDelayLoop(dst *audioStream) {
+	audioDelayCh = make(chan audioDelayItem, 64)
+	go func() {
+		for item := range audioDelayCh {
+			if delay := time.Until(item.playAt); delay > 0 {
+				time.Sleep(delay)
+			}
+			dst.Write(item.data)
+		}
+	}()
+}
+
+
+
 func startVideoStallWatchdog() {
 	go func() {
 		ticker := time.NewTicker(time.Second)
@@ -541,14 +608,22 @@ func startVideoStallWatchdog() {
 
 func update() {
 	go func() {
-		for bs := range bitmapCH {
+		for tb := range bitmapCH {
+			if delay := time.Until(tb.displayAt); delay > 0 {
+				time.Sleep(delay)
+			}
 			screenMu.Lock()
-			paintBitmapsLocked(bs)
+			paintBitmapsLocked(tb.frames)
 		drain:
 			for {
 				select {
 				case more := <-bitmapCH:
-					paintBitmapsLocked(more)
+					if delay := time.Until(more.displayAt); delay > 0 {
+						screenMu.Unlock()
+						time.Sleep(delay)
+						screenMu.Lock()
+					}
+					paintBitmapsLocked(more.frames)
 				default:
 					break drain
 				}
