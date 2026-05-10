@@ -269,6 +269,13 @@ type GfxHandler struct {
 	// softResetCount tracks how many in-place decoder resets have been
 	// attempted since the last server-triggered RESET_GRAPHICS.
 	softResetCount int
+	// softResetNoIDRCount tracks no-IDR resets for the current decoder
+	// instance.  It is reset to 0 whenever a new h264dec is created so that
+	// each decoder gets one independent IDR-wait chance before escalating
+	// to reconnect.  This is kept separate from softResetCount so that a
+	// preceding HW-stall SW-fallback (which already bumps softResetCount)
+	// does not consume the new SW decoder's no-IDR budget.
+	softResetNoIDRCount int
 	// usingSWFallback is set after a HW stall forces a switch to software
 	// decoding.  Both h264dec and h264dec2 are created SW-only while this
 	// flag is true, avoiding repeated VideoToolbox stalls that would
@@ -1130,6 +1137,7 @@ func (g *GfxHandler) onResetGraphics(data []byte) {
 	g.clearCtx = newClearCodecCtx()
 	g.framesDecoded.Store(0)
 	g.softResetCount = 0
+	g.softResetNoIDRCount = 0
 	g.decoderBrokenNotified = false
 	g.lc2EverDecoded = false
 	g.stream2EverSeen = false
