@@ -804,13 +804,17 @@ func (g *GfxHandler) primeAuxDecoder(h264Data []byte) {
 	// If the aux decoder is broken, reset it only on an IDR (P-frames cannot
 	// start a new decode sequence).
 	if g.h264dec2.IsBroken() {
-		if isIDR {
-			slog.Debug("H.264: aux decoder broken, waiting for IDR to recreate")
-			g.h264dec2.Close()
-			g.h264dec2 = nil
-			g.startAuxDecoderBrokenTimer()
+		if !isIDR {
+			return
 		}
-		return
+		// Stream2 IDR received while aux decoder is broken — recreate it now
+		// and fall through to prime the fresh decoder with this IDR.
+		// (Previously this closed and waited for a *second* IDR which often
+		// never arrived, permanently losing LC=2 quality for the session.)
+		slog.Debug("H.264: recreating broken aux decoder on stream2 IDR")
+		g.h264dec2.Close()
+		g.h264dec2 = newH264DecoderSW()
+		g.stopAuxDecoderBrokenTimer()
 	}
 	i420dec, ok := g.h264dec2.(i420Decoder)
 	if !ok {
