@@ -634,9 +634,10 @@ const avcHWReadyFreezeThreshold = 7 * time.Second
 // a small burst of frames, then freezes for 8+ seconds without recovering.
 // The normal 7 s threshold is designed for mid-session IDR stalls that
 // self-resolve in 2-3 s; in the early phase a genuine VT stall is
-// distinguishable because it persists well beyond 3 s.  Using a shorter
-// threshold here reduces the visible freeze by ~4 s.
-const avcHWEarlyFreezeThreshold = 3 * time.Second
+// distinguishable because it persists well beyond 5 s.  Using a shorter
+// threshold here reduces the visible freeze by ~2 s while avoiding false
+// positives from transient 3-4 s null-frame bursts at IDR/GOP boundaries.
+const avcHWEarlyFreezeThreshold = 5 * time.Second
 
 // avcHWEarlyFrameLimit is the number of packets sent to the HW decoder
 // (hwSentCount) below which avcHWEarlyFreezeThreshold is used instead of
