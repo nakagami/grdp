@@ -845,6 +845,10 @@ func (g *GfxHandler) decodeAVC444LC2(stream2 *avc420Stream, destW, destH int) (d
 	g.lastLC2RecvTime.Store(time.Now().UnixNano())
 	if g.h264dec2 == nil {
 		slog.Debug("RDPGFX: AVC444 LC=2 skipped (no aux decoder)")
+		// Arm the renegotiation timer so maybeRenegotiateCapabilities fires if
+		// no stream2 IDR arrives to prime h264dec2 within auxDecoderBrokenTimeout.
+		// This is idempotent — subsequent calls are no-ops while the timer runs.
+		g.startAuxDecoderBrokenTimer()
 		return
 	}
 	if stream2 == nil || len(stream2.h264Data) == 0 {

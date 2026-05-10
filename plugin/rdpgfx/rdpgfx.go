@@ -325,7 +325,8 @@ func NewGfxHandler(onBitmap func([]BitmapUpdate)) *GfxHandler {
 		zgfx:         newZgfxContext(),
 		rfx:          newRfxDecoder(),
 		progressive:  newRfxProgressiveDecoder(),
-		h264dec2:     newH264DecoderSW(),
+		// h264dec2 starts nil; primeAuxDecoder creates it on the first stream2 IDR
+		// so it is always primed before decoding LC=2 P-frames.
 		onBitmap:     onBitmap,
 		decodeCh:     make(chan decodePkt, 1024),
 		ackCh:        make(chan []byte, 512),
@@ -1141,7 +1142,9 @@ func (g *GfxHandler) onResetGraphics(data []byte) {
 	}
 	if g.h264dec2 != nil {
 		g.h264dec2.Close()
-		g.h264dec2 = newH264DecoderSW()
+		// Keep h264dec2 nil; primeAuxDecoder will recreate it on the next stream2 IDR
+		// so the fresh decoder is always primed before receiving LC=2 P-frames.
+		g.h264dec2 = nil
 	}
 	g.avc444YPlane = avc444YPlane{}
 	g.avc444IDRYPlane = avc444YPlane{}
