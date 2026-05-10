@@ -138,6 +138,15 @@ type avc444YPlane struct {
 // than the 7-second hard stall threshold, so normal operation is unaffected.
 const avc444YStaleness = 500 * time.Millisecond
 
+// avcHWStallQueueDepthHint is the queueDepth value reported in
+// FRAME_ACKNOWLEDGE PDUs while the HW decoder is stalling (Y cache stale).
+// Reporting a depth of 10 signals to the Windows RDP server that the client's
+// decode backlog is growing, prompting it to reduce encoding quality and
+// bitrate.  This reduces the stream of LC=2 frames that accumulate during a
+// VideoToolbox null-frame period and gives VT more headroom to flush its
+// pipeline.  The hint is cleared when the Y cache is refreshed (stall over).
+const avcHWStallQueueDepthHint uint32 = 10
+
 // isH264Keyframe returns true when data contains an IDR NAL unit (type 5),
 // which marks the start of a new GOP (key frame).  The scan handles both
 // 3-byte (00 00 01) and 4-byte (00 00 00 01) Annex-B start codes.
@@ -588,6 +597,9 @@ func (g *GfxHandler) updateAVC444YCache(i420 *h264FrameI420) {
 	g.avc444YPlane.h = h
 	g.avc444YPlane.fullRange = i420.FullRange
 	g.avc444YPlane.updatedAt = time.Now()
+	// HW decoder is producing real frames again — clear any stall throttle so
+	// the server resumes its normal quality/bitrate.
+	g.SetQueueDepthHint(0)
 }
 
 // copyAVC444YToIDRCache copies the current avc444YPlane content into
@@ -777,6 +789,32 @@ func clampByte(v int) byte {
 // decoded against the wrong reference, producing all-zero chroma (Cb=0,
 // Cr=0) and a full-screen green tint.  By decoding ALL stream2 frames here
 // (output discarded), h264dec2's DPB is always at the correct reference when
+// primeH264dec2KeepDPB feeds stream2 data to h264dec2 and discards the
+// output.  Call this whenever decodeAVC444LC2 must skip the combine step
+// (Y cache empty or stale) so that h264dec2's decoded-picture buffer stays
+// in sync with the stream2 H.264 sequence.  Without this, the next
+// standalone LC=2 P-frame would reference a DPB state that is behind
+// the expected position, causing FFmpeg to produce all-zero chroma
+// (Cb=0, Cr=0) and a full-screen green tint.
+func (g *GfxHandler) primeH264dec2KeepDPB(h264Data []byte) {
+	if g.h264dec2 == nil {
+		return
+	}
+	i420dec, ok := g.h264dec2.(i420Decoder)
+	if !ok {
+		return
+	}
+	_, _, err := i420dec.DecodeWithI420(h264Data)
+	if err != nil {
+		slog.Debug("RDPGFX: LC=2 DPB prime error", "err", err)
+	}
+	if g.h264dec2 != nil && g.h264dec2.IsBroken() {
+		g.h264dec2.Close()
+		g.h264dec2 = nil
+		g.startAuxDecoderBrokenTimer()
+	}
+}
+
 // decodeAVC444LC2 decodes a standalone LC=2 P-frame.
 func (g *GfxHandler) primeAuxDecoder(h264Data []byte) {
 	// Mark that stream2 data has appeared in an LC=0 packet.  VirtualBox VRDE
@@ -859,6 +897,10 @@ func (g *GfxHandler) decodeAVC444LC2(stream2 *avc420Stream, destW, destH int) (d
 	}
 	if g.avc444YPlane.w == 0 {
 		slog.Debug("RDPGFX: AVC444 LC=2 skipped (no cached luma)")
+		// Still advance h264dec2's DPB so the next standalone LC=2 P-frame
+		// finds the correct reference.  Without this the DPB falls behind and
+		// FFmpeg outputs all-zero chroma (green tiles) on the next LC=2 decode.
+		g.primeH264dec2KeepDPB(stream2.h264Data)
 		g.maybeRequestKeyframe()
 		return
 	}
@@ -870,6 +912,16 @@ func (g *GfxHandler) decodeAVC444LC2(stream2 *avc420Stream, destW, destH int) (d
 		age := time.Since(g.avc444YPlane.updatedAt).Round(time.Millisecond)
 		slog.Debug("RDPGFX: AVC444 LC=2 skipped (Y cache stale, main decoder likely stalling)",
 			"age", age)
+		// Advance h264dec2's DPB even though we skip the combine, so that it
+		// stays in sync with the stream2 sequence and recovers cleanly once the
+		// main decoder exits its stall.
+		g.primeH264dec2KeepDPB(stream2.h264Data)
+		// Signal the server to reduce encoding quality/bitrate while the HW
+		// decoder is stalling.  This throttles the stream of LC=2 frames that
+		// accumulate during VideoToolbox null-frame periods and gives VT more
+		// headroom to flush its pipeline.  The hint is cleared in
+		// updateAVC444YCache when the HW decoder resumes real-frame output.
+		g.SetQueueDepthHint(avcHWStallQueueDepthHint)
 		// During a VideoToolbox stall h264dec.NeedsKeyframe() is false (the
 		// decoder has not been reset) so maybeRequestKeyframe() returns early.
 		// Request a keyframe directly here, reusing the shared rate-limiter, so
