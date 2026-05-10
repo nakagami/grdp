@@ -280,11 +280,16 @@ type GfxHandler struct {
 	// "LC=2 never worked this session" (server may not support stream2 priming;
 	// gracefully degrade to LC=0 only without reconnecting).
 	lc2EverDecoded bool
-	// lc2Degraded is set permanently after maybeRenegotiateCapabilities decides
-	// to degrade to LC=0 only (lc2EverDecoded == false).  Once set, primeAuxDecoder
-	// will no longer create h264dec2 and the broken-timer will not be rearmed,
-	// preventing the same warning from being logged on every subsequent IDR.
-	lc2Degraded bool
+	// stream2EverSeen is set when a non-empty stream2 payload is observed inside
+	// an LC=0 packet.  VirtualBox VRDE never includes stream2 in LC=0 packets,
+	// so stream2EverSeen stays false for the whole session.  Windows does include
+	// stream2 in LC=0 IDRs, so stream2EverSeen becomes true as soon as the first
+	// LC=0 AVC444 packet arrives.  maybeRenegotiateCapabilities uses this to
+	// distinguish "server never sends stream2" (VirtualBox → permanent degrade)
+	// from "stream2 seen but aux decoder not yet primed" (Windows, Chrome just
+	// launched → transient, wait for IDR rather than logging a WARN).
+	// Reset on RESET_GRAPHICS since the server starts a fresh AVC444 sequence.
+	stream2EverSeen bool
 	// avc444Disabled, when true, limits the CAPS_ADVERTISE to v8.0 and v8.1
 	// (AVC420 only).  The server will never send AVC444/AVC444v2 frames, which
 	// avoids the LC=2 colour degradation seen with VirtualBox VRDE.
@@ -481,14 +486,21 @@ func (g *GfxHandler) maybeRenegotiateCapabilities() {
 	if lastLC2NS == 0 || time.Since(time.Unix(0, lastLC2NS)) >= auxDecoderBrokenTimeout {
 		return
 	}
+	if !g.stream2EverSeen {
+		// stream2 has never appeared in any LC=0 packet this session.  The server
+		// (e.g. VirtualBox VRDE) does not include stream2 in LC=0 IDRs and does
+		// not send standalone LC=2 IDR frames, so the aux decoder can never be
+		// primed.  Reconnecting would reproduce the same failure.  Degrade
+		// gracefully: LC=2 is silently skipped for the remainder of this session.
+		slog.Warn("H.264: server never sent stream2 in LC=0, LC=2 degraded to LC=0 only (no reconnect)")
+		return
+	}
 	if !g.lc2EverDecoded {
-		// LC=2 has never successfully decoded a frame this session.  The server
-		// likely does not include stream2 in LC=0 IDR packets (and does not send
-		// standalone LC=2 IDR frames either), so reconnecting would only reproduce
-		// the same failure.  Degrade gracefully: LC=2 is silently skipped for the
-		// remainder of this session and the main decoder continues at LC=0 quality.
-		slog.Warn("H.264: aux decoder absent and LC=2 never decoded — degrading to LC=0 only (no reconnect)")
-		g.lc2Degraded = true
+		// stream2 has been seen in LC=0 packets (server supports LC=2), but the
+		// aux decoder has not yet produced a combined frame.  This is transient —
+		// the aux decoder will be re-primed on the next LC=0 IDR.  Do nothing and
+		// let the normal decode path recover without logging a warning.
+		slog.Debug("H.264: aux decoder not yet primed, waiting for next LC=0 IDR")
 		return
 	}
 	// The timer firing is itself the auxDecoderBrokenTimeout signal.  Do not
@@ -1119,6 +1131,7 @@ func (g *GfxHandler) onResetGraphics(data []byte) {
 	g.softResetCount = 0
 	g.decoderBrokenNotified = false
 	g.lc2EverDecoded = false
+	g.stream2EverSeen = false
 	g.lastKeyframeRequest = time.Time{}
 	g.lastDecodedFrame.Store(0)
 	g.stopInputWatchdog()
