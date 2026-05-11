@@ -28,6 +28,8 @@ export GRDP_WINDOW_SIZE=1280x800
 | `GRDP_WINDOW_SIZE`    | Window size in `WxH` format              | `1280x800`         |
 | `GRDP_KEYBOARD_TYPE`  | Keyboard type (see values below)         | `IBM_101_102_KEYS` |
 | `GRDP_KEYBOARD_LAYOUT`| Keyboard layout (see values below)       | `US`               |
+| `GRDP_AUDIO_DELAY_MS` | Shift audio output later by N ms (use when audio leads video) | `0` |
+| `GRDP_VIDEO_DELAY_MS` | Shift video display later by N ms (use when video leads audio) | `0` |
 
 #### `GRDP_KEYBOARD_TYPE` values
 
@@ -69,7 +71,7 @@ Clone and execute example
 ```
 git clone https://github.com/nakagami/grdp
 cd grdp
-go run example/gxui.go
+go run ./example/
 ```
 
 ### AVC/H.264 Hardware Accelerated Codec (Optional)
@@ -84,13 +86,27 @@ brew install ffmpeg
 # Debian/Ubuntu
 sudo apt install libavcodec-dev libavutil-dev libswscale-dev pkg-config
 
-# Build with AVC support
-go run -tags h264 example/gxui.go
+# Build and run with AVC support
+go run -tags h264 ./example/
 ```
 
 When built with `-tags h264`, the client advertises RDPGFX v10/v8.1 capabilities
 and supports AVC420/AVC444 codecs. Hardware acceleration (VideoToolbox on macOS,
 VAAPI on Linux) is automatically used when available, with a software fallback.
+
+> **Note:** Always pass `./example/` (package path) rather than a single file such as
+> `example/gxui.go`. Specifying a single file omits the other source files in the
+> package (`aac_darwin.go`, `h264_ffmpeg.go`, etc.) and results in build errors.
+
+### AAC Audio Hardware Decoding (macOS)
+
+On macOS, the example automatically decodes AAC audio streams using
+[AudioToolbox](https://developer.apple.com/documentation/audiotoolbox)
+(hardware-accelerated on Apple Silicon and Intel iGPU) when the server offers
+AAC (`WAVE_FORMAT_AAC`, tag `0x00FF`).  No extra build flags are required;
+AudioToolbox is part of the macOS SDK.
+
+On other platforms the example falls back to PCM audio.
 
 This example uses gxui.
 Since gxui is no longer being updated, I hope to have some kind of cross-platform GUI example.

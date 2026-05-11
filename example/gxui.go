@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -270,6 +271,11 @@ var (
 	// video delay shifts video display later (use when video leads audio).
 	avSyncAudioDelay time.Duration
 	avSyncVideoDelay time.Duration
+
+	// aacDec is the active AAC decoder; recreated whenever the server switches
+	// to a different AAC format.  Accessed only from the OnAudio callback.
+	aacDec       *aacDecoder
+	aacDecFormat aacFormatKey
 )
 
 func uiRdp(hostPort, domain, user, password string, width, height int, keyboardType, keyboardLayout string) (error, *grdp.RdpClient) {
@@ -286,12 +292,24 @@ func uiRdp(hostPort, domain, user, password string, width, height int, keyboardT
 
 	g.OnAudio(func(af rdpsnd.AudioFormat, data []byte) {
 		lastServerActivity.Store(time.Now().UnixNano())
+		pcm := data
+		if af.IsAAC() {
+			decoded, err := aacDecodeChunk(af, data)
+			if err != nil {
+				slog.Warn("AAC decode error", "err", err)
+				return
+			}
+			pcm = decoded
+		}
+		if len(pcm) == 0 {
+			return
+		}
 		if audioDelayCh != nil {
-			d := make([]byte, len(data))
-			copy(d, data)
+			d := make([]byte, len(pcm))
+			copy(d, pcm)
 			audioDelayCh <- audioDelayItem{data: d, playAt: time.Now().Add(avSyncAudioDelay)}
 		} else {
-			audioStr.Write(data)
+			audioStr.Write(pcm)
 		}
 	})
 
@@ -373,7 +391,17 @@ func appMain(driver gxui.Driver) {
 
 	// A/V sync offset — positive values delay the named medium.
 	audioDelayMs := 0
+	if s := os.Getenv("GRDP_AUDIO_DELAY_MS"); s != "" {
+		if v, err := strconv.Atoi(s); err == nil {
+			audioDelayMs = v
+		}
+	}
 	videoDelayMs := 700
+	if s := os.Getenv("GRDP_VIDEO_DELAY_MS"); s != "" {
+		if v, err := strconv.Atoi(s); err == nil {
+			videoDelayMs = v
+		}
+	}
 	if audioDelayMs > 0 {
 		avSyncAudioDelay = time.Duration(audioDelayMs) * time.Millisecond
 	}
@@ -547,7 +575,42 @@ func appMain(driver gxui.Driver) {
 // while still catching a truly frozen session.
 const videoStallTimeout = 10 * time.Second
 
-// --- A/V sync helpers -------------------------------------------------------
+// --- AAC helpers ------------------------------------------------------------
+
+// aacFormatKey is a comparable key derived from an AudioFormat, used to
+// detect format changes without comparing the non-comparable ExtraData slice.
+type aacFormatKey struct {
+	Tag           uint16
+	Channels      uint16
+	SamplesPerSec uint32
+}
+
+// aacDecodeChunk decodes one raw AAC packet using the process-global aacDec,
+// recreating it whenever the format changes.  The oto player is fixed at
+// 44100 Hz / 2 ch / 16-bit; a warning is logged if the AAC stream differs.
+func aacDecodeChunk(af rdpsnd.AudioFormat, data []byte) ([]byte, error) {
+	key := aacFormatKey{af.Tag, af.Channels, af.SamplesPerSec}
+	if aacDec == nil || aacDecFormat != key {
+		if aacDec != nil {
+			aacDec.Close()
+			aacDec = nil
+		}
+		dec, err := newAACDecoder(af)
+		if err != nil {
+			return nil, err
+		}
+		if af.SamplesPerSec != 44100 || af.Channels != 2 {
+			slog.Warn("AAC format differs from oto player config",
+				"rate", af.SamplesPerSec, "channels", af.Channels,
+				"otoRate", 44100, "otoChannels", 2)
+		}
+		aacDec = dec
+		aacDecFormat = key
+	}
+	return aacDec.Decode(data)
+}
+
+
 
 // startAudioDelayLoop starts a background goroutine that drains audioDelayCh
 // and writes each chunk to dst at its scheduled playAt time.  Items are

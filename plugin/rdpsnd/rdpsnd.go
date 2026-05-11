@@ -58,6 +58,7 @@ const (
 	WAVE_FORMAT_ADPCM = 0x0002
 	WAVE_FORMAT_ALAW  = 0x0006
 	WAVE_FORMAT_MULAW = 0x0007
+	WAVE_FORMAT_AAC   = 0x00FF // MPEG-4 AAC (AudioSpecificConfig in ExtraData)
 )
 
 // RDPSND version
@@ -84,6 +85,7 @@ func (f AudioFormat) String() string {
 		WAVE_FORMAT_ADPCM: "ADPCM",
 		WAVE_FORMAT_ALAW:  "A-Law",
 		WAVE_FORMAT_MULAW: "μ-Law",
+		WAVE_FORMAT_AAC:   "AAC",
 	}
 	name, ok := names[f.Tag]
 	if !ok {
@@ -94,6 +96,11 @@ func (f AudioFormat) String() string {
 
 func (f AudioFormat) IsPCM() bool {
 	return f.Tag == WAVE_FORMAT_PCM
+}
+
+// IsAAC reports whether the format uses MPEG-4 AAC encoding.
+func (f AudioFormat) IsAAC() bool {
+	return f.Tag == WAVE_FORMAT_AAC
 }
 
 func (f AudioFormat) pack() []byte {
@@ -264,8 +271,13 @@ func (h *Handler) processServerFormats(body []byte) {
 		offset = newOffset
 	}
 
-	// Select PCM formats we can handle
+	// Prefer AAC formats first (hardware-decoded on macOS), then fall back to PCM.
 	h.clientFormatIndices = nil
+	for i, f := range h.serverFormats {
+		if f.IsAAC() {
+			h.clientFormatIndices = append(h.clientFormatIndices, i)
+		}
+	}
 	for i, f := range h.serverFormats {
 		if f.IsPCM() && (f.BitsPerSample == 8 || f.BitsPerSample == 16) && (f.Channels == 1 || f.Channels == 2) {
 			h.clientFormatIndices = append(h.clientFormatIndices, i)
@@ -322,7 +334,7 @@ func (h *Handler) sendQualityMode() {
 	pdu.WriteByte(SNDC_QUALITYMODE)
 	pdu.WriteByte(0)                                                // bPad
 	binary.Write(pdu, binary.LittleEndian, uint16(4))               // bodySize
-	binary.Write(pdu, binary.LittleEndian, uint16(DYNAMIC_QUALITY)) // wQualityMode
+	binary.Write(pdu, binary.LittleEndian, uint16(HIGH_QUALITY)) // wQualityMode
 	binary.Write(pdu, binary.LittleEndian, uint16(0))               // Reserved
 
 	h.send(pdu.Bytes())
@@ -392,7 +404,11 @@ func (h *Handler) processWaveBody(data []byte) {
 
 	slog.Debug("rdpsnd: Wave data", "len", len(audioData))
 	h.deliverAudio(audioData)
-	h.sendWaveConfirm(h.waveTimestamp, h.waveBlockNo)
+	var confirmFmt AudioFormat
+	if h.activeFormatIndex >= 0 && h.activeFormatIndex < len(h.serverFormats) {
+		confirmFmt = h.serverFormats[h.activeFormatIndex]
+	}
+	h.sendWaveConfirm(waveConfirmTimestamp(h.waveTimestamp, audioData, confirmFmt), h.waveBlockNo)
 }
 
 // --- Wave2 (MS-RDPEA 2.2.2.7) ---
@@ -417,10 +433,26 @@ func (h *Handler) processWave2(body []byte) {
 
 	slog.Debug("rdpsnd: Wave2", "ts", wTimeStamp, "fmt", wFormatNo, "block", cBlockNo, "dataLen", len(audioData))
 	h.deliverAudio(audioData)
-	h.sendWaveConfirm(wTimeStamp, cBlockNo)
+	var confirmFmt AudioFormat
+	if h.activeFormatIndex >= 0 && h.activeFormatIndex < len(h.serverFormats) {
+		confirmFmt = h.serverFormats[h.activeFormatIndex]
+	}
+	h.sendWaveConfirm(waveConfirmTimestamp(wTimeStamp, audioData, confirmFmt), cBlockNo)
 }
 
 // --- Wave Confirm (MS-RDPEA 2.2.2.8) ---
+
+// waveConfirmTimestamp computes the wTimeStamp for WAVE_CONFIRM_PDU.
+// MS-RDPEA §2.2.2.8: the confirmed timestamp MUST be the server's timestamp
+// PLUS the estimated playback duration of the audio data in milliseconds.
+// This allows the server to pace audio delivery accurately.
+func waveConfirmTimestamp(serverTs uint16, audioData []byte, fmt AudioFormat) uint16 {
+	if fmt.AvgBytesPerSec == 0 {
+		return serverTs
+	}
+	playMs := uint32(len(audioData)) * 1000 / fmt.AvgBytesPerSec
+	return serverTs + uint16(playMs)
+}
 
 func (h *Handler) sendWaveConfirm(timestamp uint16, blockNo uint8) {
 	pdu := &bytes.Buffer{}

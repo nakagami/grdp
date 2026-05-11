@@ -197,13 +197,13 @@ type GfxHandler struct {
 	zgfx         *zgfxContext
 	rfx          *rfxDecoder
 	progressive  *rfxProgressiveDecoder
-	h264dec      h264Decoder
+	h264dec      H264Decoder
 	// h264dec2 is the auxiliary H.264 decoder used for AVC444v2 LC=2 chroma-upgrade
 	// frames.  It decodes stream2, which carries chroma values for positions not
 	// covered by stream1's 4:2:0 quantiser.  The decoded I420 planes are combined
 	// with the luma and chroma planes cached from the most recent LC=0/1 main-stream
 	// decode to reconstruct full 4:4:4 YUV before converting to BGRA.
-	h264dec2 h264Decoder
+	h264dec2 H264Decoder
 	// avc444YPlane caches the luma (Y) and half-res chroma (U/V) planes from the
 	// last main-stream AVC444 decode, for use when an LC=2 chroma-upgrade frame arrives.
 	avc444YPlane avc444YPlane
@@ -327,11 +327,11 @@ func NewGfxHandler(onBitmap func([]BitmapUpdate)) *GfxHandler {
 		progressive:  newRfxProgressiveDecoder(),
 		// h264dec2 starts nil; primeAuxDecoder creates it on the first stream2 IDR
 		// so it is always primed before decoding LC=2 P-frames.
-		onBitmap:     onBitmap,
-		decodeCh:     make(chan decodePkt, 1024),
-		ackCh:        make(chan []byte, 512),
-		doneCh:       make(chan struct{}),
-		watchdogCh:   make(chan struct{}, 4),
+		onBitmap:   onBitmap,
+		decodeCh:   make(chan decodePkt, 1024),
+		ackCh:      make(chan []byte, 512),
+		doneCh:     make(chan struct{}),
+		watchdogCh: make(chan struct{}, 4),
 	}
 	g.h264dec = newH264DecoderWithWatchdog(g.watchdogCh)
 	go g.decodeLoop()
@@ -552,7 +552,7 @@ func (g *GfxHandler) maybeTriggerInputStall() {
 	if silentFor < inputStallSilentThreshold {
 		return
 	}
-	g.h264dec.ForceBroken(h264BrokenReasonHWStall)
+	g.h264dec.ForceBroken(H264BrokenReasonHWStall)
 	slog.Debug("H.264: local input produced no new frame, marking decoder broken",
 		"silentFor", silentFor.Round(time.Millisecond),
 		"inputAgo", time.Since(time.Unix(0, inputNS)).Round(time.Millisecond))
@@ -1011,6 +1011,8 @@ func (g *GfxHandler) dispatchDecode(cmdId uint16, data []byte, skipHeavy bool) {
 		g.onMapSurfaceToOutput(data)
 	case cmdidStartFrame:
 		// nothing to do
+	case cmdidSurfaceToSurface:
+		g.onSurfaceToSurface(data)
 	case cmdidEndFrame:
 		g.onEndFrame(data) // always ACK, even when skipHeavy
 	case cmdidWireToSurface1:
@@ -1346,7 +1348,7 @@ func (g *GfxHandler) onWireToSurface1Decode(data []byte, skipHeavy bool) {
 		destY := int(s.outputY) + int(top)
 		if g.onNV12 != nil {
 			var ownedAVC bool
-			var nv12 *h264FrameNV12
+			var nv12 *H264FrameNV12
 			decoded, nv12, avcRegions, ownedAVC = g.decodeAVC420WithNV12(bmpData, destX, destY, w, h)
 			owned = ownedAVC
 			if nv12 != nil {
@@ -1362,7 +1364,7 @@ func (g *GfxHandler) onWireToSurface1Decode(data []byte, skipHeavy bool) {
 			// NV12 unavailable; fall through to BGRA emit.
 		} else if g.onI420 != nil {
 			var ownedAVC bool
-			var i420 *h264FrameI420
+			var i420 *H264FrameI420
 			decoded, i420, avcRegions, ownedAVC = g.decodeAVC420WithI420(bmpData, destX, destY, w, h)
 			owned = ownedAVC
 			if i420 != nil {
@@ -1386,7 +1388,7 @@ func (g *GfxHandler) onWireToSurface1Decode(data []byte, skipHeavy bool) {
 		destY := int(s.outputY) + int(top)
 		if g.onI420 != nil {
 			var ownedAVC bool
-			var i420 *h264FrameI420
+			var i420 *H264FrameI420
 			decoded, i420, avcRegions, ownedAVC = g.decodeAVC444WithI420(bmpData, destX, destY, w, h)
 			owned = ownedAVC
 			if i420 != nil {
@@ -1726,6 +1728,67 @@ func (g *GfxHandler) onSolidFill(data []byte) {
 				Width: w, Height: h, Bpp: 4, Data: fillData,
 			}})
 		}
+	}
+}
+
+// onSurfaceToSurface handles RDPGFX_SURFACE_TO_SURFACE_PDU (MS-RDPEGFX 2.2.2.5).
+// It blits one or more source rectangles from srcSurface to destSurface.
+// For each rect r, pixels at (r.left, r.top, r.right, r.bottom) in the source
+// are copied to (destPt.x+r.left, destPt.y+r.top) in the destination.
+func (g *GfxHandler) onSurfaceToSurface(data []byte) {
+	// Header: srcSurfaceId(2) + destSurfaceId(2) + destPt.x(2) + destPt.y(2) + rectCount(2) = 10 bytes
+	if len(data) < 10 {
+		return
+	}
+	srcId := binary.LittleEndian.Uint16(data[0:])
+	dstId := binary.LittleEndian.Uint16(data[2:])
+	destPtX := int(binary.LittleEndian.Uint16(data[4:]))
+	destPtY := int(binary.LittleEndian.Uint16(data[6:]))
+	rectCount := int(binary.LittleEndian.Uint16(data[8:]))
+
+	src, srcOk := g.surfaces[srcId]
+	dst, dstOk := g.surfaces[dstId]
+	if !srcOk || !dstOk {
+		return
+	}
+
+	srcStride := int(src.width) * 4
+	dstStride := int(dst.width) * 4
+	offset := 10
+	for i := 0; i < rectCount; i++ {
+		if offset+8 > len(data) {
+			break
+		}
+		left := int(binary.LittleEndian.Uint16(data[offset:]))
+		top := int(binary.LittleEndian.Uint16(data[offset+2:]))
+		right := int(binary.LittleEndian.Uint16(data[offset+4:]))
+		bottom := int(binary.LittleEndian.Uint16(data[offset+6:]))
+		offset += 8
+
+		w := right - left
+		h := bottom - top
+		if w <= 0 || h <= 0 {
+			continue
+		}
+		dstX := destPtX + left
+		dstY := destPtY + top
+		rowBytes := w * 4
+		for row := 0; row < h; row++ {
+			srcRow := top + row
+			dstRow := dstY + row
+			if srcRow < 0 || srcRow >= int(src.height) ||
+				dstRow < 0 || dstRow >= int(dst.height) {
+				continue
+			}
+			srcOff := srcRow*srcStride + left*4
+			dstOff := dstRow*dstStride + dstX*4
+			if srcOff < 0 || srcOff+rowBytes > len(src.data) ||
+				dstOff < 0 || dstOff+rowBytes > len(dst.data) {
+				continue
+			}
+			copy(dst.data[dstOff:dstOff+rowBytes], src.data[srcOff:srcOff+rowBytes])
+		}
+		g.emitBitmap(dst, dstX, dstY, w, h, dst.data)
 	}
 }
 

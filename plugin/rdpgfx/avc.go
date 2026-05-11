@@ -13,15 +13,6 @@ type avcRect struct {
 	left, top, right, bottom uint16
 }
 
-// regionHinter is an optional interface implemented by decoders that support
-// region-aware YUV→BGRA conversion.  When setRegionHint is called immediately
-// before Decode, the decoder only converts pixels within the specified dirty
-// rectangles, skipping unchanged areas of the frame and reducing CPU cost for
-// small updates such as scroll, cursor movement, or partial redraws.
-type regionHinter interface {
-	setRegionHint(regions []avcRect)
-}
-
 type avc420Stream struct {
 	regions  []avcRect
 	h264Data []byte
@@ -205,9 +196,13 @@ func (g *GfxHandler) decodeAVC420(data []byte, destX, destY, destW, destH int) (
 	// the decoder can skip converting pixels outside those rectangles.  This
 	// is safe here because decodeAVC420 uses blitAndEmitAVCRegions (which only
 	// reads dirty pixels) when shouldUseAVCRegions returns true.
-	if rh, ok := g.h264dec.(regionHinter); ok &&
+	if rh, ok := g.h264dec.(RegionHinter); ok &&
 		len(stream.regions) > 0 && shouldUseAVCRegions(stream.regions, destW, destH) {
-		rh.setRegionHint(stream.regions)
+		rects := make([][4]uint16, len(stream.regions))
+		for i, r := range stream.regions {
+			rects[i] = [4]uint16{r.left, r.top, r.right, r.bottom}
+		}
+		rh.SetRegionHint(rects)
 	}
 	frame, err := g.h264dec.Decode(stream.h264Data)
 	if err != nil {
@@ -263,13 +258,17 @@ func (g *GfxHandler) decodeAVC444(data []byte, destX, destY, destW, destH int) (
 	// Pass region hints so the decoder skips converting pixels outside the
 	// dirty rectangles.  Safe here because decodeAVC444 also uses
 	// blitAndEmitAVCRegions when shouldUseAVCRegions returns true.
-	if rh, ok := g.h264dec.(regionHinter); ok &&
+	if rh, ok := g.h264dec.(RegionHinter); ok &&
 		len(stream1.regions) > 0 && shouldUseAVCRegions(stream1.regions, destW, destH) {
-		rh.setRegionHint(stream1.regions)
+		rects := make([][4]uint16, len(stream1.regions))
+		for i, r := range stream1.regions {
+			rects[i] = [4]uint16{r.left, r.top, r.right, r.bottom}
+		}
+		rh.SetRegionHint(rects)
 	}
 
-	var frame *h264Frame
-	var i420out *h264FrameI420
+	var frame *H264Frame
+	var i420out *H264FrameI420
 	var err error
 	isIDR := g.h264dec2 != nil && isH264Keyframe(stream1.h264Data)
 	if isIDR {
@@ -281,7 +280,7 @@ func (g *GfxHandler) decodeAVC444(data []byte, destX, destY, destW, destH int) (
 	}
 	if g.h264dec2 != nil {
 		// Cache luma for future LC=2 combine.
-		if i420dec, ok := g.h264dec.(i420Decoder); ok {
+		if i420dec, ok := g.h264dec.(I420Decoder); ok {
 			frame, i420out, err = i420dec.DecodeWithI420(stream1.h264Data)
 			if err != nil {
 				slog.Warn("RDPGFX: H.264 decode error (AVC444)", "err", err)
@@ -321,7 +320,7 @@ func (g *GfxHandler) decodeAVC444(data []byte, destX, destY, destW, destH int) (
 		if bgra == nil {
 			return nil, nil, false
 		}
-		frame = &h264Frame{Data: bgra, Width: i420out.Width, Height: i420out.Height}
+		frame = &H264Frame{Data: bgra, Width: i420out.Width, Height: i420out.Height}
 	}
 	// Prime the aux decoder with stream2 IDR data even when the main frame
 	// was zero-filled: stream2 is independent of the VideoToolbox pipeline and
@@ -368,11 +367,11 @@ func (g *GfxHandler) decodeAVC444(data []byte, destX, destY, destW, destH int) (
 
 // decodeAVC420WithI420 decodes AVC420 bitmap data, returning BGRA pixels for
 // the surface backing store and, when the underlying decoder supports I420
-// output, an optional h264FrameI420 for GPU-accelerated IYUV texture upload.
+// output, an optional H264FrameI420 for GPU-accelerated IYUV texture upload.
 // i420 is nil when I420 extraction is unsupported or the frame dimensions are
 // smaller than destW×destH.  Callers must fall back to BGRA rendering when
 // i420 is nil.
-func (g *GfxHandler) decodeAVC420WithI420(data []byte, destX, destY, destW, destH int) (decoded []byte, i420 *h264FrameI420, regions []avcRect, pooled bool) {
+func (g *GfxHandler) decodeAVC420WithI420(data []byte, destX, destY, destW, destH int) (decoded []byte, i420 *H264FrameI420, regions []avcRect, pooled bool) {
 	stream, err := parseAVC420Stream(data)
 	if err != nil {
 		slog.Warn("RDPGFX: AVC420 parse error", "err", err)
@@ -387,10 +386,10 @@ func (g *GfxHandler) decodeAVC420WithI420(data []byte, destX, destY, destW, dest
 	if g.h264dec == nil || len(stream.h264Data) == 0 {
 		return
 	}
-	var frame *h264Frame
-	i420dec, hasI420 := g.h264dec.(i420Decoder)
+	var frame *H264Frame
+	i420dec, hasI420 := g.h264dec.(I420Decoder)
 	if hasI420 {
-		var i420out *h264FrameI420
+		var i420out *H264FrameI420
 		frame, i420out, err = i420dec.DecodeWithI420(stream.h264Data)
 		if err != nil {
 			slog.Warn("RDPGFX: H.264 decode error", "err", err)
@@ -432,7 +431,7 @@ func (g *GfxHandler) decodeAVC420WithI420(data []byte, destX, destY, destW, dest
 // decodeAVC420WithNV12 decodes AVC420 bitmap data, returning native NV12
 // planes when the underlying decoder produces NV12 (typically VideoToolbox).
 // If NV12 is unavailable, decoded may contain a BGRA fallback frame.
-func (g *GfxHandler) decodeAVC420WithNV12(data []byte, destX, destY, destW, destH int) (decoded []byte, nv12 *h264FrameNV12, regions []avcRect, pooled bool) {
+func (g *GfxHandler) decodeAVC420WithNV12(data []byte, destX, destY, destW, destH int) (decoded []byte, nv12 *H264FrameNV12, regions []avcRect, pooled bool) {
 	stream, err := parseAVC420Stream(data)
 	if err != nil {
 		slog.Warn("RDPGFX: AVC420 parse error", "err", err)
@@ -447,10 +446,10 @@ func (g *GfxHandler) decodeAVC420WithNV12(data []byte, destX, destY, destW, dest
 	if g.h264dec == nil || len(stream.h264Data) == 0 {
 		return
 	}
-	var frame *h264Frame
-	nv12dec, hasNV12 := g.h264dec.(nv12Decoder)
+	var frame *H264Frame
+	nv12dec, hasNV12 := g.h264dec.(NV12Decoder)
 	if hasNV12 {
-		var nv12out *h264FrameNV12
+		var nv12out *H264FrameNV12
 		frame, nv12out, err = nv12dec.DecodeWithNV12(stream.h264Data)
 		if err != nil {
 			slog.Warn("RDPGFX: H.264 decode error", "err", err)
@@ -492,7 +491,7 @@ func (g *GfxHandler) decodeAVC420WithNV12(data []byte, destX, destY, destW, dest
 // luma plane.  LC=2 decodes the auxiliary chroma stream and combines it with
 // the cached luma to produce BGRA; i420 is nil for LC=2 frames (GPU path falls
 // back to BGRA).
-func (g *GfxHandler) decodeAVC444WithI420(data []byte, destX, destY, destW, destH int) (decoded []byte, i420 *h264FrameI420, regions []avcRect, pooled bool) {
+func (g *GfxHandler) decodeAVC444WithI420(data []byte, destX, destY, destW, destH int) (decoded []byte, i420 *H264FrameI420, regions []avcRect, pooled bool) {
 	stream1, stream2, lc, err := parseAVC444Stream(data)
 	if g.onH264Raw != nil && stream1 != nil && len(stream1.h264Data) > 0 {
 		isKF := isH264Keyframe(stream1.h264Data)
@@ -511,10 +510,10 @@ func (g *GfxHandler) decodeAVC444WithI420(data []byte, destX, destY, destW, dest
 	if g.h264dec == nil || stream1 == nil || len(stream1.h264Data) == 0 {
 		return
 	}
-	var frame *h264Frame
-	i420dec, hasI420 := g.h264dec.(i420Decoder)
+	var frame *H264Frame
+	i420dec, hasI420 := g.h264dec.(I420Decoder)
 	if hasI420 {
-		var i420out *h264FrameI420
+		var i420out *H264FrameI420
 		frame, i420out, err = i420dec.DecodeWithI420(stream1.h264Data)
 		if err != nil {
 			slog.Warn("RDPGFX: H.264 decode error (AVC444)", "err", err)
@@ -566,7 +565,7 @@ func (g *GfxHandler) decodeAVC444WithI420(data []byte, destX, destY, destW, dest
 // g.avc444YPlane for use when combining with an LC=2 auxiliary chroma frame.
 // The U/V planes are stored half-res (stride = (w+1)/2) and provide the B2/B3
 // chroma values (even column, even row positions) that stream2 does not cover.
-func (g *GfxHandler) updateAVC444YCache(i420 *h264FrameI420) {
+func (g *GfxHandler) updateAVC444YCache(i420 *H264FrameI420) {
 	w, h := i420.Width, i420.Height
 	uvStride := (w + 1) / 2
 	uvH := (h + 1) / 2
@@ -646,7 +645,7 @@ func (g *GfxHandler) copyAVC444YToIDRCache() {
 // The check samples 6 positions spread across each half of the Y plane.
 // Threshold of 8 cleanly separates the zero-initialised state from real chroma
 // content (neutral desktop ≈128, dark content ≥16 for typical content).
-func isAuxChromaBlank(f *h264FrameI420) bool {
+func isAuxChromaBlank(f *H264FrameI420) bool {
 	if f == nil || f.Width < 16 || f.Height < 4 || len(f.Y) == 0 {
 		return false
 	}
@@ -699,7 +698,7 @@ func isAuxChromaBlank(f *h264FrameI420) bool {
 func combineAVC444v2BGRA(
 	yPlane []byte, yStride int,
 	cachedU, cachedV []byte, uvStride int,
-	i420aux *h264FrameI420,
+	i420aux *H264FrameI420,
 	fullRange bool,
 	w, h int,
 ) (out []byte, pooled bool) {
@@ -754,7 +753,7 @@ func combineAVC444v2BGRA(
 // i420ToBGRA converts a planar I420 frame to a packed BGRA buffer using BT.709
 // coefficients (matching AVC444 content encoding). Used when the I420 fast path
 // is active and a BGRA output is required by the rendering path.
-func i420ToBGRA(src *h264FrameI420) ([]byte, bool) {
+func i420ToBGRA(src *H264FrameI420) ([]byte, bool) {
 	if src == nil || src.Width <= 0 || src.Height <= 0 {
 		return nil, false
 	}
@@ -834,7 +833,7 @@ func (g *GfxHandler) primeH264dec2KeepDPB(h264Data []byte) {
 	if g.h264dec2 == nil {
 		return
 	}
-	i420dec, ok := g.h264dec2.(i420Decoder)
+	i420dec, ok := g.h264dec2.(I420Decoder)
 	if !ok {
 		return
 	}
@@ -883,7 +882,7 @@ func (g *GfxHandler) primeAuxDecoder(h264Data []byte) {
 		g.h264dec2 = newH264DecoderSW()
 		g.stopAuxDecoderBrokenTimer()
 	}
-	i420dec, ok := g.h264dec2.(i420Decoder)
+	i420dec, ok := g.h264dec2.(I420Decoder)
 	if !ok {
 		return
 	}
@@ -967,7 +966,7 @@ func (g *GfxHandler) decodeAVC444LC2(stream2 *avc420Stream, destW, destH int) (d
 		}
 		return
 	}
-	i420dec, ok := g.h264dec2.(i420Decoder)
+	i420dec, ok := g.h264dec2.(I420Decoder)
 	if !ok {
 		slog.Debug("RDPGFX: AVC444 LC=2 skipped (aux decoder lacks I420 support)")
 		return
@@ -1210,7 +1209,7 @@ func (g *GfxHandler) maybeNotifyDecoderBroken() {
 		return
 	}
 	reason := g.h264dec.BrokenReason()
-	if reason == h264BrokenReasonNoIDR {
+	if reason == H264BrokenReasonNoIDR {
 		// Allow only one no-IDR soft reset before escalating to reconnect.
 		// ForceRefresh (SuppressOutput toggle) often fails to trigger a new
 		// AVC444 IDR from Windows servers; repeatedly retrying just prolongs
@@ -1251,7 +1250,7 @@ func (g *GfxHandler) maybeNotifyDecoderBroken() {
 	}
 	if g.softResetCount < softResetLimit {
 		g.softResetCount++
-		if reason == h264BrokenReasonHWStall && !g.usingSWFallback {
+		if reason == H264BrokenReasonHWStall && !g.usingSWFallback {
 			slog.Debug("H.264: HW stall — falling back to software decoding",
 				"attempt", g.softResetCount, "limit", softResetLimit)
 			g.usingSWFallback = true

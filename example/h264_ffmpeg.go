@@ -1,9 +1,38 @@
 //go:build h264
 
-package rdpgfx
+package main
 
 /*
 #cgo pkg-config: libavcodec libavutil libswscale
+#cgo nocallback avcodec_alloc_context3
+#cgo nocallback avcodec_find_decoder
+#cgo nocallback avcodec_flush_buffers
+#cgo nocallback avcodec_free_context
+#cgo nocallback avcodec_get_hw_config
+#cgo nocallback avcodec_open2
+#cgo nocallback avcodec_receive_frame
+#cgo nocallback avcodec_send_packet
+#cgo nocallback av_buffer_ref
+#cgo nocallback av_buffer_unref
+#cgo nocallback av_frame_alloc
+#cgo nocallback av_frame_free
+#cgo nocallback av_frame_unref
+#cgo nocallback av_hwdevice_ctx_create
+#cgo nocallback av_hwframe_transfer_data
+#cgo nocallback av_packet_alloc
+#cgo nocallback av_packet_free
+#cgo noescape avcodec_send_packet
+#cgo noescape grdp_copy_yuv420p_to_i420
+#cgo noescape grdp_copy_nv12_to_i420
+#cgo noescape grdp_copy_nv12
+#cgo noescape grdp_yuv420p_to_bgra
+#cgo noescape grdp_yuv420p_to_bgra_regions
+#cgo noescape grdp_nv12_to_bgra
+#cgo noescape grdp_nv12_to_bgra_regions
+#cgo noescape grdp_frame_to_bgra
+#cgo noescape grdp_sample_nv12
+#cgo noescape grdp_sample_yuv
+#cgo noescape grdp_sample_nv12_at
 #include <libavcodec/avcodec.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/hwcontext.h>
@@ -581,7 +610,6 @@ static void grdp_copy_nv12(
 import "C"
 
 import (
-	"bytes"
 	"fmt"
 	"log/slog"
 	"runtime"
@@ -589,6 +617,8 @@ import (
 	"sync/atomic"
 	"time"
 	"unsafe"
+
+	"github.com/nakagami/grdp/plugin/rdpgfx"
 )
 
 // useSwscale controls whether YUV420P/YUVJ420P and NV12 frames are converted
@@ -716,8 +746,8 @@ type ffmpegDecoder struct {
 	packet                   *C.AVPacket
 	frame                    *C.AVFrame
 	swFrame                  *C.AVFrame
-	mapFrame                 *C.AVFrame  // reusable frame for av_hwframe_map zero-copy transfers
-	hwMapSupported           int8        // 0=unknown, 1=supported, -1=unsupported
+	mapFrame                 *C.AVFrame // reusable frame for av_hwframe_map zero-copy transfers
+	hwMapSupported           int8       // 0=unknown, 1=supported, -1=unsupported
 	swsCtx                   *C.struct_SwsContext
 	useHW                    bool
 	hwPixFmt                 C.enum_AVPixelFormat
@@ -737,7 +767,7 @@ type ffmpegDecoder struct {
 	swFrameCount             int       // frames decoded by SW decoder (for diagnostics)
 	hwFrameCount             int       // frames decoded by HW decoder (for diagnostics)
 	broken                   bool      // decoder is unrecoverable; stop producing frames so the app reconnects
-	brokenReason             h264BrokenReason
+	brokenReason             rdpgfx.H264BrokenReason
 	timerBroken              atomic.Bool // set by background timers when probe/IDR timeouts expire
 	timerBrokenReason        atomic.Int32
 	proceededWithoutKeyframe bool            // "proceed without keyframe" path was taken; AVERROR here means broken
@@ -775,18 +805,18 @@ type ffmpegDecoder struct {
 	// rendering via SDL2 IYUV textures.  Same ring/lifecycle pattern as outRing.
 	// outI420Enabled gates I420 extraction (set by DecodeWithI420); lastI420
 	// is the result from the most recent convertFrame call.
-	outI420Ring    [2]h264FrameI420
+	outI420Ring    [2]rdpgfx.H264FrameI420
 	outI420RingIdx int
 	outI420Enabled bool
-	lastI420       *h264FrameI420
+	lastI420       *rdpgfx.H264FrameI420
 
 	// outNV12Ring holds native NV12 frames for SDL2 NV12 texture upload.
 	// This path is especially useful for VideoToolbox, whose transferred
 	// software frames are usually NV12.
-	outNV12Ring    [2]h264FrameNV12
+	outNV12Ring    [2]rdpgfx.H264FrameNV12
 	outNV12RingIdx int
 	outNV12Enabled bool
-	lastNV12       *h264FrameNV12
+	lastNV12       *rdpgfx.H264FrameNV12
 
 	// regionHint carries dirty-rect hints for region-aware YUV→BGRA conversion.
 	// setRegionHint populates these fields; Decode() captures them into local
@@ -915,26 +945,7 @@ func (d *ffmpegDecoder) extractNV12fromSrc(srcFrame *C.AVFrame) {
 	d.lastNV12 = slot
 }
 
-func newH264Decoder() h264Decoder { return newH264DecoderWithWatchdog(nil) }
-
-func newH264DecoderWithWatchdog(watchdogCh chan<- struct{}) h264Decoder {
-	return newH264DecoderInternal(watchdogCh, false, keyframeWaitTimeout)
-}
-
-// newH264DecoderSW creates a pure software (FFmpeg) decoder used for auxiliary
-// decoders such as the AVC444v2 stream2 chroma decoder (h264dec2).
-// forceSW=true ensures VideoToolbox is never opened for the aux stream, so
-// that when VT stalls on the main decoder (h264dec), h264dec2 remains
-// functional and LC=2 chroma decoding can continue independently.
-func newH264DecoderSW() h264Decoder {
-	return newH264DecoderInternal(nil, true, keyframeWaitTimeoutSW)
-}
-
-func newH264DecoderSWWithWatchdog(watchdogCh chan<- struct{}) h264Decoder {
-	return newH264DecoderInternal(watchdogCh, true, keyframeWaitTimeoutSWFallback)
-}
-
-func newH264DecoderInternal(watchdogCh chan<- struct{}, forceSW bool, kfWaitTimeout time.Duration) h264Decoder {
+func newH264DecoderInternal(watchdogCh chan<- struct{}, forceSW bool, kfWaitTimeout time.Duration) rdpgfx.H264Decoder {
 	// Suppress FFmpeg stderr output (e.g. "[h264 @ ...] sps_id out of range").
 	// grdp emits its own slog messages for H.264 recovery events.
 	avLogOnce.Do(func() { C.grdp_suppress_av_log() })
@@ -1049,7 +1060,7 @@ func newH264DecoderInternal(watchdogCh chan<- struct{}, forceSW bool, kfWaitTime
 	// (e.g. h264dec2) are not armed here — they are managed separately.
 	if watchdogCh != nil {
 		d.kfWaitTimer = time.AfterFunc(kfWaitTimeout, func() {
-			d.timerBrokenReason.Store(int32(h264BrokenReasonNoIDR))
+			d.timerBrokenReason.Store(int32(rdpgfx.H264BrokenReasonNoIDR))
 			d.timerBroken.Store(true)
 			d.signalWatchdog()
 		})
@@ -1071,22 +1082,22 @@ func (d *ffmpegDecoder) IsBroken() bool {
 	return d.broken || d.timerBroken.Load()
 }
 
-func (d *ffmpegDecoder) BrokenReason() h264BrokenReason {
-	if d.brokenReason != h264BrokenReasonNone {
+func (d *ffmpegDecoder) BrokenReason() rdpgfx.H264BrokenReason {
+	if d.brokenReason != rdpgfx.H264BrokenReasonNone {
 		return d.brokenReason
 	}
-	return h264BrokenReason(d.timerBrokenReason.Load())
+	return rdpgfx.H264BrokenReason(d.timerBrokenReason.Load())
 }
 
-func (d *ffmpegDecoder) ForceBroken(reason h264BrokenReason) {
+func (d *ffmpegDecoder) ForceBroken(reason rdpgfx.H264BrokenReason) {
 	d.markBroken(reason)
 }
 
 // markBroken sets d.broken and stops any pending background timers.
 // Called from inside Decode() (decodeLoop goroutine) when a timeout fires.
-func (d *ffmpegDecoder) markBroken(reason h264BrokenReason) {
+func (d *ffmpegDecoder) markBroken(reason rdpgfx.H264BrokenReason) {
 	d.broken = true
-	if reason != h264BrokenReasonNone {
+	if reason != rdpgfx.H264BrokenReasonNone {
 		d.brokenReason = reason
 		d.timerBrokenReason.Store(int32(reason))
 	}
@@ -1118,7 +1129,7 @@ func (d *ffmpegDecoder) signalWatchdog() {
 }
 
 // HardResetCount always returns 0 — hard resets have been removed.
-// The method is kept to satisfy the h264Decoder interface used by GfxHandler.
+// The method is kept to satisfy the rdpgfx.H264Decoder interface used by GfxHandler.
 func (d *ffmpegDecoder) HardResetCount() int {
 	return 0
 }
@@ -1132,24 +1143,24 @@ func (d *ffmpegDecoder) LastReceiveTime() time.Time {
 // pixels within the provided rectangles, skipping unchanged areas of the frame.
 // Must be called immediately before Decode; Decode clears the hint at entry so
 // it cannot accidentally apply to a later unrelated frame.
-func (d *ffmpegDecoder) setRegionHint(regions []avcRect) {
-	n := len(regions)
+func (d *ffmpegDecoder) SetRegionHint(rects [][4]uint16) {
+	n := len(rects)
 	need := n * 4
 	if cap(d.regionHint) < need {
 		d.regionHint = make([]C.uint16_t, need)
 	} else {
 		d.regionHint = d.regionHint[:need]
 	}
-	for i, r := range regions {
-		d.regionHint[i*4+0] = C.uint16_t(r.left)
-		d.regionHint[i*4+1] = C.uint16_t(r.top)
-		d.regionHint[i*4+2] = C.uint16_t(r.right)
-		d.regionHint[i*4+3] = C.uint16_t(r.bottom)
+	for i, r := range rects {
+		d.regionHint[i*4+0] = C.uint16_t(r[0])
+		d.regionHint[i*4+1] = C.uint16_t(r[1])
+		d.regionHint[i*4+2] = C.uint16_t(r[2])
+		d.regionHint[i*4+3] = C.uint16_t(r[3])
 	}
 	d.nRegionHints = C.int(n)
 }
 
-func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
+func (d *ffmpegDecoder) Decode(h264Data []byte) (*rdpgfx.H264Frame, error) {
 	// Capture and clear the pending region hint immediately so that any early
 	// return (broken, keyframe wait, etc.) cannot leave stale hints that would
 	// incorrectly apply to a subsequent unrelated frame.
@@ -1175,7 +1186,7 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 	// was not being called (static screen → server sends no frames).
 	// Propagate it to broken so all downstream checks see a consistent state.
 	if d.timerBroken.Load() {
-		d.markBroken(h264BrokenReason(d.timerBrokenReason.Load()))
+		d.markBroken(rdpgfx.H264BrokenReason(d.timerBrokenReason.Load()))
 		return nil, nil
 	}
 	// Track every call, including those that return early (probe mode, keyframe
@@ -1193,10 +1204,10 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 	// the av_log level (AV_LOG_FATAL) set in newH264Decoder; grdp emits its
 	// own slog warning instead.
 	// Single pass over the Annex B stream: detect IDR/SPS NAL presence.
-	scan := scanH264Packet(h264Data)
+	scan := rdpgfx.ScanH264Packet(h264Data)
 
 	if d.needsKeyFrame {
-		if !scan.hasKeyFrame {
+		if !scan.HasKeyFrame {
 			d.keyframeWaitCount++
 			if d.keyframeWaitCount == 1 {
 				d.keyframeWaitStart = time.Now()
@@ -1207,7 +1218,7 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 					// (no timer was armed at creation time).
 					if d.kfWaitTimer == nil {
 						d.kfWaitTimer = time.AfterFunc(d.kfWaitTimeoutVal, func() {
-							d.timerBrokenReason.Store(int32(h264BrokenReasonNoIDR))
+							d.timerBrokenReason.Store(int32(rdpgfx.H264BrokenReasonNoIDR))
 							d.timerBroken.Store(true)
 							d.signalWatchdog()
 						})
@@ -1239,7 +1250,7 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 						"hw", d.useHW,
 						"waited", d.keyframeWaitCount,
 						"waitedFor", time.Since(d.keyframeWaitStart).Round(time.Millisecond))
-					d.markBroken(h264BrokenReasonNoIDR)
+					d.markBroken(rdpgfx.H264BrokenReasonNoIDR)
 					return nil, nil
 				}
 				slog.Debug("H.264: aux SW decoder: no IDR received, attempting error-concealment",
@@ -1275,7 +1286,7 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 	// and the server has now sent a proper IDR, the decoder is back to a clean
 	// state — clear the flag so a future send failure is not misattributed to
 	// the (long-past) keyframe wait exhaustion.
-	if d.proceededWithoutKeyframe && scan.hasKeyFrame {
+	if d.proceededWithoutKeyframe && scan.HasKeyFrame {
 		d.proceededWithoutKeyframe = false
 	}
 
@@ -1285,7 +1296,7 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 	// can produce the new intra frame.  Re-arm the zero-check whenever we
 	// receive an IDR so that convertFrame discards any spurious green frame that
 	// VideoToolbox outputs during that transition.
-	if d.useHW && scan.hasKeyFrame {
+	if d.useHW && scan.HasKeyFrame {
 		d.hwNeedsZeroCheck = true
 	}
 
@@ -1314,7 +1325,7 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 		if stalledFor := time.Since(d.hwFirstSendTime); stalledFor >= avcFreezeThreshold {
 			slog.Warn("H.264: HW decoder failed to produce first frame, marking broken",
 				"stalledFor", stalledFor, "hwSentCount", d.hwSentCount)
-			d.markBroken(h264BrokenReasonInitFailure)
+			d.markBroken(rdpgfx.H264BrokenReasonInitFailure)
 			return nil, nil
 		}
 	}
@@ -1349,7 +1360,7 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 						"probedFor", probedFor.Round(time.Second),
 						"frozenFor", stalledFor.Round(time.Second),
 						"hwSentCount", d.hwSentCount)
-					d.markBroken(h264BrokenReasonHWStall)
+					d.markBroken(rdpgfx.H264BrokenReasonHWStall)
 					return nil, nil
 				} else {
 					// Still inside probe window: skip send_packet to avoid
@@ -1414,7 +1425,7 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 						// Start a background timer so the probe window expires
 						// even when the server sends no more frames.
 						d.stallTimer = time.AfterFunc(avcHWRecoveryWindow, func() {
-							d.timerBrokenReason.Store(int32(h264BrokenReasonHWStall))
+							d.timerBrokenReason.Store(int32(rdpgfx.H264BrokenReasonHWStall))
 							d.timerBroken.Store(true)
 							d.signalWatchdog()
 						})
@@ -1423,7 +1434,7 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 							"totalFrozen", stalledFor.Round(time.Second),
 							"probedFor", probedFor.Round(time.Second),
 							"hwSentCount", d.hwSentCount)
-						d.markBroken(h264BrokenReasonHWStall)
+						d.markBroken(rdpgfx.H264BrokenReasonHWStall)
 						return nil, nil
 					}
 					// Still in recovery window: skip send_packet to avoid the
@@ -1495,7 +1506,7 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 				// reconnect chain can proceed.
 				slog.Warn("H.264: HW decoder rejected packet after keyframe wait exhaustion, marking broken",
 					"err", int(ret))
-				d.markBroken(h264BrokenReasonNoIDR)
+				d.markBroken(rdpgfx.H264BrokenReasonNoIDR)
 			}
 		} else if prev {
 			// SW decoder: error-concealment attempt (proceededWithoutKeyframe)
@@ -1505,13 +1516,13 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 			// soft-reset / reconnect chain can escalate instead.
 			slog.Warn("H.264: SW decoder rejected packet after keyframe wait exhaustion, marking broken",
 				"err", int(ret))
-			d.markBroken(h264BrokenReasonNoIDR)
+			d.markBroken(rdpgfx.H264BrokenReasonNoIDR)
 		}
 		return nil, nil
 	}
 
 	// Receive decoded frame(s); keep the last one.
-	var result *h264Frame
+	var result *rdpgfx.H264Frame
 	var recvNs, convertNs, transferNs, maxConvNs int64
 	for {
 		recvStart := time.Now()
@@ -1611,7 +1622,7 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 					"hwSentCount", d.hwSentCount)
 				d.stallProbeStart = time.Now()
 				d.stallTimer = time.AfterFunc(avcHWRecoveryWindow, func() {
-					d.timerBrokenReason.Store(int32(h264BrokenReasonHWStall))
+					d.timerBrokenReason.Store(int32(rdpgfx.H264BrokenReasonHWStall))
 					d.timerBroken.Store(true)
 					d.signalWatchdog()
 				})
@@ -1624,14 +1635,14 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 			if d.stallProbeStart.IsZero() && stalledFor >= avcHWReadyFreezeThreshold {
 				slog.Warn("H.264: HW decoder stall timeout (safety valve), marking broken",
 					"frozenFor", stalledFor, "hwSentCount", d.hwSentCount)
-				d.markBroken(h264BrokenReasonHWStall)
+				d.markBroken(rdpgfx.H264BrokenReasonHWStall)
 			}
 		}
 	}
 	return result, nil
 }
 
-// DecodeWithI420 implements the i420Decoder interface.  It decodes H.264 NAL
+// DecodeWithI420 implements the rdpgfx.I420Decoder interface.  It decodes H.264 NAL
 // data and returns both a BGRA frame (for the surface backing store) and an
 // optional I420 frame for GPU-accelerated rendering via SDL2 IYUV textures.
 // The I420 frame is nil when the decoder's pixel format is not directly
@@ -1639,7 +1650,7 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*h264Frame, error) {
 // before we could extract planar data, or hardware-decoded frames whose
 // transfer format is not YUV420P or NV12).  Callers must fall back to BGRA
 // rendering when I420 is nil.
-func (d *ffmpegDecoder) DecodeWithI420(h264Data []byte) (*h264Frame, *h264FrameI420, error) {
+func (d *ffmpegDecoder) DecodeWithI420(h264Data []byte) (*rdpgfx.H264Frame, *rdpgfx.H264FrameI420, error) {
 	d.outI420Enabled = true
 	d.lastI420 = nil
 	frame, err := d.Decode(h264Data)
@@ -1647,10 +1658,10 @@ func (d *ffmpegDecoder) DecodeWithI420(h264Data []byte) (*h264Frame, *h264FrameI
 	return frame, d.lastI420, err
 }
 
-// DecodeWithNV12 implements the nv12Decoder interface.  It decodes H.264 NAL
+// DecodeWithNV12 implements the rdpgfx.NV12Decoder interface.  It decodes H.264 NAL
 // data and returns native NV12 output when FFmpeg produces NV12, avoiding the
 // extra NV12->I420 deinterleave used by DecodeWithI420.
-func (d *ffmpegDecoder) DecodeWithNV12(h264Data []byte) (*h264Frame, *h264FrameNV12, error) {
+func (d *ffmpegDecoder) DecodeWithNV12(h264Data []byte) (*rdpgfx.H264Frame, *rdpgfx.H264FrameNV12, error) {
 	d.outNV12Enabled = true
 	d.lastNV12 = nil
 	frame, err := d.Decode(h264Data)
@@ -1658,7 +1669,7 @@ func (d *ffmpegDecoder) DecodeWithNV12(h264Data []byte) (*h264Frame, *h264FrameN
 	return frame, d.lastNV12, err
 }
 
-func (d *ffmpegDecoder) convertFrame(regionHint []C.uint16_t, nRegions C.int) (*h264Frame, int64, error) {
+func (d *ffmpegDecoder) convertFrame(regionHint []C.uint16_t, nRegions C.int) (*rdpgfx.H264Frame, int64, error) {
 	srcFrame := d.frame
 	var transferNs int64
 	usedMapFrame := false
@@ -1835,7 +1846,7 @@ func (d *ffmpegDecoder) convertFrame(regionHint []C.uint16_t, nRegions C.int) (*
 				// Return a non-nil Dropped frame so Decode() counts this as a
 				// successful VideoToolbox output (health tracking stays correct)
 				// and callers skip the keyframe-request / decoder-broken path.
-				return &h264Frame{Dropped: true, Width: int(w), Height: int(h)}, transferNs, nil
+				return &rdpgfx.H264Frame{Dropped: true, Width: int(w), Height: int(h)}, transferNs, nil
 			}
 			// Valid chroma seen — IOSurface is properly populated.
 			d.hwNeedsZeroCheck = false
@@ -1919,88 +1930,7 @@ func (d *ffmpegDecoder) convertFrame(regionHint []C.uint16_t, nRegions C.int) (*
 	if convErr != nil {
 		return nil, transferNs, convErr
 	}
-	return &h264Frame{Data: out, Width: int(w), Height: int(h)}, transferNs, nil
-}
-
-// scanResult holds the IDR-presence flag and SPS/PPS NAL boundaries (offsets
-// into the original packet, including Annex B start code) discovered during a
-// single linear walk of an Annex B H.264 packet.  Use scanH264Packet to
-// produce one.
-type scanResult struct {
-	hasKeyFrame                        bool
-	spsStart, spsEnd, ppsStart, ppsEnd int
-}
-
-// scanH264Packet walks an Annex B H.264 packet exactly once, returning
-// whether it contains any IDR slice (NAL type 5) or SPS (NAL type 7) NAL
-// unit and recording the byte ranges for the most recent SPS/PPS NALs found
-// (start offset includes the Annex B start code).  Replaces what used to be
-// three separate linear scans (h264ContainsKeyFrame ×2 + scanAndCacheParamSets)
-// performed per-packet.
-//
-// Uses bytes.Index to locate the canonical 3-byte start code (0x000001),
-// promoting it to the 4-byte form when preceded by a zero.  bytes.Index is
-// implemented in optimized assembly on the major Go platforms, so this
-// out-performs a hand-rolled byte loop especially for the long IDR packets
-// that dominate the H.264 hot path.
-func scanH264Packet(data []byte) scanResult {
-	var r scanResult
-	startCode := []byte{0, 0, 1}
-	pos := 0
-	// nalStart points to the byte just past the previous NAL header byte
-	// (i.e. into the NAL payload), used as the lower bound when searching
-	// for the *next* start code so we never re-find the current one.
-	for pos < len(data) {
-		off := bytes.Index(data[pos:], startCode)
-		if off < 0 {
-			break
-		}
-		i := pos + off
-		scLen := 3
-		if i > 0 && data[i-1] == 0 {
-			i--
-			scLen = 4
-		}
-		if i+scLen >= len(data) {
-			break
-		}
-		nalType := data[i+scLen] & 0x1F
-		if nalType == 5 || nalType == 7 {
-			r.hasKeyFrame = true
-		}
-		if nalType == 7 || nalType == 8 {
-			// Locate the end of this NAL: search for the next 0x000001
-			// from just past the NAL header byte.
-			searchFrom := i + scLen + 1
-			j := len(data)
-			if searchFrom < len(data) {
-				if next := bytes.Index(data[searchFrom:], startCode); next >= 0 {
-					j = searchFrom + next
-					// If preceded by a zero, that zero belongs to the
-					// next start code (4-byte form).
-					if j > 0 && data[j-1] == 0 {
-						j--
-					}
-				}
-			}
-			if nalType == 7 {
-				r.spsStart, r.spsEnd = i, j
-			} else {
-				r.ppsStart, r.ppsEnd = i, j
-			}
-			pos = j
-			continue
-		}
-		pos = i + scLen + 1
-	}
-	return r
-}
-
-// h264PacketHasIDR reports whether an Annex B H.264 packet contains an IDR
-// (keyframe) NAL unit.  Used by AVC444 logic in avc.go (no h264 build tag)
-// to gate aux-decoder recreation on stream2 IDR availability.
-func h264PacketHasIDR(data []byte) bool {
-	return scanH264Packet(data).hasKeyFrame
+	return &rdpgfx.H264Frame{Data: out, Width: int(w), Height: int(h)}, transferNs, nil
 }
 
 func (d *ffmpegDecoder) Close() {
@@ -2025,4 +1955,18 @@ func (d *ffmpegDecoder) Close() {
 	if d.codecCtx != nil {
 		C.avcodec_free_context(&d.codecCtx)
 	}
+}
+
+func init() {
+	rdpgfx.SetH264Backend(&rdpgfx.H264DecoderBackend{
+		NewHW: func(ch chan<- struct{}) rdpgfx.H264Decoder {
+			return newH264DecoderInternal(ch, false, keyframeWaitTimeout)
+		},
+		NewSW: func() rdpgfx.H264Decoder {
+			return newH264DecoderInternal(nil, true, keyframeWaitTimeoutSW)
+		},
+		NewSWFallback: func(ch chan<- struct{}) rdpgfx.H264Decoder {
+			return newH264DecoderInternal(ch, true, keyframeWaitTimeoutSWFallback)
+		},
+	})
 }
