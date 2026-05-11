@@ -21,6 +21,7 @@ package main
 #cgo nocallback av_hwframe_transfer_data
 #cgo nocallback av_packet_alloc
 #cgo nocallback av_packet_free
+#cgo nocallback grdp_find_v4l2m2m
 #cgo noescape avcodec_send_packet
 #cgo noescape grdp_copy_yuv420p_to_i420
 #cgo noescape grdp_copy_nv12_to_i420
@@ -606,6 +607,12 @@ static void grdp_copy_nv12(
         for (int y = 0; y < ph; y++)
             memcpy(uvdst + y * uv_bytes, f->data[1] + y * f->linesize[1], uv_bytes);
 }
+
+// grdp_find_v4l2m2m returns the h264_v4l2m2m decoder if FFmpeg was compiled
+// with V4L2 M2M support (common on Linux/Raspberry Pi). Returns NULL otherwise.
+static const AVCodec *grdp_find_v4l2m2m(void) {
+    return avcodec_find_decoder_by_name("h264_v4l2m2m");
+}
 */
 import "C"
 
@@ -961,6 +968,10 @@ func newH264DecoderInternal(watchdogCh chan<- struct{}, forceSW bool, kfWaitTime
 		return nil
 	}
 
+	// alreadyOpened is set when a codec-specific path (e.g. V4L2 M2M) opens
+	// its own AVCodecContext before the shared avcodec_open2 call below.
+	alreadyOpened := false
+
 	d := &ffmpegDecoder{
 		codecCtx:         codecCtx,
 		hwPixFmt:         C.AV_PIX_FMT_NONE,
@@ -1013,6 +1024,35 @@ func newH264DecoderInternal(watchdogCh chan<- struct{}, forceSW bool, kfWaitTime
 			}
 			hwType = C.av_hwdevice_iterate_types(hwType)
 		}
+
+		// If no hwdevice backend was found, try the V4L2 M2M codec (h264_v4l2m2m).
+		// This is a standalone FFmpeg codec that directly outputs NV12 frames in
+		// CPU-accessible memory and is commonly available on Linux SoCs such as
+		// Raspberry Pi 4/5.  It is not exposed via av_hwdevice_iterate_types and
+		// must be probed explicitly.  On macOS or when FFmpeg is built without V4L2
+		// support, avcodec_find_decoder_by_name returns nil and the probe is a no-op.
+		if !d.useHW {
+			v4l2Codec := C.grdp_find_v4l2m2m()
+			if v4l2Codec != nil {
+				v4l2Ctx := C.avcodec_alloc_context3(v4l2Codec)
+				if v4l2Ctx != nil {
+					C.grdp_set_low_delay(v4l2Ctx)
+					if C.avcodec_open2(v4l2Ctx, v4l2Codec, nil) >= 0 {
+						// Replace the standard h264 context with the V4L2 M2M one.
+						// avcodec_free_context sets d.codecCtx to nil via its **ctx arg.
+						C.avcodec_free_context(&d.codecCtx)
+						d.codecCtx = v4l2Ctx
+						codecCtx = v4l2Ctx
+						d.useHW = true
+						d.hwNeedsZeroCheck = false // no zero-filled IOSurface on V4L2
+						alreadyOpened = true
+						slog.Debug("H.264: V4L2 M2M hardware acceleration enabled")
+					} else {
+						C.avcodec_free_context(&v4l2Ctx)
+					}
+				}
+			}
+		}
 	}
 
 	if !d.useHW {
@@ -1039,9 +1079,11 @@ func newH264DecoderInternal(watchdogCh chan<- struct{}, forceSW bool, kfWaitTime
 		codecCtx.thread_type = C.FF_THREAD_SLICE
 	}
 
-	if C.avcodec_open2(codecCtx, codec, nil) < 0 {
-		C.avcodec_free_context(&d.codecCtx)
-		return nil
+	if !alreadyOpened {
+		if C.avcodec_open2(codecCtx, codec, nil) < 0 {
+			C.avcodec_free_context(&d.codecCtx)
+			return nil
+		}
 	}
 
 	d.packet = C.av_packet_alloc()
