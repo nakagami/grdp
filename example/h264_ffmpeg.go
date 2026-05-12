@@ -794,6 +794,7 @@ type ffmpegDecoder struct {
 	kfWaitTimeoutVal         time.Duration   // per-decoder IDR wait limit (varies by decoder type)
 	watchdogCh               chan<- struct{} // signals GfxHandler.decodeLoop to call maybeNotifyDecoderBroken
 	auxEAGAINCount           int            // consecutive EAGAINs from h264dec2; reset on success, markBroken at threshold
+	auxEAGAINFlush           bool           // set after EAGAIN flush; suppresses error-concealment until stream2 IDR arrives
 
 	// Profiling: aggregated timing stats over the last profileWindow frames
 	// for the HW path.  Helps determine whether convertFrame
@@ -1305,6 +1306,18 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*rdpgfx.H264Frame, error) {
 					d.markBroken(rdpgfx.H264BrokenReasonNoIDR)
 					return nil, nil
 				}
+				if d.auxEAGAINFlush {
+					// After an EAGAIN-based flush the decoder has no reference
+					// frame; error-concealment would immediately fail with EINVAL
+					// and trigger markBroken → reconnect.  Instead, keep waiting
+					// for the next natural stream2 IDR (Windows Server delivers
+					// one at every GOP boundary, typically every 30–60 s).
+					// Reset the wait clock so we keep dropping P-frames silently
+					// rather than entering the concealment path.
+					d.keyframeWaitCount = 0
+					d.keyframeWaitStart = time.Now()
+					return nil, nil
+				}
 				slog.Debug("H.264: aux SW decoder: no IDR received, attempting error-concealment",
 					"waited", d.keyframeWaitCount,
 					"waitedFor", time.Since(d.keyframeWaitStart).Round(time.Millisecond))
@@ -1335,6 +1348,7 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*rdpgfx.H264Frame, error) {
 			d.needsKeyFrame = false
 			d.keyframeWaitCount = 0
 			d.keyframeWaitStart = time.Time{}
+			d.auxEAGAINFlush = false // IDR received; EAGAIN recovery complete
 			// IDR received — cancel the background wait timer.
 			if d.kfWaitTimer != nil {
 				d.kfWaitTimer.Stop()
@@ -1693,6 +1707,7 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*rdpgfx.H264Frame, error) {
 				d.keyframeWaitCount = 0
 				d.keyframeWaitStart = time.Time{}
 				d.auxEAGAINCount = 0
+				d.auxEAGAINFlush = true // suppress error-concealment until stream2 IDR
 			}
 		}
 		if d.useHW && d.hwReady {
