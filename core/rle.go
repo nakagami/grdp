@@ -537,9 +537,10 @@ func decompress2(output *[]uint8, width, height int, input []uint8, size int) bo
 			}
 		}
 	}
+	outBytes := *output
 	for i, v := range out {
-		(*output)[i*2] = byte(v >> 8)
-		(*output)[i*2+1] = byte(v)
+		outBytes[i*2] = byte(v >> 8)
+		outBytes[i*2+1] = byte(v)
 	}
 	return true
 }

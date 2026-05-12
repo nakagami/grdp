@@ -707,14 +707,17 @@ func update() {
 				}
 			}
 
-			// Capture the current screenImage pointer while holding screenMu.
-			// gl.TexImage2D (called lazily during render on the driver/GL
-			// goroutine) copies the pixel data into GPU memory before it
-			// returns, completing before the driver thread processes the next
-			// pending event.  The update goroutine is blocked on driverc.Call
-			// or waiting for the next bitmapCH item during that window, so
-			// no concurrent write to screenImage.Pix occurs in practice.
-			snap := screenImage
+			// Deep-copy screenImage while still holding screenMu so that the
+			// GL thread gets an independent pixel buffer.
+			//
+			// driverc.Call is non-blocking (it enqueues to a channel).
+			// CreateTexture stores the image pointer without calling
+			// gl.TexImage2D; the actual upload happens lazily during the
+			// GL thread's next render pass.  Without the copy, the paint
+			// goroutine can loop back and write to screenImage.Pix while
+			// the GL thread is still reading the same backing array, which
+			// causes pixel corruption and occasional display freezes.
+			snap := cloneRGBA(screenImage)
 			screenMu.Unlock()
 
 			driverc.Call(func() {
@@ -735,6 +738,16 @@ func update() {
 			}
 		}
 	}()
+}
+
+// cloneRGBA returns a new *image.RGBA with the same bounds and a fresh copy
+// of the pixel data.  Used to give the GL upload goroutine an independent
+// buffer so that subsequent writes to screenImage.Pix do not race with the
+// lazy gl.TexImage2D read on the driver thread.
+func cloneRGBA(src *image.RGBA) *image.RGBA {
+	dst := image.NewRGBA(src.Bounds())
+	copy(dst.Pix, src.Pix)
+	return dst
 }
 
 func paintBitmapsLocked(bs []grdp.Bitmap) {

@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"runtime"
 	"sync"
-	"unsafe"
 )
 
 // Progressive block types (different from non-progressive WBT_* at same values!)
@@ -236,9 +235,9 @@ func (d *rfxProgressiveDecoder) decodeTileSimple(data []byte, quants []rfxQuant,
 
 	rfxPlaceTile(yPixels, cbPixels, crPixels, int(xIdx), int(yIdx), output, outW, outH)
 
-	coeffPool.Put(yPixels)
-	coeffPool.Put(cbPixels)
-	coeffPool.Put(crPixels)
+	coeffPool.Put((*coeffArr)(yPixels))
+	coeffPool.Put((*coeffArr)(cbPixels))
+	coeffPool.Put((*coeffArr)(crPixels))
 }
 
 // decodeTileFirst handles PROGRESSIVE_WBT_TILE_FIRST (0xCCC6).
@@ -276,9 +275,9 @@ func (d *rfxProgressiveDecoder) decodeTileFirst(data []byte, quants []rfxQuant, 
 
 	rfxPlaceTile(yPixels, cbPixels, crPixels, int(xIdx), int(yIdx), output, outW, outH)
 
-	coeffPool.Put(yPixels)
-	coeffPool.Put(cbPixels)
-	coeffPool.Put(crPixels)
+	coeffPool.Put((*coeffArr)(yPixels))
+	coeffPool.Put((*coeffArr)(cbPixels))
+	coeffPool.Put((*coeffArr)(crPixels))
 }
 
 func rfxGetQuant(quants []rfxQuant, idx int) rfxQuant {
@@ -296,11 +295,16 @@ func safeSlice(data []byte, offset, length int) []byte {
 }
 
 // rfxDecodeComponent decodes one color component (Y, Cb, or Cr) for a 64×64 tile.
+// The returned slice is backed by a *coeffArr from coeffPool; the caller must
+// return it via coeffPool.Put((*coeffArr)(result)) when done.
 func rfxDecodeComponent(data []byte, quant rfxQuant, rlgrMode int) []int16 {
 	const tilePixels = rfxTileSize * rfxTileSize // 4096
 
-	// Reuse a pooled coefficient buffer to avoid per-tile allocation.
-	coeffs := coeffPool.Get().([]int16)
+	// Get a pooled coefficient buffer. The pool stores *coeffArr (pointer to a
+	// fixed-size array) so the any interface stores a single pointer word with no
+	// heap-boxing allocation.
+	arr := coeffPool.Get().(*coeffArr)
+	coeffs := arr[:]
 
 	if data == nil {
 		clear(coeffs)
@@ -364,19 +368,24 @@ func rfxShiftSubband(data []int16, factor uint8) {
 
 // rfxInverseDWT2D performs 3-level inverse 2D discrete wavelet transform in-place.
 // Buffer layout: [HL1(1024)|LH1(1024)|HH1(1024)|HL2(256)|LH2(256)|HH2(256)|HL3(64)|LH3(64)|HH3(64)|LL3(64)]
+// A single temporary buffer is obtained from the pool and reused across all three
+// levels, reducing pool pressure from 9 Get/Put calls (3 levels × 3 components) to 3.
 func rfxInverseDWT2D(coeffs []int16) {
-	// Level 3: 8×8 subbands → 16×16 output
-	rfxIDWT2DLevel(coeffs[3840:], 8)
-	// Level 2: 16×16 subbands → 32×32 output
-	rfxIDWT2DLevel(coeffs[3072:], 16)
-	// Level 1: 32×32 subbands → 64×64 output
-	rfxIDWT2DLevel(coeffs[0:], 32)
+	bufs := idwtBufPool.Get().(*idwtBufs)
+	// Level 3: 8×8 subbands → 16×16 output  (needs 16×16 = 256 elements)
+	rfxIDWT2DLevel(coeffs[3840:], bufs.tmp[:256], 8)
+	// Level 2: 16×16 subbands → 32×32 output (needs 32×32 = 1024 elements)
+	rfxIDWT2DLevel(coeffs[3072:], bufs.tmp[:1024], 16)
+	// Level 1: 32×32 subbands → 64×64 output (needs 64×64 = 4096 elements)
+	rfxIDWT2DLevel(coeffs[0:], bufs.tmp[:4096], 32)
+	idwtBufPool.Put(bufs)
 }
 
 // rfxIDWT2DLevel performs one level of inverse 2D DWT.
 // buf contains [HL(n²)|LH(n²)|HH(n²)|LL(n²)] and is replaced with the (2n)×(2n) result.
+// tmp is a caller-supplied scratch buffer of length (2n)² (must be ≥ 4n² elements).
 // Uses the MS-RDPRFX lifting scheme. Order: horizontal IDWT first, then vertical.
-func rfxIDWT2DLevel(buf []int16, n int) {
+func rfxIDWT2DLevel(buf, tmp []int16, n int) {
 	nn := n * n
 	size := 2 * n
 
@@ -386,9 +395,6 @@ func rfxIDWT2DLevel(buf []int16, n int) {
 	lh := buf[nn : 2*nn]
 	hh := buf[2*nn : 3*nn]
 	ll := buf[3*nn : 4*nn]
-
-	bufs := idwtBufPool.Get().(*idwtBufs)
-	tmp := bufs.tmp[:size*size]
 
 	// Step 1: Horizontal IDWT on each row
 	for row := range n {
@@ -420,9 +426,11 @@ func rfxIDWT2DLevel(buf []int16, n int) {
 	}
 
 	// Step 2: Vertical IDWT on each column.
-	// Process 4 columns at a time to improve cache utilisation (each row
-	// access loads a cache line that covers 4+ consecutive int16 values).
-	const blk = 4
+	// Process 8 columns at a time to improve cache utilisation — a cache line
+	// holds 32 int16 values; 8 columns keeps the working set within one or two
+	// lines per row access. All valid sizes (16, 32, 64) divide evenly by 8,
+	// so the scalar tail loop is never reached in practice.
+	const blk = 8
 	col := 0
 	for ; col+blk <= size; col += blk {
 		for b := range blk {
@@ -475,48 +483,11 @@ func rfxIDWT2DLevel(buf []int16, n int) {
 		lastH := int32(tmp[(2*n-1)*size+col])
 		buf[(2*n-1)*size+col] = int16((lastH << 1) + lastEven)
 	}
-	idwtBufPool.Put(bufs)
 }
 
 // rfxPlaceTile converts YCbCr tile to BGRA using tile-grid indices (xIdx, yIdx).
 func rfxPlaceTile(yCoeffs, cbCoeffs, crCoeffs []int16, xIdx, yIdx int, output []byte, outW, outH int) {
 	rfxPlaceTileAbs(yCoeffs, cbCoeffs, crCoeffs, xIdx*rfxTileSize, yIdx*rfxTileSize, output, outW, outH)
-}
-
-// ictToBGRA converts n pixels from YCbCr (ICT) to BGRA and writes them into
-// dst (which must hold ≥ 4*n bytes). Processing n pixels in [8]int32 fixed-size
-// arrays lets the compiler emit ARM64 NEON / x86 AVX2 vectorised instructions.
-// Each pixel is written as a single 32-bit store (little-endian BGRA) to avoid
-// 4 separate byte stores that would block auto-vectorisation of the inner loop.
-func ictToBGRA(yRow, cbRow, crRow []int16, dst []byte, n int) {
-	const batch = 8
-	full := (n / batch) * batch
-	for base := 0; base < full; base += batch {
-		var yv, cb, cr [batch]int32
-		for k := range batch {
-			yv[k] = int32(yRow[base+k])
-			cb[k] = int32(cbRow[base+k])
-			cr[k] = int32(crRow[base+k])
-		}
-		for k := range batch {
-			ys := (yv[k] + 4096) << 16
-			bv := uint32(max(0, min((cb[k]*115992+ys)>>21, 255)))
-			gv := uint32(max(0, min((ys-cb[k]*22527-cr[k]*46819)>>21, 255)))
-			rv := uint32(max(0, min((cr[k]*91916+ys)>>21, 255)))
-			*(*uint32)(unsafe.Pointer(&dst[(base+k)*4])) = bv | gv<<8 | rv<<16 | 0xFF000000
-		}
-	}
-	// Scalar tail for pixels that don't fill a full batch.
-	for col := full; col < n; col++ {
-		yv := int32(yRow[col])
-		cb := int32(cbRow[col])
-		cr := int32(crRow[col])
-		ys := (yv + 4096) << 16
-		bv := uint32(max(0, min((cb*115992+ys)>>21, 255)))
-		gv := uint32(max(0, min((ys-cb*22527-cr*46819)>>21, 255)))
-		rv := uint32(max(0, min((cr*91916+ys)>>21, 255)))
-		*(*uint32)(unsafe.Pointer(&dst[col*4])) = bv | gv<<8 | rv<<16 | 0xFF000000
-	}
 }
 
 // rfxPlaceTileAbs converts YCbCr tile to BGRA and writes into the output buffer

@@ -271,9 +271,9 @@ func (d *rfxDecoder) decodeTile(data []byte, quants []rfxQuant, rlgrMode int, le
 	// left + xIdx*64, top + yIdx*64 (per FreeRDP/MS-RDPRFX).
 	rfxPlaceTileAbs(yPixels, cbPixels, crPixels, left+xIdx*rfxTileSize, top+yIdx*rfxTileSize, output, outW, outH)
 
-	coeffPool.Put(yPixels)
-	coeffPool.Put(cbPixels)
-	coeffPool.Put(crPixels)
+	coeffPool.Put((*coeffArr)(yPixels))
+	coeffPool.Put((*coeffArr)(cbPixels))
+	coeffPool.Put((*coeffArr)(crPixels))
 }
 
 // DecodeSurfaceRFX decodes non-progressive RemoteFX (MS-RDPRFX) encoded data

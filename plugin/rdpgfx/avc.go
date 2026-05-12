@@ -164,7 +164,22 @@ func isH264Keyframe(data []byte) bool {
 	return false
 }
 
-// decodeAVC420 decodes AVC420 bitmap data to BGRA pixels and returns the
+// firstNALType returns the NAL unit type byte of the first Annex-B NAL in
+// data, or 0xFF if none found.  Useful for diagnosing decoder "buffering".
+func firstNALType(data []byte) byte {
+	for i := 0; i+4 <= len(data); i++ {
+		if data[i] == 0x00 && data[i+1] == 0x00 {
+			if data[i+2] == 0x01 && i+3 < len(data) {
+				return data[i+3] & 0x1F
+			} else if data[i+2] == 0x00 && i+3 < len(data) && data[i+3] == 0x01 && i+4 < len(data) {
+				return data[i+4] & 0x1F
+			}
+		}
+	}
+	return 0xFF
+}
+
+
 // decoded frame plus the dirty rectangle list reported in the AVC420 stream
 // header (in decoded-frame coordinates).  When regions is non-empty callers
 // can blit only those regions instead of the whole frame, which dramatically
@@ -982,7 +997,10 @@ func (g *GfxHandler) decodeAVC444LC2(stream2 *avc420Stream, destW, destH int) (d
 		return
 	}
 	if i420aux == nil {
-		slog.Debug("RDPGFX: AVC444 LC=2 aux decode buffering")
+		slog.Debug("RDPGFX: AVC444 LC=2 aux decode buffering",
+			"h264Len", len(stream2.h264Data),
+			"firstNAL", firstNALType(stream2.h264Data),
+			"isIDR", isH264Keyframe(stream2.h264Data))
 		// The pre-flight stall detector inside Decode() may have set broken=true
 		// and returned nil without an error.  Detect and tear down here; the
 		// decoder will be recreated by primeAuxDecoder when the next stream2
@@ -1043,6 +1061,7 @@ func (g *GfxHandler) decodeAVC444LC2(stream2 *avc420Stream, destW, destH int) (d
 	// maybeRenegotiateCapabilities uses this to distinguish "was working then broke"
 	// (needs reconnect) from "never worked" (graceful LC=0 degradation).
 	g.lc2EverDecoded = true
+	g.auxDecoderNoIDRRetries = 0 // reset so a future break starts retries from scratch
 	// lc2Sample logs the actual Cb/Cr values used by combineAVC444v2BGRA for
 	// position (px,py), which depend on the B-area that pixel falls into.
 	halfW := w / 2

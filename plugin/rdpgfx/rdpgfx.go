@@ -280,6 +280,11 @@ type GfxHandler struct {
 	// "LC=2 never worked this session" (server may not support stream2 priming;
 	// gracefully degrade to LC=0 only without reconnecting).
 	lc2EverDecoded bool
+	// auxDecoderNoIDRRetries counts how many times maybeRenegotiateCapabilities
+	// has been called in the "stream2EverSeen but lc2EverDecoded=false" case
+	// this session.  Attempt 1 sends a ForceRefresh; attempt 2 reconnects.
+	// Reset on RESET_GRAPHICS and when LC=2 successfully decodes.
+	auxDecoderNoIDRRetries int
 	// stream2EverSeen is set when a non-empty stream2 payload is observed inside
 	// an LC=0 packet.  VirtualBox VRDE never includes stream2 in LC=0 packets,
 	// so stream2EverSeen stays false for the whole session.  Windows does include
@@ -451,6 +456,12 @@ func (g *GfxHandler) startAuxDecoderBrokenTimer() {
 	defer g.auxDecoderBrokenTimerMu.Unlock()
 	if g.auxDecoderBrokenTimer == nil {
 		g.auxDecoderBrokenTimer = time.AfterFunc(auxDecoderBrokenTimeout, func() {
+			// Clear the pointer so startAuxDecoderBrokenTimer can re-arm
+			// the timer for subsequent retry attempts (e.g. after a
+			// ForceRefresh in case 2 of maybeRenegotiateCapabilities).
+			g.auxDecoderBrokenTimerMu.Lock()
+			g.auxDecoderBrokenTimer = nil
+			g.auxDecoderBrokenTimerMu.Unlock()
 			select {
 			case g.watchdogCh <- struct{}{}:
 			default:
@@ -497,11 +508,31 @@ func (g *GfxHandler) maybeRenegotiateCapabilities() {
 		return
 	}
 	if !g.lc2EverDecoded {
-		// stream2 has been seen in LC=0 packets (server supports LC=2), but the
-		// aux decoder has not yet produced a combined frame.  This is transient —
-		// the aux decoder will be re-primed on the next LC=0 IDR.  Do nothing and
-		// let the normal decode path recover without logging a warning.
-		slog.Debug("H.264: aux decoder not yet primed, waiting for next LC=0 IDR")
+		// stream2 has been seen in LC=0 packets (server supports LC=2), but
+		// the aux decoder has not yet produced a combined frame.  The server
+		// may be sending only P-frame stream2 data in LC=0 packets — no IDR
+		// means primeAuxDecoder can never initialise h264dec2.
+		//
+		// Attempt 1: request a ForceRefresh keyframe so the server hopefully
+		// includes a stream2 IDR in the next LC=0 IDR packet.  The timer
+		// pointer was cleared by the AfterFunc callback, so the next LC=2
+		// packet will re-arm it for the second attempt.
+		//
+		// Attempt 2: the keyframe request did not produce a stream2 IDR
+		// within the timeout.  Reconnect to start a fresh AVC444 sequence.
+		g.auxDecoderNoIDRRetries++
+		if g.auxDecoderNoIDRRetries == 1 {
+			slog.Debug("H.264: aux decoder not primed — requesting keyframe to get stream2 IDR (attempt 1)")
+			g.lastKeyframeRequest = time.Time{} // allow immediate send
+			g.maybeRequestKeyframe()
+			return
+		}
+		slog.Warn("H.264: aux decoder never primed despite keyframe request — reconnecting",
+			"retries", g.auxDecoderNoIDRRetries)
+		g.decoderBrokenNotified = true
+		if g.onDecoderBroken != nil {
+			go g.onDecoderBroken()
+		}
 		return
 	}
 	// The timer firing is itself the auxDecoderBrokenTimeout signal.  Do not
@@ -1135,6 +1166,7 @@ func (g *GfxHandler) onResetGraphics(data []byte) {
 	g.decoderBrokenNotified = false
 	g.lc2EverDecoded = false
 	g.stream2EverSeen = false
+	g.auxDecoderNoIDRRetries = 0
 	g.lastKeyframeRequest = time.Time{}
 	g.lastDecodedFrame.Store(0)
 	g.stopInputWatchdog()

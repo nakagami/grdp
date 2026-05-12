@@ -6,8 +6,14 @@ import "sync"
 // Each 64×64 tile needs 4096 int16 coefficients per component (Y, Cb, Cr)
 // and several temporary buffers for the IDWT.
 
+// coeffArr is the fixed-size coefficient array stored in the pool.
+// Using a pointer to an array (*coeffArr) avoids interface-boxing allocations:
+// a pointer fits in one word of the any interface, whereas a []int16 header
+// (pointer + len + cap = 24 bytes) always requires a 24-byte heap box.
+type coeffArr = [4096]int16
+
 var coeffPool = sync.Pool{
-	New: func() any { return make([]int16, 4096) },
+	New: func() any { return new(coeffArr) },
 }
 
 // idwtBufs holds the temporary buffer for one rfxIDWT2DLevel call.

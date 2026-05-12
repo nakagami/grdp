@@ -733,6 +733,15 @@ const keyframeWaitTimeout = 15 * time.Second
 // sooner and let the caller tear down and recreate the decoder on the next IDR.
 const keyframeWaitTimeoutSW = 5 * time.Second
 
+// auxEAGAINThreshold is the number of consecutive EAGAIN results from h264dec2
+// (aux SW decoder, no watchdog channel) before it is marked broken.  After a
+// flush the existing torn-down/recreate-on-IDR machinery in avc.go rebuilds
+// the decoder from the next stream2 IDR without requiring a full reconnect.
+// Stream2 data appears in ~1–2 % of LC=0 packets (~0.5 events/s at 30 fps),
+// so 10 events correspond to roughly 5–20 s of visible stale chroma — much
+// better than the previous ~3-minute wait for the session reconnect.
+const auxEAGAINThreshold = 10
+
 // keyframeWaitTimeoutSWFallback is the keyframe-wait timer for the main SW
 // fallback decoder (created after a VideoToolbox stall).  By the time SW
 // fallback is activated, the proactive ForceRefresh mechanism has already been
@@ -784,6 +793,7 @@ type ffmpegDecoder struct {
 	kfWaitTimer              *time.Timer     // fires after kfWaitTimeoutVal to mark broken independently of frame rate
 	kfWaitTimeoutVal         time.Duration   // per-decoder IDR wait limit (varies by decoder type)
 	watchdogCh               chan<- struct{} // signals GfxHandler.decodeLoop to call maybeNotifyDecoderBroken
+	auxEAGAINCount           int            // consecutive EAGAINs from h264dec2; reset on success, markBroken at threshold
 
 	// Profiling: aggregated timing stats over the last profileWindow frames
 	// for the HW path.  Helps determine whether convertFrame
@@ -1304,6 +1314,15 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*rdpgfx.H264Frame, error) {
 				d.proceededWithoutKeyframe = true
 				// fall through and attempt SW error-concealment decode
 			} else {
+				if !d.useHW && d.watchdogCh == nil {
+					// Aux SW decoder (h264dec2) silently dropping packets while
+					// waiting for an IDR.  Log once at first drop so we can
+					// distinguish this from the EAGAIN case.
+					if d.keyframeWaitCount == 1 {
+						slog.Debug("H.264: aux SW decoder lost IDR sync, waiting",
+							"h264Len", len(h264Data))
+					}
+				}
 				return nil, nil // drop P-frames while waiting
 			}
 		} else {
@@ -1461,7 +1480,7 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*rdpgfx.H264Frame, error) {
 					// No output yet.  Enter / stay in recovery-probe window.
 					if d.stallProbeStart.IsZero() {
 						d.stallProbeStart = now
-						slog.Debug("H.264: HW decoder stall detected, probing for recovery",
+						slog.Warn("H.264: HW decoder stall detected, probing for recovery",
 							"frozenFor", stalledFor.Round(time.Millisecond),
 							"hwSentCount", d.hwSentCount)
 						// Start a background timer so the probe window expires
@@ -1528,8 +1547,16 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*rdpgfx.H264Frame, error) {
 		// Both HW and SW: flush the decoder pipeline and wait for a fresh IDR.
 		// Reset the HW stall-timer so it starts fresh after the IDR arrives,
 		// not from before this failed send attempt.
-		slog.Debug("H.264: avcodec_send_packet failed, flushing decoder to recover",
-			"hw", d.useHW, "err", int(ret))
+		if !d.useHW && d.watchdogCh == nil {
+			// Aux SW decoder (h264dec2): a send failure is unexpected and
+			// causes all subsequent LC=2 frames to be buffered until the next
+			// stream2 IDR.  Upgrade to WARN so it's visible without DEBUG logging.
+			slog.Warn("H.264: aux SW decoder send failed, waiting for stream2 IDR",
+				"err", int(ret))
+		} else {
+			slog.Debug("H.264: avcodec_send_packet failed, flushing decoder to recover",
+				"hw", d.useHW, "err", int(ret))
+		}
 		C.avcodec_flush_buffers(d.codecCtx)
 		prev := d.proceededWithoutKeyframe
 		d.needsKeyFrame = true
@@ -1594,6 +1621,9 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*rdpgfx.H264Frame, error) {
 	if gotFrame {
 		d.lastSuccessTime = time.Now()
 		d.hwConsecNullFrames = 0
+		if !d.useHW && d.watchdogCh == nil {
+			d.auxEAGAINCount = 0 // successful decode; reset stuck-EAGAIN counter
+		}
 		if d.useHW {
 			if !d.hwReady {
 				slog.Debug("H.264: HW decoder produced first frame",
@@ -1638,6 +1668,27 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*rdpgfx.H264Frame, error) {
 			}
 		}
 	} else { // !gotFrame
+		if !d.useHW && d.watchdogCh == nil {
+			// Aux SW decoder (h264dec2) returned no output.  Log for diagnosis.
+			slog.Debug("H.264: aux SW decoder produced no output",
+				"h264Len", len(h264Data),
+				"isIDR", scan.HasKeyFrame,
+				"needsKeyFrame", d.needsKeyFrame,
+				"recvRet", int(ret))
+			d.auxEAGAINCount++
+			if d.auxEAGAINCount >= auxEAGAINThreshold {
+				// h264dec2 is stuck: avcodec_receive_frame permanently returns
+				// EAGAIN despite successful avcodec_send_packet.  This occurs
+				// after ~26 decoded frames due to an internal FFmpeg H.264 SW
+				// decoder DPB/reorder state that can't self-resolve.  Mark the
+				// decoder broken so avc.go tears it down and recreates it on the
+				// next stream2 IDR — no session reconnect required.
+				slog.Warn("H.264: aux SW decoder stuck in EAGAIN, marking broken for IDR-based reset",
+					"eagainCount", d.auxEAGAINCount)
+				d.auxEAGAINCount = 0
+				d.markBroken(rdpgfx.H264BrokenReasonNoIDR)
+			}
+		}
 		if d.useHW && d.hwReady {
 			stalledFor := time.Since(d.lastSuccessTime)
 			d.hwConsecNullFrames++
@@ -1658,7 +1709,7 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*rdpgfx.H264Frame, error) {
 			midStall := d.hwSentCount >= avcHWEarlyFrameLimit &&
 				d.hwConsecNullFrames >= avcHWMidSessionNullFrameLimit
 			if (earlyStall || midStall) && d.stallProbeStart.IsZero() {
-				slog.Debug("H.264: HW decoder stall detected (null frame count), entering probe",
+				slog.Warn("H.264: HW decoder stall detected (null frame count), entering probe",
 					"consecNullFrames", d.hwConsecNullFrames,
 					"frozenFor", stalledFor.Round(time.Millisecond),
 					"hwSentCount", d.hwSentCount)
