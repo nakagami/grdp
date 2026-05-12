@@ -282,8 +282,12 @@ type GfxHandler struct {
 	lc2EverDecoded bool
 	// auxDecoderNoIDRRetries counts how many times maybeRenegotiateCapabilities
 	// has been called in the "stream2EverSeen but lc2EverDecoded=false" case
-	// this session.  Attempt 1 sends a ForceRefresh; attempt 2 reconnects.
-	// Reset on RESET_GRAPHICS and when LC=2 successfully decodes.
+	// this session.  Each attempt sends a ForceRefresh; after
+	// auxDecoderMaxIDRRetries consecutive attempts the session reconnects.
+	// Reset on RESET_GRAPHICS, when LC=2 successfully decodes, and whenever
+	// maybeRenegotiateCapabilities returns early due to no recent LC=2 activity
+	// (e.g. during a HW-decoder GOP-boundary stall) so a resumed burst gets
+	// fresh retries rather than inheriting the previous count.
 	auxDecoderNoIDRRetries int
 	// stream2EverSeen is set when a non-empty stream2 payload is observed inside
 	// an LC=0 packet.  VirtualBox VRDE never includes stream2 in LC=0 packets,
@@ -358,6 +362,13 @@ const localInputRecoveryGrace = 750 * time.Millisecond
 // capabilities are re-advertised to force the server to issue RESET_GRAPHICS and
 // restart the video pipeline with a fresh LC=0 IDR for both streams.
 const auxDecoderBrokenTimeout = 10 * time.Second
+
+// auxDecoderMaxIDRRetries is the maximum number of ForceRefresh keyframe
+// requests sent while waiting for a stream2 IDR before giving up and
+// reconnecting.  Each attempt is spaced by auxDecoderBrokenTimeout (10 s).
+// Windows servers typically begin a new GOP every 30–60 s, so 5 attempts
+// (≤50 s) provides enough coverage for at least one natural IDR boundary.
+const auxDecoderMaxIDRRetries = 5
 
 // Close shuts down the GfxHandler's background goroutines.
 // Safe to call multiple times; subsequent calls are no-ops.
@@ -496,6 +507,11 @@ func (g *GfxHandler) maybeRenegotiateCapabilities() {
 	// a genuinely idle server needs no intervention.
 	lastLC2NS := g.lastLC2RecvTime.Load()
 	if lastLC2NS == 0 || time.Since(time.Unix(0, lastLC2NS)) >= auxDecoderBrokenTimeout {
+		// No recent LC=2 activity (server idle, or HW-decoder GOP-boundary
+		// stall).  Reset the retry counter so that when LC=2 resumes the
+		// next burst gets fresh ForceRefresh attempts rather than inheriting
+		// a stale count from a previous burst.
+		g.auxDecoderNoIDRRetries = 0
 		return
 	}
 	if !g.stream2EverSeen {
@@ -513,16 +529,19 @@ func (g *GfxHandler) maybeRenegotiateCapabilities() {
 		// may be sending only P-frame stream2 data in LC=0 packets — no IDR
 		// means primeAuxDecoder can never initialise h264dec2.
 		//
-		// Attempt 1: request a ForceRefresh keyframe so the server hopefully
-		// includes a stream2 IDR in the next LC=0 IDR packet.  The timer
-		// pointer was cleared by the AfterFunc callback, so the next LC=2
-		// packet will re-arm it for the second attempt.
+		// Send a ForceRefresh keyframe request on each attempt so the server
+		// hopefully includes a stream2 IDR in the next LC=0 IDR packet.
+		// Windows servers typically begin a new GOP every 30–60 s; with
+		// auxDecoderMaxIDRRetries=5 (×10 s = 50 s) we cover at least one
+		// natural boundary before falling back to a reconnect.
 		//
-		// Attempt 2: the keyframe request did not produce a stream2 IDR
-		// within the timeout.  Reconnect to start a fresh AVC444 sequence.
+		// The retry counter is reset when the early-return above fires (no
+		// recent LC=2 activity, e.g. HW-decoder stall), so resumed bursts
+		// always start from attempt 1.
 		g.auxDecoderNoIDRRetries++
-		if g.auxDecoderNoIDRRetries == 1 {
-			slog.Debug("H.264: aux decoder not primed — requesting keyframe to get stream2 IDR (attempt 1)")
+		if g.auxDecoderNoIDRRetries <= auxDecoderMaxIDRRetries {
+			slog.Debug("H.264: aux decoder not primed — requesting keyframe to get stream2 IDR",
+				"attempt", g.auxDecoderNoIDRRetries, "maxRetries", auxDecoderMaxIDRRetries)
 			g.lastKeyframeRequest = time.Time{} // allow immediate send
 			g.maybeRequestKeyframe()
 			return
