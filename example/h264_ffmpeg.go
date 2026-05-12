@@ -1680,13 +1680,19 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*rdpgfx.H264Frame, error) {
 				// h264dec2 is stuck: avcodec_receive_frame permanently returns
 				// EAGAIN despite successful avcodec_send_packet.  This occurs
 				// after ~26 decoded frames due to an internal FFmpeg H.264 SW
-				// decoder DPB/reorder state that can't self-resolve.  Mark the
-				// decoder broken so avc.go tears it down and recreates it on the
-				// next stream2 IDR — no session reconnect required.
-				slog.Warn("H.264: aux SW decoder stuck in EAGAIN, marking broken for IDR-based reset",
+				// decoder DPB/reorder state that can't self-resolve.
+				//
+				// Flush the decoder and wait for the next natural stream2 IDR
+				// (Windows Server sends IDRs at every GOP boundary, typically
+				// every 30–60 s).  This avoids triggering the auxDecoderBroken
+				// timer and therefore avoids a session reconnect.
+				slog.Warn("H.264: aux SW decoder stuck in EAGAIN, flushing and waiting for stream2 IDR",
 					"eagainCount", d.auxEAGAINCount)
+				C.avcodec_flush_buffers(d.codecCtx)
+				d.needsKeyFrame = true
+				d.keyframeWaitCount = 0
+				d.keyframeWaitStart = time.Time{}
 				d.auxEAGAINCount = 0
-				d.markBroken(rdpgfx.H264BrokenReasonNoIDR)
 			}
 		}
 		if d.useHW && d.hwReady {
