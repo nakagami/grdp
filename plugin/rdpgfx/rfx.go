@@ -220,14 +220,14 @@ func (d *rfxDecoder) decodeTileset(data []byte, left, top int, surfData []byte, 
 					}
 				}()
 				for t := range ch {
-					d.decodeTile(t.content, quants, rlgrMode, left, top, surfData, width, height)
+					d.decodeTile(t.content, quants, rlgrMode, left, top, surfData, width, height, false)
 				}
 			})
 		}
 		wg.Wait()
 	} else {
 		for _, t := range tiles {
-			d.decodeTile(t.content, quants, rlgrMode, left, top, surfData, width, height)
+			d.decodeTile(t.content, quants, rlgrMode, left, top, surfData, width, height, true)
 		}
 	}
 
@@ -238,7 +238,12 @@ func (d *rfxDecoder) decodeTileset(data []byte, left, top int, surfData []byte, 
 // Format: quantIdxY(1) + quantIdxCb(1) + quantIdxCr(1) + xIdx(2) + yIdx(2) +
 //
 //	YLen(2) + CbLen(2) + CrLen(2) + YData(YLen) + CbData(CbLen) + CrData(CrLen)
-func (d *rfxDecoder) decodeTile(data []byte, quants []rfxQuant, rlgrMode int, left, top int, output []byte, outW, outH int) {
+//
+// When parallelComponents is true the Y, Cb, and Cr channels are decoded
+// concurrently (safe because each works on its own independent data and pool
+// buffer). Use true for the serial-tile path; false when the outer worker pool
+// already saturates all CPUs.
+func (d *rfxDecoder) decodeTile(data []byte, quants []rfxQuant, rlgrMode int, left, top int, output []byte, outW, outH int, parallelComponents bool) {
 	if len(data) < 13 {
 		return
 	}
@@ -263,9 +268,18 @@ func (d *rfxDecoder) decodeTile(data []byte, quants []rfxQuant, rlgrMode int, le
 	qCb := rfxGetQuant(quants, quantIdxCb)
 	qCr := rfxGetQuant(quants, quantIdxCr)
 
-	yPixels := rfxDecodeComponent(yData, qY, rlgrMode)
-	cbPixels := rfxDecodeComponent(cbData, qCb, rlgrMode)
-	crPixels := rfxDecodeComponent(crData, qCr, rlgrMode)
+	var yPixels, cbPixels, crPixels []int16
+	if parallelComponents {
+		var wg sync.WaitGroup
+		wg.Go(func() { yPixels = rfxDecodeComponent(yData, qY, rlgrMode) })
+		wg.Go(func() { cbPixels = rfxDecodeComponent(cbData, qCb, rlgrMode) })
+		wg.Go(func() { crPixels = rfxDecodeComponent(crData, qCr, rlgrMode) })
+		wg.Wait()
+	} else {
+		yPixels = rfxDecodeComponent(yData, qY, rlgrMode)
+		cbPixels = rfxDecodeComponent(cbData, qCb, rlgrMode)
+		crPixels = rfxDecodeComponent(crData, qCr, rlgrMode)
+	}
 
 	// Apply WTS1 left/top offset: tile pixel position on surface =
 	// left + xIdx*64, top + yIdx*64 (per FreeRDP/MS-RDPRFX).

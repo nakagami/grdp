@@ -148,12 +148,12 @@ func (d *rfxProgressiveDecoder) parseRegion(data []byte, surfData []byte, outW, 
 	}
 
 	const parallelTileThreshold = 12
-	decodeTile := func(tw progTileWork) {
+	decodeTile := func(tw progTileWork, parallel bool) {
 		switch tw.tileType {
 		case progWBTTileSimple:
-			d.decodeTileSimple(tw.data, quants, surfData, outW, outH)
+			d.decodeTileSimple(tw.data, quants, surfData, outW, outH, parallel)
 		case progWBTTileFirst:
-			d.decodeTileFirst(tw.data, quants, surfData, outW, outH)
+			d.decodeTileFirst(tw.data, quants, surfData, outW, outH, parallel)
 		}
 	}
 	if len(tiles) >= parallelTileThreshold {
@@ -172,14 +172,14 @@ func (d *rfxProgressiveDecoder) parseRegion(data []byte, surfData []byte, outW, 
 					}
 				}()
 				for tw := range ch {
-					decodeTile(tw)
+					decodeTile(tw, false)
 				}
 			})
 		}
 		wg.Wait()
 	} else {
 		for _, tw := range tiles {
-			decodeTile(tw)
+			decodeTile(tw, true)
 		}
 	}
 
@@ -202,7 +202,9 @@ func parseRfxQuant(data []byte) rfxQuant {
 }
 
 // decodeTileSimple handles PROGRESSIVE_WBT_TILE_SIMPLE (0xCCC5).
-func (d *rfxProgressiveDecoder) decodeTileSimple(data []byte, quants []rfxQuant, output []byte, outW, outH int) {
+// When parallelComponents is true the Y, Cb, and Cr channels are decoded
+// concurrently. Use true for the serial-tile path.
+func (d *rfxProgressiveDecoder) decodeTileSimple(data []byte, quants []rfxQuant, output []byte, outW, outH int, parallelComponents bool) {
 	if len(data) < 16 {
 		return
 	}
@@ -229,9 +231,18 @@ func (d *rfxProgressiveDecoder) decodeTileSimple(data []byte, quants []rfxQuant,
 	qCb := rfxGetQuant(quants, int(quantIdxCb))
 	qCr := rfxGetQuant(quants, int(quantIdxCr))
 
-	yPixels := rfxDecodeComponent(yData, qY, 1)
-	cbPixels := rfxDecodeComponent(cbData, qCb, 1)
-	crPixels := rfxDecodeComponent(crData, qCr, 1)
+	var yPixels, cbPixels, crPixels []int16
+	if parallelComponents {
+		var wg sync.WaitGroup
+		wg.Go(func() { yPixels = rfxDecodeComponent(yData, qY, 1) })
+		wg.Go(func() { cbPixels = rfxDecodeComponent(cbData, qCb, 1) })
+		wg.Go(func() { crPixels = rfxDecodeComponent(crData, qCr, 1) })
+		wg.Wait()
+	} else {
+		yPixels = rfxDecodeComponent(yData, qY, 1)
+		cbPixels = rfxDecodeComponent(cbData, qCb, 1)
+		crPixels = rfxDecodeComponent(crData, qCr, 1)
+	}
 
 	rfxPlaceTile(yPixels, cbPixels, crPixels, int(xIdx), int(yIdx), output, outW, outH)
 
@@ -241,7 +252,9 @@ func (d *rfxProgressiveDecoder) decodeTileSimple(data []byte, quants []rfxQuant,
 }
 
 // decodeTileFirst handles PROGRESSIVE_WBT_TILE_FIRST (0xCCC6).
-func (d *rfxProgressiveDecoder) decodeTileFirst(data []byte, quants []rfxQuant, output []byte, outW, outH int) {
+// When parallelComponents is true the Y, Cb, and Cr channels are decoded
+// concurrently. Use true for the serial-tile path.
+func (d *rfxProgressiveDecoder) decodeTileFirst(data []byte, quants []rfxQuant, output []byte, outW, outH int, parallelComponents bool) {
 	if len(data) < 17 {
 		return
 	}
@@ -269,9 +282,18 @@ func (d *rfxProgressiveDecoder) decodeTileFirst(data []byte, quants []rfxQuant, 
 	qCb := rfxGetQuant(quants, int(quantIdxCb))
 	qCr := rfxGetQuant(quants, int(quantIdxCr))
 
-	yPixels := rfxDecodeComponent(yData, qY, 1)
-	cbPixels := rfxDecodeComponent(cbData, qCb, 1)
-	crPixels := rfxDecodeComponent(crData, qCr, 1)
+	var yPixels, cbPixels, crPixels []int16
+	if parallelComponents {
+		var wg sync.WaitGroup
+		wg.Go(func() { yPixels = rfxDecodeComponent(yData, qY, 1) })
+		wg.Go(func() { cbPixels = rfxDecodeComponent(cbData, qCb, 1) })
+		wg.Go(func() { crPixels = rfxDecodeComponent(crData, qCr, 1) })
+		wg.Wait()
+	} else {
+		yPixels = rfxDecodeComponent(yData, qY, 1)
+		cbPixels = rfxDecodeComponent(cbData, qCb, 1)
+		crPixels = rfxDecodeComponent(crData, qCr, 1)
+	}
 
 	rfxPlaceTile(yPixels, cbPixels, crPixels, int(xIdx), int(yIdx), output, outW, outH)
 

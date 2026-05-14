@@ -278,10 +278,7 @@ func (g *RdpClient) DisableAVC444() *RdpClient {
 
 func bpp(BitsPerPixel uint16) (pixel int) {
 	switch BitsPerPixel {
-	case 15:
-		pixel = 2
-
-	case 16:
+	case 15, 16:
 		pixel = 2
 
 	case 24:
