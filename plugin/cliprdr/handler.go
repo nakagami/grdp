@@ -23,6 +23,14 @@ type CliprdrHandler struct {
 
 	useLongFormatNames bool
 
+	// serverCapsReceived is set when the server's CB_CLIP_CAPS PDU has been
+	// processed.  Per MS-RDPECLIP §1.3.2.1 the server sends CB_CLIP_CAPS
+	// before CB_MONITOR_READY, so FORMAT_LIST should only be sent once both
+	// have arrived.
+	serverCapsReceived bool
+	// monitorReady is set when CB_MONITOR_READY has been received.
+	monitorReady bool
+
 	// onRemoteClipboardChanged is called with the text when the server's
 	// clipboard content arrives.
 	onRemoteClipboardChanged func(text string)
@@ -120,6 +128,12 @@ func (h *CliprdrHandler) processClipCaps(body []byte) {
 		}
 		offset += int(capLen)
 	}
+	h.serverCapsReceived = true
+	// If CB_MONITOR_READY already arrived before CB_CLIP_CAPS (non-standard
+	// ordering), send the FORMAT_LIST now that we have correct capabilities.
+	if h.monitorReady {
+		h.sendFormatList()
+	}
 }
 
 func (h *CliprdrHandler) sendClipCaps() {
@@ -143,8 +157,15 @@ func (h *CliprdrHandler) sendClipCaps() {
 
 func (h *CliprdrHandler) processMonitorReady() {
 	slog.Debug("cliprdr: server Monitor Ready")
+	h.monitorReady = true
 	h.sendClipCaps()
-	h.sendFormatList()
+	// Per MS-RDPECLIP §1.3.2.1 the server sends CB_CLIP_CAPS before
+	// CB_MONITOR_READY.  Only send FORMAT_LIST after server caps are known
+	// so useLongFormatNames is set correctly.  If CB_CLIP_CAPS hasn't been
+	// received yet (non-standard ordering), defer until processClipCaps fires.
+	if h.serverCapsReceived {
+		h.sendFormatList()
+	}
 }
 
 // --- Format List (MS-RDPECLIP 2.2.3.1) ------------------------------------
