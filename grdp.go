@@ -399,15 +399,7 @@ func (g *RdpClient) doLogin(routingToken []byte) error {
 		slog.Debug("H.264 decoder broken")
 		if g.onDecoderBrokenFn != nil {
 			g.onDecoderBrokenFn()
-			return
 		}
-		// Default: reconnect immediately (backward-compatible behaviour for
-		// callers that have not registered an OnDecoderBroken callback).
-		go func() {
-			if err := g.Reconnect(g.width, g.height); err != nil {
-				slog.Warn("Reconnect after decoder broken failed", "err", err)
-			}
-		}()
 	})
 	gfxHandler.SetKeyframeRequestFunc(func() {
 		slog.Debug("H.264: requesting keyframe via force refresh")
