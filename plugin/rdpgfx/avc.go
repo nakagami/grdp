@@ -874,6 +874,13 @@ func (g *GfxHandler) primeAuxDecoder(h264Data []byte) {
 			// No aux decoder yet; wait for the stream2 IDR to create one.
 			return
 		}
+		// A stream2 IDR arrived — clear any permanent-degrade state so LC=2
+		// can recover (e.g. after a server-side GOP reset much later in the session).
+		if g.lc2PermanentlyDegraded {
+			slog.Debug("H.264: stream2 IDR received after LC=2 degrade — recovering aux decoder")
+			g.lc2PermanentlyDegraded = false
+			g.auxDecoderNoIDRRetries = 0
+		}
 		// Recreate aux decoder on a stream2 IDR so it starts with a clean
 		// reference frame.  This avoids the rapid create/destroy cycle that
 		// can destabilise the decoder.
@@ -925,6 +932,11 @@ func (g *GfxHandler) decodeAVC444LC2(stream2 *avc420Stream, destW, destH int) (d
 	// distinguish an active-LC=2-only server from a truly idle server.
 	g.lastLC2RecvTime.Store(time.Now().UnixNano())
 	if g.h264dec2 == nil {
+		if g.lc2PermanentlyDegraded {
+			// Server has proven it won't deliver stream2 IDRs; skip silently
+			// without arming the timer to avoid an endless renegotiation loop.
+			return
+		}
 		slog.Debug("RDPGFX: AVC444 LC=2 skipped (no aux decoder)")
 		// Arm the renegotiation timer so maybeRenegotiateCapabilities fires if
 		// no stream2 IDR arrives to prime h264dec2 within auxDecoderBrokenTimeout.

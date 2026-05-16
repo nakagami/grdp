@@ -283,12 +283,20 @@ type GfxHandler struct {
 	// auxDecoderNoIDRRetries counts how many times maybeRenegotiateCapabilities
 	// has been called in the "stream2EverSeen but lc2EverDecoded=false" case
 	// this session.  Each attempt sends a ForceRefresh; after
-	// auxDecoderMaxIDRRetries consecutive attempts the session reconnects.
+	// auxDecoderMaxIDRRetries consecutive attempts the session degrades to LC=0
+	// only (no reconnect — the server consistently omits stream2 IDRs).
 	// Reset on RESET_GRAPHICS, when LC=2 successfully decodes, and whenever
 	// maybeRenegotiateCapabilities returns early due to no recent LC=2 activity
 	// (e.g. during a HW-decoder GOP-boundary stall) so a resumed burst gets
 	// fresh retries rather than inheriting the previous count.
 	auxDecoderNoIDRRetries int
+	// lc2PermanentlyDegraded is set when the server has not delivered a stream2
+	// IDR despite repeated keyframe requests and lc2EverDecoded is still false.
+	// Once set, LC=2 frames are silently skipped for the remainder of the session
+	// without arming the renegotiation timer — avoiding an endless reconnect loop.
+	// Cleared on RESET_GRAPHICS so a fresh AVC444 sequence gets a clean slate.
+	// Cleared in primeAuxDecoder on a stream2 IDR to allow late recovery.
+	lc2PermanentlyDegraded bool
 	// stream2EverSeen is set when a non-empty stream2 payload is observed inside
 	// an LC=0 packet.  VirtualBox VRDE never includes stream2 in LC=0 packets,
 	// so stream2EverSeen stays false for the whole session.  Windows does include
@@ -546,12 +554,13 @@ func (g *GfxHandler) maybeRenegotiateCapabilities() {
 			g.maybeRequestKeyframe()
 			return
 		}
-		slog.Warn("H.264: aux decoder never primed despite keyframe request — reconnecting",
+		// The server has not delivered a stream2 IDR despite repeated ForceRefresh
+		// requests and LC=2 has never decoded successfully this session.  Reconnecting
+		// reproduces the same failure because the server consistently omits stream2
+		// IDRs in LC=0 IDR packets.  Degrade gracefully to LC=0-only instead.
+		slog.Warn("H.264: aux decoder never primed despite keyframe request — degrading to LC=0 only (no reconnect)",
 			"retries", g.auxDecoderNoIDRRetries)
-		g.decoderBrokenNotified = true
-		if g.onDecoderBroken != nil {
-			go g.onDecoderBroken()
-		}
+		g.lc2PermanentlyDegraded = true
 		return
 	}
 	// The timer firing is itself the auxDecoderBrokenTimeout signal.  Do not
@@ -1186,6 +1195,7 @@ func (g *GfxHandler) onResetGraphics(data []byte) {
 	g.lc2EverDecoded = false
 	g.stream2EverSeen = false
 	g.auxDecoderNoIDRRetries = 0
+	g.lc2PermanentlyDegraded = false
 	g.lastKeyframeRequest = time.Time{}
 	g.lastDecodedFrame.Store(0)
 	g.stopInputWatchdog()
