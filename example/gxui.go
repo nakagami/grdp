@@ -645,21 +645,7 @@ func startVideoStallWatchdog() {
 			if elapsed <= videoStallTimeout {
 				continue
 			}
-			slog.Warn("Video stalled, reconnecting to recover",
-				"stalled", elapsed.Round(time.Millisecond))
-			// Reset the watchdog before reconnecting to avoid repeated
-			// reconnects while Reconnect() is running.
-			lastServerActivity.Store(time.Now().UnixNano())
-			w, h := rdpClient.Width(), rdpClient.Height()
-			if err := rdpClient.Reconnect(w, h); err != nil {
-				slog.Error("Video stall reconnect failed", "err", err)
-			} else {
-				// Clear the watchdog so the fresh session starts clean.
-				lastServerActivity.Store(0)
-				screenMu.Lock()
-				screenImage = image.NewRGBA(image.Rect(0, 0, w, h))
-				screenMu.Unlock()
-			}
+			slog.Warn("Video stalled", "stalled", elapsed.Round(time.Millisecond))
 		}
 	}()
 }
