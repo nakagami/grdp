@@ -1191,6 +1191,9 @@ const softResetLimit = 5
 // prepare an IDR before the stall detector fires and triggers SW fallback,
 // reducing the visible freeze from ~18 s to a few seconds.
 func (g *GfxHandler) maybeRequestKeyframe() {
+	if g.onKeyframeRequest == nil {
+		return
+	}
 	if g.h264dec == nil || g.h264dec.IsBroken() {
 		return
 	}
@@ -1222,9 +1225,7 @@ func (g *GfxHandler) maybeRequestKeyframe() {
 		return
 	}
 	g.lastKeyframeRequest = time.Now()
-	if g.onKeyframeRequest != nil {
-		go g.onKeyframeRequest()
-	}
+	go g.onKeyframeRequest()
 }
 
 // maybeNotifyDecoderBroken is called whenever the H.264 decoder returns a
