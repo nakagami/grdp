@@ -657,9 +657,12 @@ func (g *GfxHandler) copyAVC444YToIDRCache() {
 // zero chroma with any luma produces a bright green frame; detecting this
 // condition early lets decodeAVC444LC2 skip the combine and wait for real data.
 //
-// The check samples 6 positions spread across each half of the Y plane.
-// Threshold of 8 cleanly separates the zero-initialised state from real chroma
-// content (neutral desktop ≈128, dark content ≥16 for typical content).
+// The check samples 6 positions spread across each half of the Y plane and
+// requires that a MAJORITY (more than half) of the sampled positions exceed
+// the threshold.  Requiring only a single non-zero sample is too easily fooled
+// by isolated codec-initialisation artefacts (Cb≈9) that appear in the IDR
+// while the rest of the frame is still zero; those sparse pixels pass the
+// single-sample test yet produce green blocks when combined.
 func isAuxChromaBlank(f *H264FrameI420) bool {
 	if f == nil || f.Width < 16 || f.Height < 4 || len(f.Y) == 0 {
 		return false
@@ -667,20 +670,26 @@ func isAuxChromaBlank(f *H264FrameI420) bool {
 	w, h, stride := f.Width, f.Height, f.YStride
 	halfW := w / 2
 	const threshold = 8
+	nonZero, total := 0, 0
 	for i := range 6 {
 		row := (i + 1) * h / 7
 		col := (i + 1) * halfW / 7
 		if row >= h || col >= halfW {
 			continue
 		}
+		total++
 		if f.Y[row*stride+col] >= threshold {
-			return false // non-blank Cb found
+			nonZero++
 		}
-		if halfW+col < w && f.Y[row*stride+halfW+col] >= threshold {
-			return false // non-blank Cr found
+		if halfW+col < w {
+			total++
+			if f.Y[row*stride+halfW+col] >= threshold {
+				nonZero++
+			}
 		}
 	}
-	return true
+	// Blank if fewer than half of the sampled positions carry real chroma.
+	return total == 0 || nonZero*2 <= total
 }
 
 // combineAVC444v2BGRA implements the AVC444v2 chroma reconstruction defined in
