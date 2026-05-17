@@ -251,6 +251,7 @@ var (
 	screenImage            *image.RGBA
 	screenMu               sync.Mutex
 	img                    gxui.Image
+	layoutImg              gxui.LinearLayout
 	bitmapCH               chan timedBitmap
 	lastMouseX, lastMouseY int
 	resizeTimer            *time.Timer
@@ -475,7 +476,7 @@ func appMain(driver gxui.Driver) {
 
 	img = theme.CreateImage()
 
-	layoutImg := theme.CreateLinearLayout()
+	layoutImg = theme.CreateLinearLayout()
 	layoutImg.SetSizeMode(gxui.Fill)
 	layoutImg.SetHorizontalAlignment(gxui.AlignCenter)
 	layoutImg.AddChild(img)
