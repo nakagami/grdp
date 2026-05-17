@@ -353,6 +353,19 @@ func uiRdp(hostPort, domain, user, password string, width, height int, keyboardT
 	}).OnPointerUpdate(func(idx uint16, bpp uint16, x uint16, y uint16, width uint16, height uint16, mask []byte, data []byte) {
 		lastServerActivity.Store(time.Now().UnixNano())
 		slog.Debug("on pointer_update", "idx", idx)
+	}).OnDecoderBroken(func() {
+		// All internal recovery attempts (SW fallback + keyframe requests) have
+		// been exhausted.  Reconnect so the server sends a fresh IDR.
+		slog.Warn("decoder broken; reconnecting")
+		sz := layoutImg.Size()
+		w, h := sz.W, sz.H
+		if err := rdpClient.Reconnect(w, h); err != nil {
+			slog.Error("Reconnect (decoder broken) failed", "err", err)
+			return
+		}
+		screenMu.Lock()
+		screenImage = image.NewRGBA(image.Rect(0, 0, w, h))
+		screenMu.Unlock()
 	}).OnBitmap(func(bs []grdp.Bitmap) {
 		lastServerActivity.Store(time.Now().UnixNano())
 		// Bitmap.Data for compressed bitmaps is borrowed from an internal
