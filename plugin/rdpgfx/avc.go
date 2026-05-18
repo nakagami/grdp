@@ -1251,20 +1251,20 @@ func (g *GfxHandler) maybeNotifyDecoderBroken() {
 	}
 	reason := g.h264dec.BrokenReason()
 	if reason == H264BrokenReasonNoIDR {
-		// Allow only one no-IDR soft reset before escalating to reconnect.
+		// Allow one no-IDR soft reset before escalating to reconnect.
 		// ForceRefresh (SuppressOutput toggle) often fails to trigger a new
 		// AVC444 IDR from Windows servers; repeatedly retrying just prolongs
 		// the freeze.  One attempt gives the server a fair chance; after that
 		// a full reconnect is faster than waiting another 10+ seconds per try.
-		// Note: after a HW-stall SW-fallback (softResetCount=1), this budget
-		// is already consumed, so the new SW decoder reconnects immediately on
-		// its IDR timeout — this is intentional because the server consistently
-		// does not send IDR without a full reconnect in post-stall scenarios.
+		//
+		// noIDRSoftResetCount is kept separate from softResetCount so that a
+		// prior HW-stall reset does not consume this budget — after an HW stall
+		// the SW fallback decoder still gets one no-IDR retry before reconnect.
 		const softResetLimitNoIDR = 1
-		if g.softResetCount < softResetLimitNoIDR {
-			g.softResetCount++
+		if g.noIDRSoftResetCount < softResetLimitNoIDR {
+			g.noIDRSoftResetCount++
 			slog.Debug("H.264: soft decoder reset (no-IDR)",
-				"attempt", g.softResetCount, "limit", softResetLimitNoIDR,
+				"attempt", g.noIDRSoftResetCount, "limit", softResetLimitNoIDR,
 				"reason", reason.String())
 			g.h264dec.Close()
 			if g.usingSWFallback {
