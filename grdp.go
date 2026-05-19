@@ -154,9 +154,18 @@ type Bitmap struct {
 	Data         []byte
 }
 
-func (bm *Bitmap) RGBA() *image.RGBA {
-	m := image.NewRGBA(image.Rect(0, 0, bm.Width, bm.Height))
-	pix := m.Pix
+// FillRGBA converts the bitmap's pixel data to RGBA format, writing into dst.
+// If dst is nil or has the wrong dimensions a new *image.RGBA is allocated.
+// Callers that process tiles of stable dimensions can reuse the same *image.RGBA
+// across frames to avoid repeated heap allocations:
+//
+//	var tile *image.RGBA
+//	tile = bm.FillRGBA(tile)
+func (bm *Bitmap) FillRGBA(dst *image.RGBA) *image.RGBA {
+	if dst == nil || dst.Bounds().Dx() != bm.Width || dst.Bounds().Dy() != bm.Height {
+		dst = image.NewRGBA(image.Rect(0, 0, bm.Width, bm.Height))
+	}
+	pix := dst.Pix
 	data := bm.Data
 
 	// Per-format specialised loops avoid a per-pixel switch and let the
@@ -197,7 +206,14 @@ func (bm *Bitmap) RGBA() *image.RGBA {
 			}
 		}
 	}
-	return m
+	return dst
+}
+
+// RGBA converts the bitmap pixel data to an *image.RGBA.
+// A new *image.RGBA is allocated on each call.  If the caller processes tiles
+// of the same dimensions across frames, prefer FillRGBA to avoid allocations.
+func (bm *Bitmap) RGBA() *image.RGBA {
+	return bm.FillRGBA(nil)
 }
 
 func NewRdpClient(host string, width, height int, dialer func(string) (net.Conn, error)) *RdpClient {

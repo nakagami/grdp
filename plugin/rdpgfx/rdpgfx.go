@@ -1131,6 +1131,7 @@ func (g *GfxHandler) writeLoop() {
 			if g.sendFn != nil {
 				g.sendFn(pdu)
 			}
+			ackPDUPool.Put(pdu)
 		}
 	}
 }
@@ -1141,6 +1142,12 @@ func (g *GfxHandler) writeLoop() {
 // avoiding per-call heap allocations on the sendPdu hot path.
 var pduBufPool = sync.Pool{
 	New: func() any { return make([]byte, 0, headerSize+256) },
+}
+
+// ackPDUPool reuses the fixed-size 20-byte slices used for FRAME_ACKNOWLEDGE
+// PDUs (~60/s during video), eliminating per-frame heap allocations.
+var ackPDUPool = sync.Pool{
+	New: func() any { return make([]byte, 20) },
 }
 
 func (g *GfxHandler) sendPdu(cmdId uint16, payload []byte) {
@@ -1180,12 +1187,11 @@ func (g *GfxHandler) onCapsConfirm(data []byte) {
 		slog.Debug("RDPGFX: CAPS_CONFIRM received (short)")
 		return
 	}
-	r := bytes.NewReader(data)
-	version, _ := core.ReadUInt32LE(r)
-	dataLen, _ := core.ReadUInt32LE(r)
+	version := binary.LittleEndian.Uint32(data[0:])
+	dataLen := binary.LittleEndian.Uint32(data[4:])
 	flags := uint32(0)
 	if dataLen >= 4 {
-		flags, _ = core.ReadUInt32LE(r)
+		flags = binary.LittleEndian.Uint32(data[8:])
 	}
 	slog.Debug("RDPGFX: CAPS_CONFIRM", "version", version, "flags", flags)
 }
@@ -1194,9 +1200,8 @@ func (g *GfxHandler) onResetGraphics(data []byte) {
 	if len(data) < 12 {
 		return
 	}
-	r := bytes.NewReader(data)
-	w, _ := core.ReadUInt32LE(r)
-	h, _ := core.ReadUInt32LE(r)
+	w := binary.LittleEndian.Uint32(data[0:])
+	h := binary.LittleEndian.Uint32(data[4:])
 	slog.Debug("RDPGFX: RESET_GRAPHICS", "w", w, "h", h)
 	g.surfaces = make(map[uint16]*surface)
 	g.clearCtx = newClearCodecCtx()
@@ -1229,11 +1234,10 @@ func (g *GfxHandler) onCreateSurface(data []byte) {
 	if len(data) < 7 {
 		return
 	}
-	r := bytes.NewReader(data)
-	id, _ := core.ReadUint16LE(r)
-	w, _ := core.ReadUint16LE(r)
-	h, _ := core.ReadUint16LE(r)
-	f, _ := core.ReadUInt8(r)
+	id := binary.LittleEndian.Uint16(data[0:])
+	w := binary.LittleEndian.Uint16(data[2:])
+	h := binary.LittleEndian.Uint16(data[4:])
+	f := data[6]
 	slog.Debug("RDPGFX: CREATE_SURFACE", "id", id, "w", w, "h", h)
 	g.surfaces[id] = &surface{
 		width: w, height: h, format: f,
@@ -1253,11 +1257,10 @@ func (g *GfxHandler) onMapSurfaceToOutput(data []byte) {
 	if len(data) < 12 {
 		return
 	}
-	r := bytes.NewReader(data)
-	id, _ := core.ReadUint16LE(r)
-	core.ReadUint16LE(r) // reserved
-	ox, _ := core.ReadUInt32LE(r)
-	oy, _ := core.ReadUInt32LE(r)
+	id := binary.LittleEndian.Uint16(data[0:])
+	// data[2:4] = reserved
+	ox := binary.LittleEndian.Uint32(data[4:])
+	oy := binary.LittleEndian.Uint32(data[8:])
 	slog.Debug("RDPGFX: MAP_SURFACE", "id", id, "ox", ox, "oy", oy)
 	if s, ok := g.surfaces[id]; ok {
 		s.outputX = ox
@@ -1270,13 +1273,11 @@ func (g *GfxHandler) onMapSurfaceToScaledOutput(data []byte) {
 	if len(data) < 20 {
 		return
 	}
-	r := bytes.NewReader(data)
-	id, _ := core.ReadUint16LE(r)
-	core.ReadUint16LE(r) // reserved
-	ox, _ := core.ReadUInt32LE(r)
-	oy, _ := core.ReadUInt32LE(r)
-	core.ReadUInt32LE(r) // targetWidth
-	core.ReadUInt32LE(r) // targetHeight
+	id := binary.LittleEndian.Uint16(data[0:])
+	// data[2:4] = reserved
+	ox := binary.LittleEndian.Uint32(data[4:])
+	oy := binary.LittleEndian.Uint32(data[8:])
+	// data[12:16] = targetWidth, data[16:20] = targetHeight (unused)
 	slog.Debug("RDPGFX: MAP_SURFACE_SCALED", "id", id, "ox", ox, "oy", oy)
 	if s, ok := g.surfaces[id]; ok {
 		s.outputX = ox
@@ -1297,9 +1298,10 @@ func (g *GfxHandler) onMapSurfaceToScaledOutput(data []byte) {
 func (g *GfxHandler) sendFrameAck(frameId uint32, queueDepth uint32) {
 	decoded := g.framesDecoded.Add(1)
 	// 8-byte RDPGFX header + 12-byte FRAME_ACKNOWLEDGE payload = 20 bytes.
-	pdu := make([]byte, 20)
+	pdu := ackPDUPool.Get().([]byte)
 	binary.LittleEndian.PutUint16(pdu[0:], cmdidFrameAcknowledge)
 	// pdu[2:4] = flags (0) — zero value
+	binary.LittleEndian.PutUint16(pdu[2:], 0)
 	binary.LittleEndian.PutUint32(pdu[4:], 20) // total PDU length
 	binary.LittleEndian.PutUint32(pdu[8:], queueDepth)
 	binary.LittleEndian.PutUint32(pdu[12:], frameId)
@@ -1307,6 +1309,7 @@ func (g *GfxHandler) sendFrameAck(frameId uint32, queueDepth uint32) {
 	select {
 	case g.ackCh <- pdu:
 	default:
+		ackPDUPool.Put(pdu)
 		slog.Warn("RDPGFX: ackCh full, ACK dropped")
 	}
 }
@@ -1378,31 +1381,7 @@ func (g *GfxHandler) onWireToSurface1Decode(data []byte, skipHeavy bool) {
 			return
 		}
 		rects := g.rfx.Decode(bmpData, int(left), int(top), s.data, int(s.width), int(s.height))
-		if !s.mapped || g.onBitmap == nil || len(rects) == 0 {
-			return
-		}
-		updates := make([]BitmapUpdate, 0, len(rects))
-		stride := int(s.width) * 4
-		for _, rc := range rects {
-			needed := rc.w * rc.h * 4
-			region := acquireBitmapBuf(needed)
-			rowBytes := rc.w * 4
-			for row := 0; row < rc.h; row++ {
-				srcOff := (rc.y+row)*stride + rc.x*4
-				dstOff := row * rowBytes
-				if srcOff+rowBytes <= len(s.data) {
-					copy(region[dstOff:dstOff+rowBytes], s.data[srcOff:srcOff+rowBytes])
-				}
-			}
-			destL := int(s.outputX) + rc.x
-			destT := int(s.outputY) + rc.y
-			updates = append(updates, BitmapUpdate{
-				DestLeft: destL, DestTop: destT,
-				DestRight: destL + rc.w - 1, DestBottom: destT + rc.h - 1,
-				Width: rc.w, Height: rc.h, Bpp: 4, Data: region,
-			})
-		}
-		g.emitAndReleaseUpdates(updates)
+		g.emitCaVideoRects(s, rects)
 		return
 	}
 
@@ -1548,30 +1527,7 @@ func (g *GfxHandler) onWireToSurface2Decode(data []byte, skipHeavy bool) {
 			break // frame drop
 		}
 		rects := g.rfx.Decode(bmpData, 0, 0, s.data, w, h)
-		if s.mapped && g.onBitmap != nil && len(rects) > 0 {
-			updates := make([]BitmapUpdate, 0, len(rects))
-			stride := w * 4
-			for _, rc := range rects {
-				needed := rc.w * rc.h * 4
-				region := acquireBitmapBuf(needed)
-				rowBytes := rc.w * 4
-				for row := 0; row < rc.h; row++ {
-					srcOff := (rc.y+row)*stride + rc.x*4
-					dstOff := row * rowBytes
-					if srcOff+rowBytes <= len(s.data) {
-						copy(region[dstOff:dstOff+rowBytes], s.data[srcOff:srcOff+rowBytes])
-					}
-				}
-				destL := int(s.outputX) + rc.x
-				destT := int(s.outputY) + rc.y
-				updates = append(updates, BitmapUpdate{
-					DestLeft: destL, DestTop: destT,
-					DestRight: destL + rc.w - 1, DestBottom: destT + rc.h - 1,
-					Width: rc.w, Height: rc.h, Bpp: 4, Data: region,
-				})
-			}
-			g.emitAndReleaseUpdates(updates)
-		}
+		g.emitCaVideoRects(s, rects)
 	case codecAVC420:
 		destX := int(s.outputX)
 		destY := int(s.outputY)
@@ -1727,13 +1683,12 @@ func (g *GfxHandler) onSolidFill(data []byte) {
 	if len(data) < 8 {
 		return
 	}
-	r := bytes.NewReader(data)
-	surfId, _ := core.ReadUint16LE(r)
-	cb, _ := core.ReadUInt8(r)
-	cg, _ := core.ReadUInt8(r)
-	cr, _ := core.ReadUInt8(r)
-	core.ReadUInt8(r) // XA
-	fillCount, _ := core.ReadUint16LE(r)
+	surfId := binary.LittleEndian.Uint16(data[0:])
+	cb := data[2]
+	cg := data[3]
+	cr := data[4]
+	// data[5] = XA (ignored)
+	fillCount := binary.LittleEndian.Uint16(data[6:])
 
 	s, ok := g.surfaces[surfId]
 	if !ok {
@@ -1744,11 +1699,16 @@ func (g *GfxHandler) onSolidFill(data []byte) {
 	// Pre-compose a single BGRA pixel as a uint32 for one-shot writes.
 	pixelU32 := uint32(cb) | uint32(cg)<<8 | uint32(cr)<<16 | uint32(0xFF)<<24
 
+	offset := 8
 	for range fillCount {
-		left, _ := core.ReadUint16LE(r)
-		top, _ := core.ReadUint16LE(r)
-		right, _ := core.ReadUint16LE(r)
-		bottom, _ := core.ReadUint16LE(r)
+		if offset+8 > len(data) {
+			break
+		}
+		left := binary.LittleEndian.Uint16(data[offset:])
+		top := binary.LittleEndian.Uint16(data[offset+2:])
+		right := binary.LittleEndian.Uint16(data[offset+4:])
+		bottom := binary.LittleEndian.Uint16(data[offset+6:])
+		offset += 8
 		w := int(right - left)
 		h := int(bottom - top)
 		if w <= 0 || h <= 0 {
@@ -1869,17 +1829,21 @@ func (g *GfxHandler) onCacheToSurface(data []byte) {
 	if len(data) < 6 {
 		return
 	}
-	r := bytes.NewReader(data)
-	cacheSlot, _ := core.ReadUint16LE(r)
-	surfId, _ := core.ReadUint16LE(r)
-	destCount, _ := core.ReadUint16LE(r)
+	cacheSlot := binary.LittleEndian.Uint16(data[0:])
+	surfId := binary.LittleEndian.Uint16(data[2:])
+	destCount := binary.LittleEndian.Uint16(data[4:])
 
 	ce, hasCE := g.cacheEntries[cacheSlot]
 	s, hasSurf := g.surfaces[surfId]
 
+	offset := 6
 	for range destCount {
-		dx, _ := core.ReadUint16LE(r)
-		dy, _ := core.ReadUint16LE(r)
+		if offset+4 > len(data) {
+			break
+		}
+		dx := binary.LittleEndian.Uint16(data[offset:])
+		dy := binary.LittleEndian.Uint16(data[offset+2:])
+		offset += 4
 		if hasCE && hasSurf {
 			blitToSurface(s, int(dx), int(dy), ce.width, ce.height, ce.data)
 			g.emitBitmap(s, int(dx), int(dy), ce.width, ce.height, ce.data)
@@ -1901,6 +1865,37 @@ func (g *GfxHandler) onCacheImportOffer() {
 }
 
 // --- Helpers ---
+
+// emitCaVideoRects copies decoded RemoteFX tile regions from the surface
+// pixel buffer into individual BitmapUpdate slices and emits them.
+// Used by both onWireToSurface1Decode and onWireToSurface2Decode.
+func (g *GfxHandler) emitCaVideoRects(s *surface, rects []rfxRect) {
+	if !s.mapped || g.onBitmap == nil || len(rects) == 0 {
+		return
+	}
+	updates := make([]BitmapUpdate, 0, len(rects))
+	stride := int(s.width) * 4
+	for _, rc := range rects {
+		needed := rc.w * rc.h * 4
+		region := acquireBitmapBuf(needed)
+		rowBytes := rc.w * 4
+		for row := 0; row < rc.h; row++ {
+			srcOff := (rc.y+row)*stride + rc.x*4
+			dstOff := row * rowBytes
+			if srcOff+rowBytes <= len(s.data) {
+				copy(region[dstOff:dstOff+rowBytes], s.data[srcOff:srcOff+rowBytes])
+			}
+		}
+		destL := int(s.outputX) + rc.x
+		destT := int(s.outputY) + rc.y
+		updates = append(updates, BitmapUpdate{
+			DestLeft: destL, DestTop: destT,
+			DestRight: destL + rc.w - 1, DestBottom: destT + rc.h - 1,
+			Width: rc.w, Height: rc.h, Bpp: 4, Data: region,
+		})
+	}
+	g.emitAndReleaseUpdates(updates)
+}
 
 func blitToSurface(s *surface, x, y, w, h int, src []byte) {
 	stride := int(s.width) * 4
