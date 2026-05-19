@@ -619,36 +619,32 @@ var (
 	guidRemoteFX = [16]byte{0x12, 0x2F, 0x77, 0x76, 0x72, 0xBD, 0x63, 0x44, 0xAF, 0xB3, 0xB7, 0x3C, 0x9C, 0x6F, 0x78, 0x86}
 )
 
+// rfxPropertiesBytes is the pre-computed TS_RFX_CLNT_CAPS_CONTAINER blob
+// (MS-RDPRFX 2.2.1.1). The content is constant across all connections.
+var rfxPropertiesBytes = []byte{
+	0x29, 0x00, 0x00, 0x00, // length = 41
+	0x00, 0x00, 0x00, 0x00, // captureFlags
+	0x1D, 0x00, 0x00, 0x00, // capsLength = 29
+	0xC0, 0xCB, // blockType = CBY_CAPS
+	0x08, 0x00, 0x00, 0x00, // blockLen
+	0x01, 0x00, // numCapsets
+	0xC1, 0xCB, // blockType = CBY_CAPSET
+	0x15, 0x00, 0x00, 0x00, // blockLen = 21
+	0x01,       // codecId
+	0xC0, 0xCF, // capsetType = CLY_CAPSET
+	0x01, 0x00, // numIcaps
+	0x08, 0x00, // icapLen
+	0x00, 0x01, // version
+	0x40, 0x00, // tileSize = 64
+	0x01,       // flags = VIDEOMODE
+	0x01,       // colConvBits
+	0x01,       // transformBits
+	0x04,       // entropyBits = RLGR3
+}
+
 // buildRemoteFxProperties constructs the TS_RFX_CLNT_CAPS_CONTAINER (MS-RDPRFX 2.2.1.1).
 func buildRemoteFxProperties() []byte {
-	b := &bytes.Buffer{}
-	// TS_RFX_CLNT_CAPS_CONTAINER
-	core.WriteUInt32LE(0x29, b) // length = 41 (includes this field)
-	core.WriteUInt32LE(0, b)    // captureFlags
-	core.WriteUInt32LE(0x1D, b) // capsLength = 29
-
-	// TS_RFX_CAPS
-	core.WriteUInt16LE(0xCBC0, b) // blockType = CBY_CAPS
-	core.WriteUInt32LE(0x08, b)   // blockLen
-	core.WriteUInt16LE(0x01, b)   // numCapsets
-
-	// TS_RFX_CAPSET
-	core.WriteUInt16LE(0xCBC1, b) // blockType = CBY_CAPSET
-	core.WriteUInt32LE(0x15, b)   // blockLen = 21
-	core.WriteUInt8(0x01, b)      // codecId
-	core.WriteUInt16LE(0xCFC0, b) // capsetType = CLY_CAPSET
-	core.WriteUInt16LE(0x01, b)   // numIcaps
-	core.WriteUInt16LE(0x08, b)   // icapLen
-
-	// TS_RFX_ICAP
-	core.WriteUInt16LE(0x0100, b) // version
-	core.WriteUInt16LE(0x0040, b) // tileSize = 64
-	core.WriteUInt8(0x01, b)      // flags = VIDEOMODE
-	core.WriteUInt8(0x01, b)      // colConvBits
-	core.WriteUInt8(0x01, b)      // transformBits
-	core.WriteUInt8(0x04, b)      // entropyBits = RLGR3
-
-	return b.Bytes()
+	return append(make([]byte, 0, len(rfxPropertiesBytes)), rfxPropertiesBytes...)
 }
 
 // newClientBitmapCodecsCapability returns a BitmapCodecsCapability with

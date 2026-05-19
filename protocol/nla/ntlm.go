@@ -230,42 +230,42 @@ func NewAuthenticateMessage(negFlag uint32, domain, user, workstation []byte,
 		MessageType:    0x00000003,
 		NegotiateFlags: negFlag,
 	}
-	payloadBuff := &bytes.Buffer{}
+	payload := make([]byte, 0, len(lmchallResp)+len(ntchallResp)+len(domain)+len(user)+len(workstation)+len(enRandomSessKey))
 
 	msg.LmChallengeResponseLen = uint16(len(lmchallResp))
 	msg.LmChallengeResponseMaxLen = msg.LmChallengeResponseLen
 	msg.LmChallengeResponseBufferOffset = msg.BaseLen()
-	payloadBuff.Write(lmchallResp)
+	payload = append(payload, lmchallResp...)
 
 	msg.NtChallengeResponseLen = uint16(len(ntchallResp))
 	msg.NtChallengeResponseMaxLen = msg.NtChallengeResponseLen
 	msg.NtChallengeResponseBufferOffset = msg.LmChallengeResponseBufferOffset + uint32(msg.LmChallengeResponseLen)
-	payloadBuff.Write(ntchallResp)
+	payload = append(payload, ntchallResp...)
 
 	msg.DomainNameLen = uint16(len(domain))
 	msg.DomainNameMaxLen = msg.DomainNameLen
 	msg.DomainNameBufferOffset = msg.NtChallengeResponseBufferOffset + uint32(msg.NtChallengeResponseLen)
-	payloadBuff.Write(domain)
+	payload = append(payload, domain...)
 
 	msg.UserNameLen = uint16(len(user))
 	msg.UserNameMaxLen = msg.UserNameLen
 	msg.UserNameBufferOffset = msg.DomainNameBufferOffset + uint32(msg.DomainNameLen)
-	payloadBuff.Write(user)
+	payload = append(payload, user...)
 
 	msg.WorkstationLen = uint16(len(workstation))
 	msg.WorkstationMaxLen = msg.WorkstationLen
 	msg.WorkstationBufferOffset = msg.UserNameBufferOffset + uint32(msg.UserNameLen)
-	payloadBuff.Write(workstation)
+	payload = append(payload, workstation...)
 
 	msg.EncryptedRandomSessionLen = uint16(len(enRandomSessKey))
 	msg.EncryptedRandomSessionMaxLen = msg.EncryptedRandomSessionLen
 	msg.EncryptedRandomSessionBufferOffset = msg.WorkstationBufferOffset + uint32(msg.WorkstationLen)
-	payloadBuff.Write(enRandomSessKey)
+	payload = append(payload, enRandomSessKey...)
 
 	if (msg.NegotiateFlags & NTLMSSP_NEGOTIATE_VERSION) != 0 {
 		msg.Version = NewNVersion()
 	}
-	msg.Payload = payloadBuff.Bytes()
+	msg.Payload = payload
 
 	return msg
 }
@@ -319,25 +319,28 @@ func (n *NTLMv2) GetNegotiateMessage() *NegotiateMessage {
 func (n *NTLMv2) ComputeResponseV2(respKeyNT, respKeyLM, serverChallenge, clientChallenge,
 	timestamp, serverInfo []byte) (ntChallResp, lmChallResp, SessBaseKey []byte) {
 
-	tempBuff := &bytes.Buffer{}
-	tempBuff.Write([]byte{0x01, 0x01}) // Responser version, HiResponser version
-	tempBuff.Write([]byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00})
-	tempBuff.Write(timestamp)
-	tempBuff.Write(clientChallenge)
-	tempBuff.Write([]byte{0x00, 0x00, 0x00, 0x00})
-	tempBuff.Write(serverInfo)
+	// Build the temp blob: 2+6+8+8+4+len(serverInfo) bytes
+	temp := make([]byte, 0, 28+len(serverInfo))
+	temp = append(temp, 0x01, 0x01) // Responser version, HiResponser version
+	temp = append(temp, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
+	temp = append(temp, timestamp...)
+	temp = append(temp, clientChallenge...)
+	temp = append(temp, 0x00, 0x00, 0x00, 0x00)
+	temp = append(temp, serverInfo...)
 
-	ntBuf := bytes.NewBuffer(serverChallenge)
-	ntBuf.Write(tempBuff.Bytes())
-	ntProof := HMAC_MD5(respKeyNT, ntBuf.Bytes())
+	ntInput := make([]byte, 0, len(serverChallenge)+len(temp))
+	ntInput = append(ntInput, serverChallenge...)
+	ntInput = append(ntInput, temp...)
+	ntProof := HMAC_MD5(respKeyNT, ntInput)
 
-	ntChallResp = make([]byte, 0, len(ntProof)+tempBuff.Len())
+	ntChallResp = make([]byte, 0, len(ntProof)+len(temp))
 	ntChallResp = append(ntChallResp, ntProof...)
-	ntChallResp = append(ntChallResp, tempBuff.Bytes()...)
+	ntChallResp = append(ntChallResp, temp...)
 
-	lmBuf := bytes.NewBuffer(serverChallenge)
-	lmBuf.Write(clientChallenge)
-	lmChallResp = HMAC_MD5(respKeyLM, lmBuf.Bytes())
+	lmInput := make([]byte, 0, len(serverChallenge)+len(clientChallenge))
+	lmInput = append(lmInput, serverChallenge...)
+	lmInput = append(lmInput, clientChallenge...)
+	lmChallResp = HMAC_MD5(respKeyLM, lmInput)
 	lmChallResp = append(lmChallResp, clientChallenge...)
 
 	SessBaseKey = HMAC_MD5(respKeyNT, ntProof)
@@ -345,11 +348,14 @@ func (n *NTLMv2) ComputeResponseV2(respKeyNT, respKeyLM, serverChallenge, client
 }
 
 func MIC(exportedSessionKey []byte, negotiateMessage, challengeMessage, authenticateMessage Message) []byte {
-	buff := bytes.Buffer{}
-	buff.Write(negotiateMessage.Serialize())
-	buff.Write(challengeMessage.Serialize())
-	buff.Write(authenticateMessage.Serialize())
-	return HMAC_MD5(exportedSessionKey, buff.Bytes())
+	neg := negotiateMessage.Serialize()
+	chal := challengeMessage.Serialize()
+	auth := authenticateMessage.Serialize()
+	data := make([]byte, 0, len(neg)+len(chal)+len(auth))
+	data = append(data, neg...)
+	data = append(data, chal...)
+	data = append(data, auth...)
+	return HMAC_MD5(exportedSessionKey, data)
 }
 
 func concat(bs ...[]byte) []byte {

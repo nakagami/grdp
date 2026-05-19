@@ -180,7 +180,7 @@ func (d *rfxDecoder) decodeTileset(data []byte, left, top int, surfData []byte, 
 	type tileWork struct {
 		content []byte
 	}
-	var tiles []tileWork
+	tiles := make([]tileWork, 0, numTiles)
 	for range numTiles {
 		if off+6 > len(data) {
 			break

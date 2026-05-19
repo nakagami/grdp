@@ -89,7 +89,7 @@ func (d *rfxProgressiveDecoder) parseRegion(data []byte, surfData []byte, outW, 
 	numQuant := data[3]
 	numProgQuant := data[4]
 	// flags := data[5]
-	// numTiles := binary.LittleEndian.Uint16(data[6:])
+	numTiles := binary.LittleEndian.Uint16(data[6:])
 	// tileDataSize := binary.LittleEndian.Uint32(data[8:])
 
 	offset := 12
@@ -128,7 +128,7 @@ func (d *rfxProgressiveDecoder) parseRegion(data []byte, surfData []byte, outW, 
 		tileType uint16
 		data     []byte
 	}
-	var tiles []progTileWork
+	tiles := make([]progTileWork, 0, numTiles)
 	for offset+6 <= len(data) {
 		tileType := binary.LittleEndian.Uint16(data[offset:])
 		tileLen := binary.LittleEndian.Uint32(data[offset+2:])

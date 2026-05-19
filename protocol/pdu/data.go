@@ -6,10 +6,18 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sync"
 
 	"github.com/lunixbochs/struc"
 	"github.com/nakagami/grdp/core"
 )
+
+// capBuffPool pools bytes.Buffer instances used to serialize individual
+// capability structures inside DemandActivePDU and ConfirmActivePDU.
+// Each Serialize call borrows one buffer and returns it when done.
+var capBuffPool = sync.Pool{
+	New: func() any { return &bytes.Buffer{} },
+}
 
 // DecodeRemoteFX is a pluggable decoder for RemoteFX (MS-RDPRFX) surface codec
 // data. It is set at init time by the main client package to avoid a circular
@@ -255,14 +263,16 @@ func (d *DemandActivePDU) Serialize() []byte {
 	core.WriteBytes([]byte(d.SourceDescriptor), buff)
 	core.WriteUInt16LE(uint16(len(d.CapabilitySets)), buff)
 	core.WriteUInt16LE(d.Pad2Octets, buff)
+	capBuff := capBuffPool.Get().(*bytes.Buffer)
 	for _, cap := range d.CapabilitySets {
 		core.WriteUInt16LE(uint16(cap.Type()), buff)
-		capBuff := &bytes.Buffer{}
+		capBuff.Reset()
 		struc.Pack(capBuff, cap)
 		capBytes := capBuff.Bytes()
 		core.WriteUInt16LE(uint16(len(capBytes)+4), buff)
 		core.WriteBytes(capBytes, buff)
 	}
+	capBuffPool.Put(capBuff)
 	core.WriteUInt32LE(d.SessionId, buff)
 	return buff.Bytes()
 }
@@ -322,14 +332,16 @@ func (c *ConfirmActivePDU) Serialize() []byte {
 	core.WriteUInt16LE(uint16(len(c.SourceDescriptor)), buff)
 
 	capsBuff := &bytes.Buffer{}
+	capBuff := capBuffPool.Get().(*bytes.Buffer)
 	for _, capa := range c.CapabilitySets {
 		core.WriteUInt16LE(uint16(capa.Type()), capsBuff)
-		capBuff := &bytes.Buffer{}
+		capBuff.Reset()
 		struc.Pack(capBuff, capa)
 		capBytes := capBuff.Bytes()
 		core.WriteUInt16LE(uint16(len(capBytes)+4), capsBuff)
 		core.WriteBytes(capBytes, capsBuff)
 	}
+	capBuffPool.Put(capBuff)
 	capsBytes := capsBuff.Bytes()
 
 	core.WriteUInt16LE(uint16(2+2+len(capsBytes)), buff)
@@ -520,10 +532,15 @@ func (d *DataPDU) Serialize() []byte {
 }
 
 func NewDataPDU(data DataPDUData, shareId uint32) *DataPDU {
-	dataBuff := &bytes.Buffer{}
-	struc.Pack(dataBuff, data)
+	dataLen, err := struc.Sizeof(data)
+	if err != nil {
+		// Fallback: pack to measure length
+		dataBuff := &bytes.Buffer{}
+		struc.Pack(dataBuff, data)
+		dataLen = dataBuff.Len()
+	}
 	return &DataPDU{
-		Header: NewShareDataHeader(len(dataBuff.Bytes()), data.Type2(), shareId),
+		Header: NewShareDataHeader(dataLen, data.Type2(), shareId),
 		Data:   data,
 	}
 }
