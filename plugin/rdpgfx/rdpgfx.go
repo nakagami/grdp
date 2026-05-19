@@ -517,6 +517,9 @@ func (g *GfxHandler) maybeRenegotiateCapabilities() {
 	if g.decoderBrokenNotified {
 		return // reconnect already in flight
 	}
+	if g.lc2PermanentlyDegraded {
+		return // already degraded to LC=0 only; buffered watchdog signals must not re-enter
+	}
 	// Only act when the server has recently been sending LC=2 frames —
 	// a genuinely idle server needs no intervention.
 	lastLC2NS := g.lastLC2RecvTime.Load()
@@ -535,6 +538,7 @@ func (g *GfxHandler) maybeRenegotiateCapabilities() {
 		// primed.  Reconnecting would reproduce the same failure.  Degrade
 		// gracefully: LC=2 is silently skipped for the remainder of this session.
 		slog.Warn("H.264: server never sent stream2 in LC=0, LC=2 degraded to LC=0 only (no reconnect)")
+		g.lc2PermanentlyDegraded = true
 		return
 	}
 	if !g.lc2EverDecoded {
