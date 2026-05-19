@@ -658,19 +658,29 @@ func (g *GfxHandler) copyAVC444YToIDRCache() {
 // condition early lets decodeAVC444LC2 skip the combine and wait for real data.
 //
 // The check samples 6 positions spread across each half of the Y plane and
-// requires that a MAJORITY (more than half) of the sampled positions exceed
-// the threshold.  Requiring only a single non-zero sample is too easily fooled
-// by isolated codec-initialisation artefacts (Cb≈9) that appear in the IDR
-// while the rest of the frame is still zero; those sparse pixels pass the
-// single-sample test yet produce green blocks when combined.
+// requires that a MAJORITY (more than half) of the sampled positions are in
+// the valid chroma range [loThreshold, hiThreshold).
+//
+// Two failure modes are detected:
+//   - Near-zero (< 20): codec not yet initialised; Windows Server initialises
+//     stream2 IDR with Cb≈0, Cr≈0 and sometimes emits sparse artefact pixels
+//     (Cb≈9–12) that a threshold of 8 would pass.  Raising to 20 keeps those
+//     from triggering a combine that produces bright green blocks.
+//   - Near-saturation (≥ 235): indicates DPB mismatch or corruption in the aux
+//     decoder (h264dec2); a P-frame decoded against the wrong reference can
+//     produce near-maximal Y values in stream2, which encode Cb≈255/Cr≈255 and
+//     result in a pink/magenta overlay when combined with any luma.
 func isAuxChromaBlank(f *H264FrameI420) bool {
 	if f == nil || f.Width < 16 || f.Height < 4 || len(f.Y) == 0 {
 		return false
 	}
 	w, h, stride := f.Width, f.Height, f.YStride
 	halfW := w / 2
-	const threshold = 8
-	nonZero, total := 0, 0
+	const (
+		loThreshold = 20  // below this: near-zero (uninitialised chroma)
+		hiThreshold = 235 // at or above this: near-saturation (DPB corruption)
+	)
+	nearZero, nearSat, total := 0, 0, 0
 	for i := range 6 {
 		row := (i + 1) * h / 7
 		col := (i + 1) * halfW / 7
@@ -678,18 +688,27 @@ func isAuxChromaBlank(f *H264FrameI420) bool {
 			continue
 		}
 		total++
-		if f.Y[row*stride+col] >= threshold {
-			nonZero++
+		v := f.Y[row*stride+col]
+		if v < loThreshold {
+			nearZero++
+		} else if v >= hiThreshold {
+			nearSat++
 		}
 		if halfW+col < w {
 			total++
-			if f.Y[row*stride+halfW+col] >= threshold {
-				nonZero++
+			v2 := f.Y[row*stride+halfW+col]
+			if v2 < loThreshold {
+				nearZero++
+			} else if v2 >= hiThreshold {
+				nearSat++
 			}
 		}
 	}
-	// Blank if fewer than half of the sampled positions carry real chroma.
-	return total == 0 || nonZero*2 <= total
+	if total == 0 {
+		return false
+	}
+	// Blank if majority of samples are near-zero (uninitialised) or near-saturated (corrupted).
+	return nearZero*2 > total || nearSat*2 > total
 }
 
 // combineAVC444v2BGRA implements the AVC444v2 chroma reconstruction defined in
@@ -1039,13 +1058,15 @@ func (g *GfxHandler) decodeAVC444LC2(stream2 *avc420Stream, destW, destH int) (d
 		}
 		return
 	}
-	// Detect near-zero aux chroma: Windows Server initialises stream2 IDR
-	// with Y/U/V ≈ 0 (Cb=0, Cr=0) and only updates regions that change.
-	// A static desktop can take minutes to converge to real values.
-	// Combining zero chroma with any luma produces BGRA(0,135,0,255) —
-	// a bright green screen.  Drop the frame and wait for real data.
+	// Detect invalid aux chroma: two failure modes trigger this check.
+	//   1. Near-zero (Cb≈0, Cr≈0): Windows Server initialises stream2 IDR with
+	//      Y≈0 and only refreshes regions that change; combining zero chroma with
+	//      any luma produces BGRA(0,135,0,255) — a bright green screen.
+	//   2. Near-saturation (Cb≈255 or Cr≈255): DPB mismatch or aux decoder
+	//      corruption that produces near-maximal stream2 Y values; these encode
+	//      as extreme chroma and produce a pink/magenta overlay when combined.
 	if isAuxChromaBlank(i420aux) {
-		slog.Debug("RDPGFX: AVC444 LC=2 skipped (stream2 chroma not yet initialised, near-zero)")
+		slog.Debug("RDPGFX: AVC444 LC=2 skipped (stream2 chroma invalid: near-zero or near-saturated)")
 		return
 	}
 	// Select the luma plane for the combine.  When stream2 carries an IDR its
