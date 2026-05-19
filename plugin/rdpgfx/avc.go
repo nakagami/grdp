@@ -936,7 +936,7 @@ func (g *GfxHandler) primeAuxDecoder(h264Data []byte) {
 	if !ok {
 		return
 	}
-	_, _, err := i420dec.DecodeWithI420(h264Data)
+	_, i420primed, err := i420dec.DecodeWithI420(h264Data)
 	if err != nil {
 		slog.Debug("RDPGFX: AVC444 aux prime error", "err", err)
 	}
@@ -945,6 +945,19 @@ func (g *GfxHandler) primeAuxDecoder(h264Data []byte) {
 	// Check IsBroken() after the call to catch this case.
 	if g.h264dec2.IsBroken() {
 		slog.Debug("H.264: aux decoder broken after prime, waiting for IDR to recreate")
+		g.h264dec2.Close()
+		g.h264dec2 = nil
+		g.startAuxDecoderBrokenTimer()
+		return
+	}
+	// For P-frames, validate the decoded output.  If the primed output looks
+	// blank (near-zero or near-saturated chroma), the DPB is likely corrupted
+	// (e.g. due to a dropped LC=0 PDU that left h264dec2 out of sync).
+	// Reset h264dec2 immediately so the DPB corruption does not cascade into
+	// the subsequent LC=2 standalone decode.  The IDR case is excluded because
+	// near-zero output is expected during codec initialisation.
+	if !isIDR && i420primed != nil && isAuxChromaBlank(i420primed) {
+		slog.Debug("H.264: aux decoder DPB desynced during priming (P-frame blank chroma), resetting")
 		g.h264dec2.Close()
 		g.h264dec2 = nil
 		g.startAuxDecoderBrokenTimer()
@@ -1065,8 +1078,25 @@ func (g *GfxHandler) decodeAVC444LC2(stream2 *avc420Stream, destW, destH int) (d
 	//   2. Near-saturation (Cb≈255 or Cr≈255): DPB mismatch or aux decoder
 	//      corruption that produces near-maximal stream2 Y values; these encode
 	//      as extreme chroma and produce a pink/magenta overlay when combined.
+	// Determine IDR status before the blank-chroma check so it can drive the
+	// h264dec2 reset decision below.
+	stream2IsIDR := isH264Keyframe(stream2.h264Data)
 	if isAuxChromaBlank(i420aux) {
 		slog.Debug("RDPGFX: AVC444 LC=2 skipped (stream2 chroma invalid: near-zero or near-saturated)")
+		// For P-frames, corrupt chroma means h264dec2's DPB has diverged from
+		// the server's reference (typically from a dropped LC=0 PDU).  Decoding
+		// further P-frames against this wrong DPB would produce equally wrong
+		// output on every subsequent LC=2, perpetuating the pink/green artefact.
+		// Reset h264dec2 now so the DPB corruption does not cascade; recovery
+		// will happen automatically on the next stream2 IDR arriving in an LC=0.
+		// IDRs are excluded because near-zero chroma is expected at GOP start
+		// during stream2 codec initialisation and should not trigger a reset.
+		if !stream2IsIDR && g.h264dec2 != nil {
+			slog.Debug("H.264: aux decoder reset after P-frame blank chroma (DPB cascade prevention)")
+			g.h264dec2.Close()
+			g.h264dec2 = nil
+			g.startAuxDecoderBrokenTimer()
+		}
 		return
 	}
 	// Select the luma plane for the combine.  When stream2 carries an IDR its
@@ -1077,7 +1107,6 @@ func (g *GfxHandler) decodeAVC444LC2(stream2 *avc420Stream, destW, destH int) (d
 	// when the server delivers the stream2 IDR as a standalone LC=2 packet.
 	// Fall back to avc444YPlane when no IDR snapshot is available (e.g. the
 	// VideoToolbox pipeline delayed the IDR output past the P-frame boundary).
-	stream2IsIDR := isH264Keyframe(stream2.h264Data)
 	yp := &g.avc444YPlane
 	if stream2IsIDR && g.avc444IDRYPlane.w > 0 {
 		yp = &g.avc444IDRYPlane
