@@ -322,6 +322,14 @@ func (g *GfxHandler) decodeAVC444(data []byte, destX, destY, destW, destH int) (
 		slog.Warn("RDPGFX: H.264 decode error (AVC444)", "err", err)
 		return nil, nil, false
 	}
+	// Prime the aux decoder before any nil/drop checks so the stream2 IDR is
+	// never lost.  On macOS, VideoToolbox returns nil frames for 1–3 s during
+	// initial warm-up; without this early call the stream2 IDR carried by the
+	// first LC=0 packet would be discarded (h264dec2 never created) and the
+	// renegotiation timer would degrade LC=2 to LC=0-only after retrying.
+	if lc == 0 && stream2 != nil && len(stream2.h264Data) > 0 {
+		g.primeAuxDecoder(stream2.h264Data)
+	}
 	if frame == nil {
 		if i420out == nil {
 			g.maybeRequestKeyframe()
@@ -336,12 +344,6 @@ func (g *GfxHandler) decodeAVC444(data []byte, destX, destY, destW, destH int) (
 			return nil, nil, false
 		}
 		frame = &H264Frame{Data: bgra, Width: i420out.Width, Height: i420out.Height}
-	}
-	// Prime the aux decoder with stream2 IDR data even when the main frame
-	// was zero-filled: stream2 is independent of the VideoToolbox pipeline and
-	// its IDR must not be discarded just because the IOSurface wasn't ready.
-	if lc == 0 && stream2 != nil && len(stream2.h264Data) > 0 {
-		g.primeAuxDecoder(stream2.h264Data)
 	}
 	if frame.Dropped {
 		slog.Debug("RDPGFX: AVC444 frame intentionally dropped (zero-fill)")
