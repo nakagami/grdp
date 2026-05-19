@@ -980,12 +980,25 @@ func (g *GfxHandler) decodeAVC444LC2(stream2 *avc420Stream, destW, destH int) (d
 			// without arming the timer to avoid an endless renegotiation loop.
 			return
 		}
-		slog.Debug("RDPGFX: AVC444 LC=2 skipped (no aux decoder)")
-		// Arm the renegotiation timer so maybeRenegotiateCapabilities fires if
-		// no stream2 IDR arrives to prime h264dec2 within auxDecoderBrokenTimeout.
-		// This is idempotent — subsequent calls are no-ops while the timer runs.
-		g.startAuxDecoderBrokenTimer()
-		return
+		// If this standalone LC=2 frame carries an IDR, use it to create and
+		// prime h264dec2 directly.  Some servers deliver the ForceRefresh IDR
+		// response as LC=1 (luma only) rather than LC=0 (both streams), so the
+		// IDR in the "duplicate" standalone LC=2 packet is the only opportunity
+		// to initialise the aux decoder without a full reconnect.
+		if stream2 != nil && len(stream2.h264Data) > 0 && isH264Keyframe(stream2.h264Data) {
+			slog.Debug("H.264: creating aux decoder from standalone LC=2 IDR")
+			g.h264dec2 = newH264DecoderSW()
+			g.stopAuxDecoderBrokenTimer()
+			g.auxDecoderNoIDRRetries = 0
+			// Fall through to the decode path below.
+		} else {
+			slog.Debug("RDPGFX: AVC444 LC=2 skipped (no aux decoder)")
+			// Arm the renegotiation timer so maybeRenegotiateCapabilities fires if
+			// no stream2 IDR arrives to prime h264dec2 within auxDecoderBrokenTimeout.
+			// This is idempotent — subsequent calls are no-ops while the timer runs.
+			g.startAuxDecoderBrokenTimer()
+			return
+		}
 	}
 	if stream2 == nil || len(stream2.h264Data) == 0 {
 		slog.Debug("RDPGFX: AVC444 LC=2 skipped (empty aux stream)")
