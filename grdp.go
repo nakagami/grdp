@@ -96,6 +96,10 @@ type RdpClient struct {
 	mouseY       int
 	mouseTimer   *time.Timer
 	mouseLastTx  time.Time
+	// Pre-allocated mouse-move PDU and single-element slice, reused under
+	// mouseMu to eliminate per-move heap allocations on the hot path.
+	mousePDU    pdu.PointerEvent
+	mousePDUBuf [1]pdu.InputEventsInterface
 
 	// Wheel-scroll coalescing.  Rapid scroll events are accumulated over
 	// mouseCoalesceInterval and sent as a single PDU whose rotation value
@@ -105,6 +109,9 @@ type RdpClient struct {
 	wheelAccum  float64
 	wheelTimer  *time.Timer
 	wheelLastTx time.Time
+	// Pre-allocated wheel PDU and single-element slice, reused under wheelMu.
+	wheelPDU    pdu.PointerEvent
+	wheelPDUBuf [1]pdu.InputEventsInterface
 
 	// reconnectMu serialises concurrent Reconnect() calls.
 	reconnectMu  sync.Mutex
@@ -194,7 +201,7 @@ func (bm *Bitmap) RGBA() *image.RGBA {
 }
 
 func NewRdpClient(host string, width, height int, dialer func(string) (net.Conn, error)) *RdpClient {
-	return &RdpClient{
+	g := &RdpClient{
 		hostPort:        host,
 		width:           width,
 		height:          height,
@@ -209,6 +216,11 @@ func NewRdpClient(host string, width, height int, dialer func(string) (net.Conn,
 			New: func() any { return []uint8(nil) },
 		},
 	}
+	// Point the cached single-element slices at the cached PDU fields so
+	// sendMouseMoveLocked / sendWheelLocked need no per-call allocations.
+	g.mousePDUBuf[0] = &g.mousePDU
+	g.wheelPDUBuf[0] = &g.wheelPDU
+	return g
 }
 
 var keyboardLayoutMap = map[string]uint32{
@@ -937,14 +949,12 @@ func (g *RdpClient) flushMouseMoveTimer() {
 
 // sendMouseMoveLocked must be called with mouseMu held.
 func (g *RdpClient) sendMouseMoveLocked(now time.Time) {
-	p := &pdu.PointerEvent{
-		PointerFlags: pdu.PTRFLAGS_MOVE,
-		XPos:         uint16(g.mouseX),
-		YPos:         uint16(g.mouseY),
-	}
+	g.mousePDU.PointerFlags = pdu.PTRFLAGS_MOVE
+	g.mousePDU.XPos = uint16(g.mouseX)
+	g.mousePDU.YPos = uint16(g.mouseY)
 	g.mousePending = false
 	g.mouseLastTx = now
-	g.pdu.SendInputEvents(pdu.INPUT_EVENT_MOUSE, []pdu.InputEventsInterface{p})
+	g.pdu.SendInputEvents(pdu.INPUT_EVENT_MOUSE, g.mousePDUBuf[:])
 }
 
 // MouseWheel sends a vertical scroll event to the remote desktop.
@@ -1040,15 +1050,14 @@ func (g *RdpClient) sendWheelLocked(now time.Time) {
 		cval := min(iaccum, 0xFF)
 		iaccum -= cval
 
-		p := &pdu.PointerEvent{}
 		if negative {
 			// 9-bit two's complement: keep flags in bits 8–15, set bits 0–7
 			// to (0x100 - cval) so the receiver recovers the correct magnitude.
-			p.PointerFlags = (baseFlags & 0xFF00) | uint16(0x100-cval)
+			g.wheelPDU.PointerFlags = (baseFlags & 0xFF00) | uint16(0x100-cval)
 		} else {
-			p.PointerFlags = baseFlags | uint16(cval)
+			g.wheelPDU.PointerFlags = baseFlags | uint16(cval)
 		}
-		g.pdu.SendInputEvents(pdu.INPUT_EVENT_MOUSE, []pdu.InputEventsInterface{p})
+		g.pdu.SendInputEvents(pdu.INPUT_EVENT_MOUSE, g.wheelPDUBuf[:])
 	}
 	g.notifyGfxLocalInput()
 }

@@ -391,7 +391,7 @@ func readConfirmActivePDU(r io.Reader) (*ConfirmActivePDU, error) {
 	p.NumberCapabilities, err = core.ReadUint16LE(r)
 	p.Pad2Octets, err = core.ReadUint16LE(r)
 
-	p.CapabilitySets = make([]Capability, 0)
+	p.CapabilitySets = make([]Capability, 0, p.NumberCapabilities)
 	for i := 0; i < int(p.NumberCapabilities); i++ {
 		c, err := readCapability(r)
 		if err != nil {

@@ -80,15 +80,19 @@ type AudioFormat struct {
 }
 
 func (f AudioFormat) String() string {
-	names := map[uint16]string{
-		WAVE_FORMAT_PCM:   "PCM",
-		WAVE_FORMAT_ADPCM: "ADPCM",
-		WAVE_FORMAT_ALAW:  "A-Law",
-		WAVE_FORMAT_MULAW: "μ-Law",
-		WAVE_FORMAT_AAC:   "AAC",
-	}
-	name, ok := names[f.Tag]
-	if !ok {
+	var name string
+	switch f.Tag {
+	case WAVE_FORMAT_PCM:
+		name = "PCM"
+	case WAVE_FORMAT_ADPCM:
+		name = "ADPCM"
+	case WAVE_FORMAT_ALAW:
+		name = "A-Law"
+	case WAVE_FORMAT_MULAW:
+		name = "μ-Law"
+	case WAVE_FORMAT_AAC:
+		name = "AAC"
+	default:
 		name = fmt.Sprintf("0x%04x", f.Tag)
 	}
 	return fmt.Sprintf("%s %dHz %dch %dbit", name, f.SamplesPerSec, f.Channels, f.BitsPerSample)
@@ -104,16 +108,16 @@ func (f AudioFormat) IsAAC() bool {
 }
 
 func (f AudioFormat) pack() []byte {
-	b := &bytes.Buffer{}
-	binary.Write(b, binary.LittleEndian, f.Tag)
-	binary.Write(b, binary.LittleEndian, f.Channels)
-	binary.Write(b, binary.LittleEndian, f.SamplesPerSec)
-	binary.Write(b, binary.LittleEndian, f.AvgBytesPerSec)
-	binary.Write(b, binary.LittleEndian, f.BlockAlign)
-	binary.Write(b, binary.LittleEndian, f.BitsPerSample)
-	binary.Write(b, binary.LittleEndian, uint16(len(f.ExtraData)))
-	b.Write(f.ExtraData)
-	return b.Bytes()
+	b := make([]byte, 18+len(f.ExtraData))
+	binary.LittleEndian.PutUint16(b[0:], f.Tag)
+	binary.LittleEndian.PutUint16(b[2:], f.Channels)
+	binary.LittleEndian.PutUint32(b[4:], f.SamplesPerSec)
+	binary.LittleEndian.PutUint32(b[8:], f.AvgBytesPerSec)
+	binary.LittleEndian.PutUint16(b[12:], f.BlockAlign)
+	binary.LittleEndian.PutUint16(b[14:], f.BitsPerSample)
+	binary.LittleEndian.PutUint16(b[16:], uint16(len(f.ExtraData)))
+	copy(b[18:], f.ExtraData)
+	return b
 }
 
 func unpackAudioFormat(data []byte, offset int) (AudioFormat, int) {
@@ -330,14 +334,13 @@ func (h *Handler) sendClientFormats(serverVersion uint16) {
 // --- Quality Mode (MS-RDPEA 2.2.2.9) ---
 
 func (h *Handler) sendQualityMode() {
-	pdu := &bytes.Buffer{}
-	pdu.WriteByte(SNDC_QUALITYMODE)
-	pdu.WriteByte(0)                                                // bPad
-	binary.Write(pdu, binary.LittleEndian, uint16(4))               // bodySize
-	binary.Write(pdu, binary.LittleEndian, uint16(HIGH_QUALITY)) // wQualityMode
-	binary.Write(pdu, binary.LittleEndian, uint16(0))               // Reserved
-
-	h.send(pdu.Bytes())
+	pdu := [8]byte{
+		SNDC_QUALITYMODE, 0,
+		4, 0, // bodySize = 4 (little-endian uint16)
+	}
+	binary.LittleEndian.PutUint16(pdu[4:], HIGH_QUALITY)
+	// pdu[6:8] = Reserved, already zero
+	h.send(pdu[:])
 	slog.Debug("rdpsnd: sent QualityMode")
 }
 
@@ -351,14 +354,10 @@ func (h *Handler) processTraining(body []byte) {
 	wPackSize := binary.LittleEndian.Uint16(body[2:])
 	slog.Debug("rdpsnd: Training", "timestamp", wTimeStamp, "packSize", wPackSize)
 
-	pdu := &bytes.Buffer{}
-	pdu.WriteByte(SNDC_TRAINING)
-	pdu.WriteByte(0)
-	binary.Write(pdu, binary.LittleEndian, uint16(4)) // bodySize
-	binary.Write(pdu, binary.LittleEndian, wTimeStamp)
-	binary.Write(pdu, binary.LittleEndian, wPackSize)
-
-	h.send(pdu.Bytes())
+	pdu := [8]byte{SNDC_TRAINING, 0, 4, 0} // msgType, bPad, bodySize=4 (LE)
+	binary.LittleEndian.PutUint16(pdu[4:], wTimeStamp)
+	binary.LittleEndian.PutUint16(pdu[6:], wPackSize)
+	h.send(pdu[:])
 	slog.Debug("rdpsnd: sent Training Confirm")
 }
 
@@ -455,15 +454,14 @@ func waveConfirmTimestamp(serverTs uint16, audioData []byte, fmt AudioFormat) ui
 }
 
 func (h *Handler) sendWaveConfirm(timestamp uint16, blockNo uint8) {
-	pdu := &bytes.Buffer{}
-	pdu.WriteByte(SNDC_WAVECONFIRM)
-	pdu.WriteByte(0)                                  // bPad
-	binary.Write(pdu, binary.LittleEndian, uint16(4)) // bodySize
-	binary.Write(pdu, binary.LittleEndian, timestamp)
-	pdu.WriteByte(blockNo) // cConfBlockNo
-	pdu.WriteByte(0)       // bPad
-
-	h.send(pdu.Bytes())
+	var pdu [8]byte
+	pdu[0] = SNDC_WAVECONFIRM
+	// pdu[1] = bPad (zero)
+	pdu[2] = 4 // bodySize = 4 (little-endian uint16, high byte stays 0)
+	binary.LittleEndian.PutUint16(pdu[4:], timestamp)
+	pdu[6] = blockNo
+	// pdu[7] = bPad (zero)
+	h.send(pdu[:])
 	slog.Debug("rdpsnd: sent WaveConfirm", "ts", timestamp, "block", blockNo)
 }
 

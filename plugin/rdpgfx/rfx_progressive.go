@@ -5,7 +5,6 @@ package rdpgfx
 
 import (
 	"encoding/binary"
-	"fmt"
 	"log/slog"
 	"runtime"
 	"sync"
@@ -67,7 +66,7 @@ func (d *rfxProgressiveDecoder) Decode(data []byte, surfData []byte, width, heig
 			regionRects, _ := d.parseRegion(blockData, surfData, width, height)
 			rects = append(rects, regionRects...)
 		default:
-			slog.Debug(fmt.Sprintf("RFX: unknown progressive block 0x%04X", blockType))
+			slog.Debug("RFX: unknown progressive block type", "type", blockType)
 		}
 
 		offset += int(blockLen)
@@ -142,7 +141,7 @@ func (d *rfxProgressiveDecoder) parseRegion(data []byte, surfData []byte, outW, 
 		case progWBTTileUpgrade:
 			// Progressive upgrade pass — first pass is sufficient for display.
 		default:
-			slog.Debug(fmt.Sprintf("RFX: unknown progressive tile type 0x%04X", tileType))
+			slog.Debug("RFX: unknown progressive tile type", "type", tileType)
 		}
 		offset += int(tileLen)
 	}
