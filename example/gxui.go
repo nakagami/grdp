@@ -26,6 +26,7 @@ import (
 
 	"github.com/nakagami/grdp"
 	"github.com/nakagami/grdp/plugin/rdpsnd"
+	"github.com/nakagami/grdp/plugin/rdpsnd/aac"
 )
 
 // audioStream is a thread-safe buffer that bridges the RDPSND OnAudio
@@ -275,7 +276,7 @@ var (
 
 	// aacDec is the active AAC decoder; recreated whenever the server switches
 	// to a different AAC format.  Accessed only from the OnAudio callback.
-	aacDec       *aacDecoder
+	aacDec       aac.Decoder
 	aacDecFormat aacFormatKey
 )
 
@@ -609,7 +610,7 @@ func aacDecodeChunk(af rdpsnd.AudioFormat, data []byte) ([]byte, error) {
 			aacDec.Close()
 			aacDec = nil
 		}
-		dec, err := newAACDecoder(af)
+		dec, err := aac.New(af)
 		if err != nil {
 			return nil, err
 		}

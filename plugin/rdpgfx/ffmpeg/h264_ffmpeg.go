@@ -1,6 +1,6 @@
 //go:build h264
 
-package main
+package ffmpeg
 
 /*
 #cgo pkg-config: libavcodec libavutil libswscale

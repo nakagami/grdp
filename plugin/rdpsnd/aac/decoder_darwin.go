@@ -1,6 +1,6 @@
 //go:build darwin && cgo
 
-package main
+package aac
 
 /*
 #cgo LDFLAGS: -framework AudioToolbox
@@ -138,18 +138,15 @@ import (
 	"github.com/nakagami/grdp/plugin/rdpsnd"
 )
 
-// aacDecoder decodes MPEG-4 AAC audio into signed 16-bit PCM using
+// darwinDecoder decodes MPEG-4 AAC audio into signed 16-bit PCM using
 // macOS AudioToolbox (hardware-accelerated on Apple Silicon / Intel iGPU).
-type aacDecoder struct {
+type darwinDecoder struct {
 	conv     C.AudioConverterRef
 	channels int
 	outBuf   []byte // reusable output scratch buffer
 }
 
-// newAACDecoder creates an aacDecoder for the given RDPSND AudioFormat.
-// format.ExtraData should contain the AudioSpecificConfig (ASC) from the
-// WAVEFORMATEX cbSize bytes; pass an empty ExtraData for ADTS-framed input.
-func newAACDecoder(format rdpsnd.AudioFormat) (*aacDecoder, error) {
+func newDecoder(format rdpsnd.AudioFormat) (Decoder, error) {
 	var oscErr C.OSStatus
 	var ascPtr *C.uint8_t
 	ascLen := C.uint32_t(0)
@@ -174,12 +171,12 @@ func newAACDecoder(format rdpsnd.AudioFormat) (*aacDecoder, error) {
 		"ascLen", len(format.ExtraData))
 	// 4096 samples × channels × 2 bytes/sample — large enough for AAC-HE at 2 ch.
 	outBufSize := 4096 * int(format.Channels) * 2
-	return &aacDecoder{conv: conv, channels: int(format.Channels), outBuf: make([]byte, outBufSize)}, nil
+	return &darwinDecoder{conv: conv, channels: int(format.Channels), outBuf: make([]byte, outBufSize)}, nil
 }
 
 // Decode decodes one raw AAC packet into signed 16-bit little-endian PCM.
 // Returns nil, nil when data is empty.
-func (d *aacDecoder) Decode(data []byte) ([]byte, error) {
+func (d *darwinDecoder) Decode(data []byte) ([]byte, error) {
 	if len(data) == 0 {
 		return nil, nil
 	}
@@ -205,7 +202,7 @@ func (d *aacDecoder) Decode(data []byte) ([]byte, error) {
 }
 
 // Close releases the AudioConverter.
-func (d *aacDecoder) Close() {
+func (d *darwinDecoder) Close() {
 	if d.conv != nil {
 		C.AudioConverterDispose(d.conv)
 		d.conv = nil
