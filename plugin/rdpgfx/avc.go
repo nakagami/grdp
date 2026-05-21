@@ -1315,6 +1315,20 @@ func (g *GfxHandler) maybeNotifyDecoderBroken() {
 		return
 	}
 	reason := g.h264dec.BrokenReason()
+	if reason == H264BrokenReasonNoIDR && g.h264dec.LastReceiveTime().IsZero() {
+		// The H.264 decoder's keyframe-wait timer fired, but the decoder has
+		// never received any data (LastReceiveTime is zero).  This means the
+		// server is using a non-H.264 codec (e.g. CA Progressive / codecId=9)
+		// for the entire session and will never send H.264 frames.
+		// Sending ForceRefresh or reconnecting would disrupt the session
+		// unnecessarily — Ubuntu GNOME Remote Desktop responds to ForceRefresh
+		// with DEACTIVATEALLPDU followed by a disconnect.
+		// Disable the H.264 decoder so the watchdog can never fire again.
+		slog.Debug("H.264: watchdog fired but no H.264 data received — server uses non-H.264 codec, disabling H.264 decoder")
+		g.h264dec.Close()
+		g.h264dec = nil
+		return
+	}
 	if reason == H264BrokenReasonNoIDR {
 		// Allow one no-IDR soft reset before escalating to reconnect.
 		// ForceRefresh (SuppressOutput toggle) often fails to trigger a new

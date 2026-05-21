@@ -1228,6 +1228,7 @@ func (g *GfxHandler) onResetGraphics(data []byte) {
 	}
 	g.avc444YPlane = avc444YPlane{}
 	g.avc444IDRYPlane = avc444YPlane{}
+	g.progressive.Reset()
 }
 
 func (g *GfxHandler) onCreateSurface(data []byte) {

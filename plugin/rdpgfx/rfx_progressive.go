@@ -31,10 +31,33 @@ type rfxQuant struct {
 	LH1, HL1, HH1      uint8
 }
 
-type rfxProgressiveDecoder struct{}
+// rfxTileCoeffs holds the raw RLGR-decoded coefficients for one tile (all three
+// components), stored before LL3 differential decode and dequantization.  This
+// state is required to apply TILE_UPGRADE_FIRST delta data on top of a previous
+// TILE_FIRST (or TILE_SIMPLE) pass.
+type rfxTileCoeffs struct {
+	y  []int16
+	cb []int16
+	cr []int16
+}
+
+type rfxProgressiveDecoder struct {
+	mu        sync.Mutex
+	tileCache map[uint32]*rfxTileCoeffs // key: yIdx<<16 | xIdx
+}
 
 func newRfxProgressiveDecoder() *rfxProgressiveDecoder {
-	return &rfxProgressiveDecoder{}
+	return &rfxProgressiveDecoder{
+		tileCache: make(map[uint32]*rfxTileCoeffs),
+	}
+}
+
+// Reset discards the tile coefficient cache.  Call this whenever the server
+// starts a new progressive sequence (e.g. on RESET_GRAPHICS).
+func (d *rfxProgressiveDecoder) Reset() {
+	d.mu.Lock()
+	d.tileCache = make(map[uint32]*rfxTileCoeffs)
+	d.mu.Unlock()
 }
 
 // rfxRect represents a rectangle of decoded tiles.
@@ -136,10 +159,8 @@ func (d *rfxProgressiveDecoder) parseRegion(data []byte, surfData []byte, outW, 
 			break
 		}
 		switch tileType {
-		case progWBTTileSimple, progWBTTileFirst:
+		case progWBTTileSimple, progWBTTileFirst, progWBTTileUpgrade:
 			tiles = append(tiles, progTileWork{tileType: tileType, data: data[offset+6 : offset+int(tileLen)]})
-		case progWBTTileUpgrade:
-			// Progressive upgrade pass — first pass is sufficient for display.
 		default:
 			slog.Debug("RFX: unknown progressive tile type", "type", tileType)
 		}
@@ -153,6 +174,8 @@ func (d *rfxProgressiveDecoder) parseRegion(data []byte, surfData []byte, outW, 
 			d.decodeTileSimple(tw.data, quants, surfData, outW, outH, parallel)
 		case progWBTTileFirst:
 			d.decodeTileFirst(tw.data, quants, surfData, outW, outH, parallel)
+		case progWBTTileUpgrade:
+			d.decodeTileUpgrade(tw.data, quants, surfData, outW, outH, parallel)
 		}
 	}
 	if len(tiles) >= parallelTileThreshold {
@@ -231,19 +254,25 @@ func (d *rfxProgressiveDecoder) decodeTileSimple(data []byte, quants []rfxQuant,
 	qCr := rfxGetQuant(quants, int(quantIdxCr))
 
 	var yPixels, cbPixels, crPixels []int16
+	var newY, newCb, newCr []int16
 	if parallelComponents {
 		var wg sync.WaitGroup
-		wg.Go(func() { yPixels = rfxDecodeComponent(yData, qY, 1) })
-		wg.Go(func() { cbPixels = rfxDecodeComponent(cbData, qCb, 1) })
-		wg.Go(func() { crPixels = rfxDecodeComponent(crData, qCr, 1) })
+		wg.Go(func() { yPixels, newY = rfxDecodeComponentProgressive(yData, qY, nil) })
+		wg.Go(func() { cbPixels, newCb = rfxDecodeComponentProgressive(cbData, qCb, nil) })
+		wg.Go(func() { crPixels, newCr = rfxDecodeComponentProgressive(crData, qCr, nil) })
 		wg.Wait()
 	} else {
-		yPixels = rfxDecodeComponent(yData, qY, 1)
-		cbPixels = rfxDecodeComponent(cbData, qCb, 1)
-		crPixels = rfxDecodeComponent(crData, qCr, 1)
+		yPixels, newY = rfxDecodeComponentProgressive(yData, qY, nil)
+		cbPixels, newCb = rfxDecodeComponentProgressive(cbData, qCb, nil)
+		crPixels, newCr = rfxDecodeComponentProgressive(crData, qCr, nil)
 	}
 
 	rfxPlaceTile(yPixels, cbPixels, crPixels, int(xIdx), int(yIdx), output, outW, outH)
+
+	tileKey := uint32(yIdx)<<16 | uint32(xIdx)
+	d.mu.Lock()
+	d.tileCache[tileKey] = &rfxTileCoeffs{y: newY, cb: newCb, cr: newCr}
+	d.mu.Unlock()
 
 	coeffPool.Put((*coeffArr)(yPixels))
 	coeffPool.Put((*coeffArr)(cbPixels))
@@ -282,19 +311,94 @@ func (d *rfxProgressiveDecoder) decodeTileFirst(data []byte, quants []rfxQuant, 
 	qCr := rfxGetQuant(quants, int(quantIdxCr))
 
 	var yPixels, cbPixels, crPixels []int16
+	var newY, newCb, newCr []int16
 	if parallelComponents {
 		var wg sync.WaitGroup
-		wg.Go(func() { yPixels = rfxDecodeComponent(yData, qY, 1) })
-		wg.Go(func() { cbPixels = rfxDecodeComponent(cbData, qCb, 1) })
-		wg.Go(func() { crPixels = rfxDecodeComponent(crData, qCr, 1) })
+		wg.Go(func() { yPixels, newY = rfxDecodeComponentProgressive(yData, qY, nil) })
+		wg.Go(func() { cbPixels, newCb = rfxDecodeComponentProgressive(cbData, qCb, nil) })
+		wg.Go(func() { crPixels, newCr = rfxDecodeComponentProgressive(crData, qCr, nil) })
 		wg.Wait()
 	} else {
-		yPixels = rfxDecodeComponent(yData, qY, 1)
-		cbPixels = rfxDecodeComponent(cbData, qCb, 1)
-		crPixels = rfxDecodeComponent(crData, qCr, 1)
+		yPixels, newY = rfxDecodeComponentProgressive(yData, qY, nil)
+		cbPixels, newCb = rfxDecodeComponentProgressive(cbData, qCb, nil)
+		crPixels, newCr = rfxDecodeComponentProgressive(crData, qCr, nil)
 	}
 
 	rfxPlaceTile(yPixels, cbPixels, crPixels, int(xIdx), int(yIdx), output, outW, outH)
+
+	tileKey := uint32(yIdx)<<16 | uint32(xIdx)
+	d.mu.Lock()
+	d.tileCache[tileKey] = &rfxTileCoeffs{y: newY, cb: newCb, cr: newCr}
+	d.mu.Unlock()
+
+	coeffPool.Put((*coeffArr)(yPixels))
+	coeffPool.Put((*coeffArr)(cbPixels))
+	coeffPool.Put((*coeffArr)(crPixels))
+}
+
+// decodeTileUpgrade handles PROGRESSIVE_WBT_TILE_UPGRADE_FIRST (0xCCC7).
+// The upgrade data contains RLGR-encoded delta coefficients that are added to
+// the raw coefficients cached from the preceding TILE_FIRST (or TILE_SIMPLE)
+// pass.  If no cached state exists for the tile (e.g. the session started
+// mid-stream), the delta is decoded as if it were a standalone tile so that
+// at least some image is rendered rather than nothing.
+func (d *rfxProgressiveDecoder) decodeTileUpgrade(data []byte, quants []rfxQuant, output []byte, outW, outH int, parallelComponents bool) {
+	if len(data) < 17 {
+		return
+	}
+
+	quantIdxY := data[0]
+	quantIdxCb := data[1]
+	quantIdxCr := data[2]
+	xIdx := binary.LittleEndian.Uint16(data[3:])
+	yIdx := binary.LittleEndian.Uint16(data[5:])
+	// flags := data[7]
+	// quality := data[8]
+	yLen := binary.LittleEndian.Uint16(data[9:])
+	cbLen := binary.LittleEndian.Uint16(data[11:])
+	crLen := binary.LittleEndian.Uint16(data[13:])
+	// tailLen := binary.LittleEndian.Uint16(data[15:])
+
+	off := 17
+	yData := safeSlice(data, off, int(yLen))
+	off += int(yLen)
+	cbData := safeSlice(data, off, int(cbLen))
+	off += int(cbLen)
+	crData := safeSlice(data, off, int(crLen))
+
+	qY := rfxGetQuant(quants, int(quantIdxY))
+	qCb := rfxGetQuant(quants, int(quantIdxCb))
+	qCr := rfxGetQuant(quants, int(quantIdxCr))
+
+	tileKey := uint32(yIdx)<<16 | uint32(xIdx)
+	d.mu.Lock()
+	cached := d.tileCache[tileKey]
+	d.mu.Unlock()
+
+	var prevY, prevCb, prevCr []int16
+	if cached != nil {
+		prevY, prevCb, prevCr = cached.y, cached.cb, cached.cr
+	}
+
+	var yPixels, cbPixels, crPixels []int16
+	var newY, newCb, newCr []int16
+	if parallelComponents {
+		var wg sync.WaitGroup
+		wg.Go(func() { yPixels, newY = rfxDecodeComponentProgressive(yData, qY, prevY) })
+		wg.Go(func() { cbPixels, newCb = rfxDecodeComponentProgressive(cbData, qCb, prevCb) })
+		wg.Go(func() { crPixels, newCr = rfxDecodeComponentProgressive(crData, qCr, prevCr) })
+		wg.Wait()
+	} else {
+		yPixels, newY = rfxDecodeComponentProgressive(yData, qY, prevY)
+		cbPixels, newCb = rfxDecodeComponentProgressive(cbData, qCb, prevCb)
+		crPixels, newCr = rfxDecodeComponentProgressive(crData, qCr, prevCr)
+	}
+
+	rfxPlaceTile(yPixels, cbPixels, crPixels, int(xIdx), int(yIdx), output, outW, outH)
+
+	d.mu.Lock()
+	d.tileCache[tileKey] = &rfxTileCoeffs{y: newY, cb: newCb, cr: newCr}
+	d.mu.Unlock()
 
 	coeffPool.Put((*coeffArr)(yPixels))
 	coeffPool.Put((*coeffArr)(cbPixels))
@@ -313,6 +417,65 @@ func safeSlice(data []byte, offset, length int) []byte {
 		return nil
 	}
 	return data[offset : offset+length]
+}
+
+// rfxDecodeComponentProgressive decodes one color component for a progressive
+// tile pass.  It always uses RLGR mode 1 (required by the progressive codec).
+//
+// If prevRaw is non-nil, it contains the raw RLGR-decoded coefficients from
+// the preceding TILE_FIRST/TILE_SIMPLE pass; the newly decoded values are
+// treated as a delta and added to prevRaw before processing.  Pass nil for
+// the first pass (TILE_FIRST / TILE_SIMPLE).
+//
+// Returns:
+//   - pixels: the fully decoded tile coefficients (pooled; caller must return
+//     via coeffPool.Put((*coeffArr)(pixels)) when done).
+//   - newRaw: the combined raw coefficients before LL3 differential decode and
+//     dequantization; the caller should cache this for future upgrade passes.
+//     newRaw is heap-allocated and owned by the caller.
+func rfxDecodeComponentProgressive(data []byte, quant rfxQuant, prevRaw []int16) (pixels []int16, newRaw []int16) {
+	const tilePixels = rfxTileSize * rfxTileSize
+
+	arr := coeffPool.Get().(*coeffArr)
+	work := arr[:]
+
+	if data == nil {
+		clear(work)
+	} else {
+		// Progressive codec always uses RLGR mode 1.
+		work = rlgr1Decode(data, tilePixels, work)
+	}
+
+	// Add delta from the previous quality pass when upgrading.
+	if prevRaw != nil {
+		for i := range tilePixels {
+			work[i] += prevRaw[i]
+		}
+	}
+
+	// Cache the combined raw coefficients before any differential decode or
+	// dequantization so a future upgrade pass can add its own delta on top.
+	newRaw = make([]int16, tilePixels)
+	copy(newRaw, work)
+
+	// Apply LL3 differential decode and dequantize LL3 in a single pass
+	// (identical to rfxDecodeComponent step 2).
+	if quant.LL3 > 1 {
+		shift := quant.LL3 - 1
+		work[4032] <<= shift
+		for i := 4033; i < 4096; i++ {
+			work[i] = work[i-1] + work[i]<<shift
+		}
+	} else {
+		for i := 4033; i < 4096; i++ {
+			work[i] += work[i-1]
+		}
+	}
+
+	rfxDequantizeSkipLL3(work, quant)
+	rfxInverseDWT2D(work)
+
+	return work, newRaw
 }
 
 // rfxDecodeComponent decodes one color component (Y, Cb, or Cr) for a 64×64 tile.
