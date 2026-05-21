@@ -1330,27 +1330,31 @@ func (g *GfxHandler) maybeNotifyDecoderBroken() {
 		return
 	}
 	if reason == H264BrokenReasonNoIDR {
-		// Allow one no-IDR soft reset before escalating to reconnect.
-		// ForceRefresh (SuppressOutput toggle) often fails to trigger a new
-		// AVC444 IDR from Windows servers; repeatedly retrying just prolongs
-		// the freeze.  One attempt gives the server a fair chance; after that
-		// a full reconnect is faster than waiting another 10+ seconds per try.
+		// Allow one no-IDR soft reset before escalating to reconnect, unless
+		// we are already in SW fallback mode (after a HW stall).  In the SW
+		// fallback case ForceRefresh was already sent multiple times during the
+		// VT stall and the server has not responded; another retry just prolongs
+		// the freeze by another keyframeWaitTimeoutSWFallback seconds.  Skip
+		// straight to reconnect so the server can deliver a fresh IDR via the
+		// normal session-start path, which it reliably does.
+		//
+		// For the non-fallback path: ForceRefresh (SuppressOutput toggle) often
+		// fails to trigger a new AVC444 IDR from Windows servers; repeatedly
+		// retrying just prolongs the freeze.  One attempt gives the server a
+		// fair chance; after that a full reconnect is faster.
 		//
 		// noIDRSoftResetCount is kept separate from softResetCount so that a
 		// prior HW-stall reset does not consume this budget — after an HW stall
-		// the SW fallback decoder still gets one no-IDR retry before reconnect.
+		// the SW fallback decoder skips retries (see above); for a pure SW
+		// session one no-IDR retry is still allowed.
 		const softResetLimitNoIDR = 1
-		if g.noIDRSoftResetCount < softResetLimitNoIDR {
+		if !g.usingSWFallback && g.noIDRSoftResetCount < softResetLimitNoIDR {
 			g.noIDRSoftResetCount++
 			slog.Debug("H.264: soft decoder reset (no-IDR)",
 				"attempt", g.noIDRSoftResetCount, "limit", softResetLimitNoIDR,
 				"reason", reason.String())
 			g.h264dec.Close()
-			if g.usingSWFallback {
-				g.h264dec = newH264DecoderSWWithWatchdog(g.watchdogCh)
-			} else {
-				g.h264dec = newH264DecoderWithWatchdog(g.watchdogCh)
-			}
+			g.h264dec = newH264DecoderWithWatchdog(g.watchdogCh)
 			if g.h264dec2 != nil && g.h264dec2.IsBroken() {
 				slog.Debug("H.264: aux decoder also broken on soft reset, waiting for IDR to recreate")
 				g.h264dec2.Close()
