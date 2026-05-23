@@ -55,12 +55,18 @@ type Monitor struct {
 // It implements the drdynvc.DvcChannelHandler interface and the optional
 // SetSendFunc / OnChannelCreated extension interfaces.
 type Handler struct {
-	send func([]byte)
+	send          func([]byte)
+	initialWidth  uint32
+	initialHeight uint32
 }
 
 // NewHandler returns a new Handler.
-func NewHandler() *Handler {
-	return &Handler{}
+// width and height are the desired initial desktop dimensions; when both are
+// non-zero the handler sends a MONITOR_LAYOUT PDU as soon as the channel
+// opens, mirroring FreeRDP's /size behaviour and prompting GNOME Remote
+// Desktop (headless or screen-share) to resize to the requested resolution.
+func NewHandler(width, height uint32) *Handler {
+	return &Handler{initialWidth: width, initialHeight: height}
 }
 
 // SetSendFunc is called by the DVC client to provide a write-back function.
@@ -70,8 +76,27 @@ func (h *Handler) SetSendFunc(f func([]byte)) {
 }
 
 // OnChannelCreated is called by the DVC client after the CREATE_RSP has been sent.
+// If an initial resolution was supplied to NewHandler, a MONITOR_LAYOUT PDU is
+// sent immediately, mirroring FreeRDP's behaviour of advertising the desired
+// desktop size as soon as the display channel opens.
 func (h *Handler) OnChannelCreated() {
 	slog.Debug("rdpedisp: channel created")
+	if h.initialWidth > 0 && h.initialHeight > 0 {
+		h.SendMonitorLayout([]Monitor{
+			{
+				Flags:              MonitorFlagPrimary,
+				Left:               0,
+				Top:                0,
+				Width:              h.initialWidth,
+				Height:             h.initialHeight,
+				PhysicalWidth:      0,
+				PhysicalHeight:     0,
+				Orientation:        0,
+				DesktopScaleFactor: 100,
+				DeviceScaleFactor:  100,
+			},
+		})
+	}
 }
 
 // Process handles incoming data from the server (CAPS PDU, etc.).

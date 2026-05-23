@@ -455,8 +455,10 @@ func (g *RdpClient) doLogin(routingToken []byte) error {
 	dvcClient.RegisterHandler(rdpgfx.ChannelName, gfxHandler)
 
 	// RDPEDISP (Display Update Virtual Channel) handler — allows requesting
-	// a resolution change while connected (MS-RDPEDISP).
-	dispHandler := rdpedisp.NewHandler()
+	// a resolution change while connected (MS-RDPEDISP).  Pass the desired
+	// dimensions so the handler sends an initial MONITOR_LAYOUT PDU as soon
+	// as the channel opens, prompting the server to resize to g.width×g.height.
+	dispHandler := rdpedisp.NewHandler(uint32(g.width), uint32(g.height))
 	g.dispHandler = dispHandler
 	dvcClient.RegisterHandler(rdpedisp.ChannelName, dispHandler)
 
