@@ -1,12 +1,15 @@
 package per
 
 import (
-	"bytes"
 	"io"
 	"log/slog"
 
 	"github.com/nakagami/grdp/core"
 )
+
+// zeroPad is a shared zero buffer used by WritePadding to avoid per-call heap
+// allocations. Writing is done in chunks up to len(zeroPad).
+var zeroPad [256]byte
 
 func ReadEnumerates(r io.Reader) (uint8, error) {
 	return core.ReadUInt8(r)
@@ -97,7 +100,8 @@ func WriteNumericString(s string, minValue int, w io.Writer) {
 	if length >= minValue {
 		mLength = length - minValue
 	}
-	buff := &bytes.Buffer{}
+	WriteLength(mLength, w)
+	var buf [1]byte
 	for i := 0; i < length; i += 2 {
 		c1 := int(s[i])
 		c2 := 0x30
@@ -106,15 +110,20 @@ func WriteNumericString(s string, minValue int, w io.Writer) {
 		}
 		c1 = (c1 - 0x30) % 10
 		c2 = (c2 - 0x30) % 10
-		core.WriteUInt8(uint8((c1<<4)|c2), buff)
+		buf[0] = uint8((c1 << 4) | c2)
+		w.Write(buf[:])
 	}
-	WriteLength(mLength, w)
-	w.Write(buff.Bytes())
 }
 
 func WritePadding(length int, w io.Writer) {
-	b := make([]byte, length)
-	w.Write(b)
+	for length > 0 {
+		n := length
+		if n > len(zeroPad) {
+			n = len(zeroPad)
+		}
+		w.Write(zeroPad[:n])
+		length -= n
+	}
 }
 
 func WriteNumberOfSet(n int, w io.Writer) {
@@ -134,7 +143,7 @@ func WriteOctetStream(oStr string, minValue int, w io.Writer) {
 		mlength = length - minValue
 	}
 	WriteLength(mlength, w)
-	w.Write([]byte(oStr)[:length])
+	io.WriteString(w, oStr)
 }
 
 func ReadChoice(r io.Reader) uint8 {

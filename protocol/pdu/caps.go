@@ -644,7 +644,7 @@ var rfxPropertiesBytes = []byte{
 
 // buildRemoteFxProperties constructs the TS_RFX_CLNT_CAPS_CONTAINER (MS-RDPRFX 2.2.1.1).
 func buildRemoteFxProperties() []byte {
-	return append(make([]byte, 0, len(rfxPropertiesBytes)), rfxPropertiesBytes...)
+	return bytes.Clone(rfxPropertiesBytes)
 }
 
 // newClientBitmapCodecsCapability returns a BitmapCodecsCapability with

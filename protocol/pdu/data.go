@@ -19,6 +19,27 @@ var capBuffPool = sync.Pool{
 	New: func() any { return &bytes.Buffer{} },
 }
 
+// nscPlaneBufPool reuses byte slices for the intermediate YCoCg planes in
+// decodeNSCodec. The planes are local to the decode call and released before
+// the function returns, so pool re-use is safe.
+var nscPlaneBufPool = sync.Pool{
+	New: func() any { return []byte(nil) },
+}
+
+func acquireNSCPlaneBuf(size int) []byte {
+	b := nscPlaneBufPool.Get().([]byte)
+	if cap(b) >= size {
+		return b[:size]
+	}
+	return make([]byte, size)
+}
+
+func releaseNSCPlaneBuf(b []byte) {
+	if b != nil {
+		nscPlaneBufPool.Put(b[:cap(b)])
+	}
+}
+
 // DecodeRemoteFX is a pluggable decoder for RemoteFX (MS-RDPRFX) surface codec
 // data. It is set at init time by the main client package to avoid a circular
 // import between protocol/pdu and plugin/rdpgfx.
@@ -1286,18 +1307,29 @@ func decodeNSCodec(data []byte, width, height int) []byte {
 	}
 	aOrigSize = width * height
 
+	// Acquire pooled plane buffers; released before returning so the pool is
+	// reused across decode calls without escaping to the caller.
+	yPlane := acquireNSCPlaneBuf(yOrigSize)
+	defer releaseNSCPlaneBuf(yPlane)
+	coPlane := acquireNSCPlaneBuf(coOrigSize)
+	defer releaseNSCPlaneBuf(coPlane)
+	cgPlane := acquireNSCPlaneBuf(cgOrigSize)
+	defer releaseNSCPlaneBuf(cgPlane)
+
 	// Decompress each plane: if planeSize < originalSize → NRLE decode,
 	// if planeSize == 0 → fill with 0xFF, otherwise raw copy.
-	yPlane := nscDecompressPlane(remaining[:lumaLen], int(lumaLen), yOrigSize)
+	nscDecompressPlaneInto(remaining[:lumaLen], int(lumaLen), yPlane)
 	remaining = remaining[lumaLen:]
-	coPlane := nscDecompressPlane(remaining[:orangeLen], int(orangeLen), coOrigSize)
+	nscDecompressPlaneInto(remaining[:orangeLen], int(orangeLen), coPlane)
 	remaining = remaining[orangeLen:]
-	cgPlane := nscDecompressPlane(remaining[:greenLen], int(greenLen), cgOrigSize)
+	nscDecompressPlaneInto(remaining[:greenLen], int(greenLen), cgPlane)
 	remaining = remaining[greenLen:]
 
 	var aPlane []byte
 	if alphaLen > 0 {
-		aPlane = nscDecompressPlane(remaining[:alphaLen], int(alphaLen), aOrigSize)
+		aPlane = acquireNSCPlaneBuf(aOrigSize)
+		defer releaseNSCPlaneBuf(aPlane)
+		nscDecompressPlaneInto(remaining[:alphaLen], int(alphaLen), aPlane)
 	}
 
 	// YCoCg to BGRA conversion (matches FreeRDP nsc_decode exactly).
@@ -1452,19 +1484,26 @@ func clampByte(v int16) uint8 {
 // If planeSize == 0, fills with 0xFF. If planeSize >= originalSize, raw copy.
 // Otherwise, uses the NRLE format (matching FreeRDP's nsc_rle_decode).
 func nscDecompressPlane(input []byte, planeSize, originalSize int) []byte {
+	out := make([]byte, originalSize)
+	nscDecompressPlaneInto(input, planeSize, out)
+	return out
+}
+
+// nscDecompressPlaneInto is the zero-allocation variant of nscDecompressPlane.
+// out must be pre-allocated to exactly originalSize bytes.
+func nscDecompressPlaneInto(input []byte, planeSize int, out []byte) {
+	originalSize := len(out)
 	if planeSize == 0 {
-		out := make([]byte, originalSize)
 		for i := range out {
 			out[i] = 0xFF
 		}
-		return out
+		return
 	}
 	if planeSize >= originalSize {
-		out := make([]byte, originalSize)
 		copy(out, input[:originalSize])
-		return out
+		return
 	}
-	return nrleDecode(input[:planeSize], originalSize)
+	nrleDecodeInto(input[:planeSize], out)
 }
 
 // nrleDecode decompresses NRLE (NSCodec Run-Length Encoding) data.
@@ -1475,6 +1514,14 @@ func nscDecompressPlane(input []byte, planeSize, originalSize int) []byte {
 //   - Last 4 bytes of output are copied raw from input
 func nrleDecode(input []byte, originalSize int) []byte {
 	output := make([]byte, originalSize)
+	nrleDecodeInto(input, output)
+	return output
+}
+
+// nrleDecodeInto is the zero-allocation variant of nrleDecode.
+// output must be pre-allocated to exactly originalSize bytes.
+func nrleDecodeInto(input []byte, output []byte) {
+	originalSize := len(output)
 	left := originalSize
 	inPos := 0
 	outPos := 0
@@ -1536,8 +1583,6 @@ func nrleDecode(input []byte, originalSize int) []byte {
 	if left >= 4 && inPos+4 <= len(input) {
 		copy(output[outPos:outPos+4], input[inPos:inPos+4])
 	}
-
-	return output
 }
 
 type FastPathUpdatePointerPDU struct {

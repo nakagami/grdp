@@ -234,7 +234,9 @@ func (g *GfxHandler) decodeAVC420(data []byte, destX, destY, destW, destH int) (
 		slog.Debug("RDPGFX: AVC420 frame intentionally dropped (zero-fill)")
 		return nil, nil, false
 	}
-	slog.Debug("RDPGFX: AVC420 decoded", "frameW", frame.Width, "frameH", frame.Height, "destW", destW, "destH", destH, "regions", len(stream.regions), "h264Len", len(stream.h264Data))
+	if slog.Default().Enabled(nil, slog.LevelDebug) {
+		slog.Debug("RDPGFX: AVC420 decoded", "frameW", frame.Width, "frameH", frame.Height, "destW", destW, "destH", destH, "regions", len(stream.regions), "h264Len", len(stream.h264Data))
+	}
 	g.noteSuccessfulDecode()
 	decoded, pooled := cropBGRA(frame.Data, frame.Width, frame.Height, destW, destH)
 	return decoded, stream.regions, pooled
@@ -374,8 +376,10 @@ func (g *GfxHandler) decodeAVC444(data []byte, destX, destY, destW, destH int) (
 			}
 		}
 	}
-	slog.Debug("RDPGFX: AVC444 decoded", "frameW", frame.Width, "frameH", frame.Height,
-		"destW", destW, "destH", destH, "h264Len", len(stream1.h264Data))
+	if slog.Default().Enabled(nil, slog.LevelDebug) {
+		slog.Debug("RDPGFX: AVC444 decoded", "frameW", frame.Width, "frameH", frame.Height,
+			"destW", destW, "destH", destH, "h264Len", len(stream1.h264Data))
+	}
 	g.noteSuccessfulDecode()
 	decoded, pooled := cropBGRA(frame.Data, frame.Width, frame.Height, destW, destH)
 
@@ -436,9 +440,11 @@ func (g *GfxHandler) decodeAVC420WithI420(data []byte, destX, destY, destW, dest
 	}
 	g.noteSuccessfulDecode()
 	if frame != nil {
-		slog.Debug("RDPGFX: AVC420 decoded (WithI420)", "frameW", frame.Width, "frameH", frame.Height,
-			"destW", destW, "destH", destH, "hasI420", i420 != nil,
-			"regions", len(stream.regions), "h264Len", len(stream.h264Data))
+		if slog.Default().Enabled(nil, slog.LevelDebug) {
+			slog.Debug("RDPGFX: AVC420 decoded (WithI420)", "frameW", frame.Width, "frameH", frame.Height,
+				"destW", destW, "destH", destH, "hasI420", i420 != nil,
+				"regions", len(stream.regions), "h264Len", len(stream.h264Data))
+		}
 		decoded, pooled = cropBGRA(frame.Data, frame.Width, frame.Height, destW, destH)
 	}
 	regions = stream.regions
@@ -494,9 +500,11 @@ func (g *GfxHandler) decodeAVC420WithNV12(data []byte, destX, destY, destW, dest
 	}
 	g.noteSuccessfulDecode()
 	if frame != nil {
-		slog.Debug("RDPGFX: AVC420 decoded (WithNV12)", "frameW", frame.Width, "frameH", frame.Height,
-			"destW", destW, "destH", destH, "hasNV12", nv12 != nil,
-			"regions", len(stream.regions), "h264Len", len(stream.h264Data))
+		if slog.Default().Enabled(nil, slog.LevelDebug) {
+			slog.Debug("RDPGFX: AVC420 decoded (WithNV12)", "frameW", frame.Width, "frameH", frame.Height,
+				"destW", destW, "destH", destH, "hasNV12", nv12 != nil,
+				"regions", len(stream.regions), "h264Len", len(stream.h264Data))
+		}
 		decoded, pooled = cropBGRA(frame.Data, frame.Width, frame.Height, destW, destH)
 	}
 	regions = stream.regions
@@ -569,8 +577,10 @@ func (g *GfxHandler) decodeAVC444WithI420(data []byte, destX, destY, destW, dest
 	}
 	g.noteSuccessfulDecode()
 	if frame != nil {
-		slog.Debug("RDPGFX: AVC444 decoded (WithI420)", "frameW", frame.Width, "frameH", frame.Height,
-			"destW", destW, "destH", destH, "hasI420", i420 != nil, "h264Len", len(stream1.h264Data))
+		if slog.Default().Enabled(nil, slog.LevelDebug) {
+			slog.Debug("RDPGFX: AVC444 decoded (WithI420)", "frameW", frame.Width, "frameH", frame.Height,
+				"destW", destW, "destH", destH, "hasI420", i420 != nil, "h264Len", len(stream1.h264Data))
+		}
 		decoded, pooled = cropBGRA(frame.Data, frame.Width, frame.Height, destW, destH)
 		regions = stream1.regions
 	}
@@ -740,6 +750,9 @@ func isAuxChromaBlank(f *H264FrameI420) bool {
 //	cachedU/cachedV      – Cb/Cr from stream1, half-res (stride=uvStride=(w+1)/2)
 //	i420aux              – I420 output from decoding stream2
 //	fullRange            – true for PC-range [0-255], false for video [16-235]
+// combineAVC444v2BGRA combines luma from stream1 with per-pixel chroma from
+// stream1 and stream2 to produce a BGRA frame.  The fullRange branch is hoisted
+// outside the inner loop; row-level offsets are computed once per row.
 func combineAVC444v2BGRA(
 	yPlane []byte, yStride int,
 	cachedU, cachedV []byte, uvStride int,
@@ -759,37 +772,88 @@ func combineAVC444v2BGRA(
 	auxYStride := i420aux.YStride
 	auxUStride := i420aux.UStride
 	auxVStride := i420aux.VStride
-	for row := range h {
-		yRow := yPlane[row*yStride:]
-		outRow := out[row*w*4:]
-		auxYRow := i420aux.Y[row*auxYStride:]
-		uvRow := row >> 1
-		for col := range w {
-			Y := yRow[col]
-			var Cb, Cr byte
-			if col&1 == 1 {
-				// Odd column: B4/B5 — both even and odd rows.
-				k := col >> 1
-				Cb = auxYRow[k]
-				Cr = auxYRow[halfW+k]
-			} else if row&1 == 0 {
-				// Even column, even row: B2/B3 from stream1 cached chroma.
-				Cb = cachedU[uvRow*uvStride+(col>>1)]
-				Cr = cachedV[uvRow*uvStride+(col>>1)]
-			} else {
-				// Even column, odd row: B6-B9.
-				k := col >> 2
-				if col&2 == 0 {
-					// col % 4 == 0: B6/B7 from stream2 U plane.
-					Cb = i420aux.U[uvRow*auxUStride+k]
-					Cr = i420aux.U[uvRow*auxUStride+quarterW+k]
+
+	// Split on fullRange once so the inner loop body is branch-free for the
+	// YCbCr→BGRA conversion coefficients.
+	if fullRange {
+		for row := range h {
+			yRowOff := row * yStride
+			uvRow := row >> 1
+			uvRowOff := uvRow * uvStride
+			auxYRowOff := row * auxYStride
+			auxURowOff := uvRow * auxUStride
+			auxVRowOff := uvRow * auxVStride
+			outIdx := row * w * 4
+			for col := range w {
+				Y := yPlane[yRowOff+col]
+				var Cb, Cr byte
+				if col&1 == 1 {
+					k := col >> 1
+					Cb = i420aux.Y[auxYRowOff+k]
+					Cr = i420aux.Y[auxYRowOff+halfW+k]
+				} else if row&1 == 0 {
+					k := col >> 1
+					Cb = cachedU[uvRowOff+k]
+					Cr = cachedV[uvRowOff+k]
 				} else {
-					// col % 4 == 2: B8/B9 from stream2 V plane.
-					Cb = i420aux.V[uvRow*auxVStride+k]
-					Cr = i420aux.V[uvRow*auxVStride+quarterW+k]
+					k := col >> 2
+					if col&2 == 0 {
+						Cb = i420aux.U[auxURowOff+k]
+						Cr = i420aux.U[auxURowOff+quarterW+k]
+					} else {
+						Cb = i420aux.V[auxVRowOff+k]
+						Cr = i420aux.V[auxVRowOff+quarterW+k]
+					}
 				}
+				y := int(Y)
+				u := int(Cb) - 128
+				v := int(Cr) - 128
+				out[outIdx] = clampByte((256*y + 475*u + 128) >> 8)
+				out[outIdx+1] = clampByte((256*y - 48*u - 120*v + 128) >> 8)
+				out[outIdx+2] = clampByte((256*y + 403*v + 128) >> 8)
+				out[outIdx+3] = 255
+				outIdx += 4
 			}
-			avc444bt709BGRA(Y, Cb, Cr, fullRange, outRow[col*4:])
+		}
+	} else {
+		for row := range h {
+			yRowOff := row * yStride
+			uvRow := row >> 1
+			uvRowOff := uvRow * uvStride
+			auxYRowOff := row * auxYStride
+			auxURowOff := uvRow * auxUStride
+			auxVRowOff := uvRow * auxVStride
+			outIdx := row * w * 4
+			for col := range w {
+				Y := yPlane[yRowOff+col]
+				var Cb, Cr byte
+				if col&1 == 1 {
+					k := col >> 1
+					Cb = i420aux.Y[auxYRowOff+k]
+					Cr = i420aux.Y[auxYRowOff+halfW+k]
+				} else if row&1 == 0 {
+					k := col >> 1
+					Cb = cachedU[uvRowOff+k]
+					Cr = cachedV[uvRowOff+k]
+				} else {
+					k := col >> 2
+					if col&2 == 0 {
+						Cb = i420aux.U[auxURowOff+k]
+						Cr = i420aux.U[auxURowOff+quarterW+k]
+					} else {
+						Cb = i420aux.V[auxVRowOff+k]
+						Cr = i420aux.V[auxVRowOff+quarterW+k]
+					}
+				}
+				c := int(Y) - 16
+				u := int(Cb) - 128
+				v := int(Cr) - 128
+				out[outIdx] = clampByte((298*c + 541*u + 128) >> 8)
+				out[outIdx+1] = clampByte((298*c - 55*u - 136*v + 128) >> 8)
+				out[outIdx+2] = clampByte((298*c + 459*v + 128) >> 8)
+				out[outIdx+3] = 255
+				outIdx += 4
+			}
 		}
 	}
 	return out, true
@@ -798,19 +862,51 @@ func combineAVC444v2BGRA(
 // i420ToBGRA converts a planar I420 frame to a packed BGRA buffer using BT.709
 // coefficients (matching AVC444 content encoding). Used when the I420 fast path
 // is active and a BGRA output is required by the rendering path.
+//
+// Optimised: the fullRange branch is hoisted outside both loops so the inner
+// loop body is branch-free, row offsets are computed once per row, and outIdx
+// advances by 4 instead of recomputing col*4 per pixel.
 func i420ToBGRA(src *H264FrameI420) ([]byte, bool) {
 	if src == nil || src.Width <= 0 || src.Height <= 0 {
 		return nil, false
 	}
 	w, h := src.Width, src.Height
 	out := acquireBitmapBuf(w * h * 4)
-	for row := range h {
-		uvRow := row >> 1
-		for col := range w {
-			Y := src.Y[row*src.YStride+col]
-			U := src.U[uvRow*src.UStride+(col>>1)]
-			V := src.V[uvRow*src.VStride+(col>>1)]
-			avc444bt709BGRA(Y, U, V, src.FullRange, out[(row*w+col)*4:])
+	if src.FullRange {
+		for row := range h {
+			yOff := row * src.YStride
+			uvOff := (row >> 1) * src.UStride
+			uvOffV := (row >> 1) * src.VStride
+			outIdx := row * w * 4
+			for col := range w {
+				y := int(src.Y[yOff+col])
+				uv := col >> 1
+				u := int(src.U[uvOff+uv]) - 128
+				v := int(src.V[uvOffV+uv]) - 128
+				out[outIdx] = clampByte((256*y + 475*u + 128) >> 8)
+				out[outIdx+1] = clampByte((256*y - 48*u - 120*v + 128) >> 8)
+				out[outIdx+2] = clampByte((256*y + 403*v + 128) >> 8)
+				out[outIdx+3] = 255
+				outIdx += 4
+			}
+		}
+	} else {
+		for row := range h {
+			yOff := row * src.YStride
+			uvOffU := (row >> 1) * src.UStride
+			uvOffV := (row >> 1) * src.VStride
+			outIdx := row * w * 4
+			for col := range w {
+				c := int(src.Y[yOff+col]) - 16
+				uv := col >> 1
+				u := int(src.U[uvOffU+uv]) - 128
+				v := int(src.V[uvOffV+uv]) - 128
+				out[outIdx] = clampByte((298*c + 541*u + 128) >> 8)
+				out[outIdx+1] = clampByte((298*c - 55*u - 136*v + 128) >> 8)
+				out[outIdx+2] = clampByte((298*c + 459*v + 128) >> 8)
+				out[outIdx+3] = 255
+				outIdx += 4
+			}
 		}
 	}
 	return out, true
@@ -845,15 +941,9 @@ func avc444bt709BGRA(Y, Cb, Cr byte, fullRange bool, dst []byte) {
 	dst[3] = 255
 }
 
-// clampByte clamps an integer to [0, 255].
+// clampByte clamps an integer to [0, 255] using branchless min/max built-ins.
 func clampByte(v int) byte {
-	if v < 0 {
-		return 0
-	}
-	if v > 255 {
-		return 255
-	}
-	return byte(v)
+	return byte(max(0, min(255, v)))
 }
 
 // primeAuxDecoder feeds stream2 data from an LC=0 packet to h264dec2 so that

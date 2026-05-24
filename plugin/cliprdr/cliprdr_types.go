@@ -167,6 +167,9 @@ const (
 	FILE_ATTRIBUTE_DIRECTORY = 0x00000010
 )
 
+// fileDescriptorZero is a reusable zero block for FileDescriptor padding writes.
+var fileDescriptorZero [512]byte
+
 type FileGroupDescriptor struct {
 	CItems uint32           `struc:"little"`
 	Fgd    []FileDescriptor `struc:"sizefrom=CItems"`
@@ -193,19 +196,16 @@ func (f *FileGroupDescriptor) Unpack(b []byte) error {
 func (f *FileDescriptor) serialize() []byte {
 	b := &bytes.Buffer{}
 	core.WriteUInt32LE(f.Flags, b)
-	for range 32 {
-		core.WriteByte(0, b)
-	}
+	b.Write(fileDescriptorZero[:32])
 	core.WriteUInt32LE(f.FileAttributes, b)
-	for range 16 {
-		core.WriteByte(0, b)
-	}
+	b.Write(fileDescriptorZero[:16])
 	core.WriteBytes(f.LastWriteTime[:], b)
 	core.WriteUInt32LE(f.FileSizeHigh, b)
 	core.WriteUInt32LE(f.FileSizeLow, b)
-	name := make([]byte, 512)
-	copy(name, f.FileName)
-	core.WriteBytes(name, b)
+	b.Write(f.FileName)
+	if pad := 512 - len(f.FileName); pad > 0 {
+		b.Write(fileDescriptorZero[:pad])
+	}
 	return b.Bytes()
 }
 
