@@ -18,27 +18,33 @@ type avc420Stream struct {
 	h264Data []byte
 }
 
-// parseAVC420Stream parses RDPGFX_AVC420_BITMAP_STREAM.
-func parseAVC420Stream(data []byte) (*avc420Stream, error) {
+// fillAVC420Stream parses data into out in-place, reusing out.regions if its
+// capacity is sufficient.  This avoids a heap allocation for the regions slice
+// on every AVC frame when called with a pre-allocated GfxHandler field.
+func fillAVC420Stream(data []byte, out *avc420Stream) error {
 	if len(data) < 4 {
-		return nil, fmt.Errorf("avc420 stream too short (%d bytes)", len(data))
+		return fmt.Errorf("avc420 stream too short (%d bytes)", len(data))
 	}
 
 	numRegions := binary.LittleEndian.Uint32(data[:4])
 	if numRegions > 65536 {
-		return nil, fmt.Errorf("avc420: too many regions: %d", numRegions)
+		return fmt.Errorf("avc420: too many regions: %d", numRegions)
 	}
 
 	// 4 bytes header + 10 bytes per region (8-byte rect + 2-byte quant/quality)
 	metaSize := 4 + int(numRegions)*10
 	if metaSize > len(data) {
-		return nil, fmt.Errorf("avc420: metadata truncated (need %d, have %d)", metaSize, len(data))
+		return fmt.Errorf("avc420: metadata truncated (need %d, have %d)", metaSize, len(data))
 	}
 
+	if cap(out.regions) >= int(numRegions) {
+		out.regions = out.regions[:numRegions]
+	} else {
+		out.regions = make([]avcRect, numRegions)
+	}
 	off := 4
-	regions := make([]avcRect, numRegions)
 	for i := range numRegions {
-		regions[i] = avcRect{
+		out.regions[i] = avcRect{
 			left:   binary.LittleEndian.Uint16(data[off:]),
 			top:    binary.LittleEndian.Uint16(data[off+2:]),
 			right:  binary.LittleEndian.Uint16(data[off+4:]),
@@ -46,11 +52,19 @@ func parseAVC420Stream(data []byte) (*avc420Stream, error) {
 		}
 		off += 8
 	}
+	out.h264Data = data[metaSize:]
+	return nil
+}
 
-	return &avc420Stream{
-		regions:  regions,
-		h264Data: data[metaSize:],
-	}, nil
+// parseAVC420Stream parses RDPGFX_AVC420_BITMAP_STREAM into a new struct.
+// Callers that run on the decode goroutine should prefer fillAVC420Stream with
+// a pre-allocated GfxHandler field to avoid per-frame heap allocations.
+func parseAVC420Stream(data []byte) (*avc420Stream, error) {
+	var out avc420Stream
+	if err := fillAVC420Stream(data, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 // parseAVC444Stream parses RDPGFX_AVC444_BITMAP_STREAM.
@@ -102,6 +116,59 @@ func parseAVC444Stream(data []byte) (stream1, stream2 *avc420Stream, lc uint8, e
 		}
 		stream2, err = parseAVC420Stream(streamData)
 		return nil, stream2, lc, err
+	default:
+		return nil, nil, lc, fmt.Errorf("avc444: invalid LC=%d", lc)
+	}
+}
+
+// fillAVC444Stream parses data into g.avcStream1 and g.avcStream2, reusing
+// their regions slices to avoid per-frame heap allocations.
+// Safe: always called on the single decode goroutine.
+func (g *GfxHandler) fillAVC444Stream(data []byte) (stream1, stream2 *avc420Stream, lc uint8, err error) {
+	if len(data) < 4 {
+		return nil, nil, 0, fmt.Errorf("avc444 stream too short")
+	}
+
+	cbField := binary.LittleEndian.Uint32(data[:4])
+	lc = uint8((cbField >> 30) & 0x03)
+	cbStream1 := int(cbField & 0x3FFFFFFF)
+	rest := data[4:]
+
+	switch lc {
+	case 0: // Both streams present
+		if cbStream1 > len(rest) {
+			return nil, nil, lc, fmt.Errorf("avc444: stream1 size %d exceeds data %d", cbStream1, len(rest))
+		}
+		if err = fillAVC420Stream(rest[:cbStream1], &g.avcStream1); err != nil {
+			return nil, nil, lc, err
+		}
+		stream1 = &g.avcStream1
+		if cbStream1 < len(rest) {
+			if err2 := fillAVC420Stream(rest[cbStream1:], &g.avcStream2); err2 != nil {
+				slog.Debug("RDPGFX: AVC444 stream2 parse error (LC=0)", "err", err2)
+			} else {
+				stream2 = &g.avcStream2
+			}
+		}
+		return stream1, stream2, lc, nil
+	case 1: // Main stream only
+		streamData := rest
+		if cbStream1 > 0 && cbStream1 <= len(rest) {
+			streamData = rest[:cbStream1]
+		}
+		if err = fillAVC420Stream(streamData, &g.avcStream1); err != nil {
+			return nil, nil, lc, err
+		}
+		return &g.avcStream1, nil, lc, nil
+	case 2: // Auxiliary only (chroma upgrade)
+		streamData := rest
+		if cbStream1 > 0 && cbStream1 <= len(rest) {
+			streamData = rest[:cbStream1]
+		}
+		if err = fillAVC420Stream(streamData, &g.avcStream2); err != nil {
+			return nil, nil, lc, err
+		}
+		return nil, &g.avcStream2, lc, nil
 	default:
 		return nil, nil, lc, fmt.Errorf("avc444: invalid LC=%d", lc)
 	}
@@ -190,7 +257,8 @@ func firstNALType(data []byte) byte {
 func (g *GfxHandler) decodeAVC420(data []byte, destX, destY, destW, destH int) ([]byte, []avcRect, bool) {
 	// Parse the stream header once and reuse for both the raw-NAL callback and
 	// the actual decode path, avoiding a redundant walk of the metadata.
-	stream, parseErr := parseAVC420Stream(data)
+	parseErr := fillAVC420Stream(data, &g.avcStream1)
+	stream := &g.avcStream1
 	if g.onH264Raw != nil && parseErr == nil && len(stream.h264Data) > 0 {
 		isKF := isH264Keyframe(stream.h264Data)
 		nalData := make([]byte, len(stream.h264Data))
@@ -216,11 +284,15 @@ func (g *GfxHandler) decodeAVC420(data []byte, destX, destY, destW, destH int) (
 	// reads dirty pixels) when shouldUseAVCRegions returns true.
 	if rh, ok := g.h264dec.(RegionHinter); ok &&
 		len(stream.regions) > 0 && shouldUseAVCRegions(stream.regions, destW, destH) {
-		rects := make([][4]uint16, len(stream.regions))
-		for i, r := range stream.regions {
-			rects[i] = [4]uint16{r.left, r.top, r.right, r.bottom}
+		if cap(g.regionHintBuf) >= len(stream.regions) {
+			g.regionHintBuf = g.regionHintBuf[:len(stream.regions)]
+		} else {
+			g.regionHintBuf = make([][4]uint16, len(stream.regions))
 		}
-		rh.SetRegionHint(rects)
+		for i, r := range stream.regions {
+			g.regionHintBuf[i] = [4]uint16{r.left, r.top, r.right, r.bottom}
+		}
+		rh.SetRegionHint(g.regionHintBuf)
 	}
 	frame, err := g.h264dec.Decode(stream.h264Data)
 	if err != nil {
@@ -254,7 +326,7 @@ func (g *GfxHandler) decodeAVC420(data []byte, destX, destY, destW, destH int) (
 func (g *GfxHandler) decodeAVC444(data []byte, destX, destY, destW, destH int) ([]byte, []avcRect, bool) {
 	// Parse the stream header once and reuse for both the raw-NAL callback and
 	// the actual decode path, avoiding a redundant walk of the metadata.
-	stream1, stream2, lc, parseErr := parseAVC444Stream(data)
+	stream1, stream2, lc, parseErr := g.fillAVC444Stream(data)
 	if g.onH264Raw != nil && parseErr == nil && stream1 != nil && len(stream1.h264Data) > 0 {
 		isKF := isH264Keyframe(stream1.h264Data)
 		nalData := make([]byte, len(stream1.h264Data))
@@ -280,11 +352,15 @@ func (g *GfxHandler) decodeAVC444(data []byte, destX, destY, destW, destH int) (
 	// blitAndEmitAVCRegions when shouldUseAVCRegions returns true.
 	if rh, ok := g.h264dec.(RegionHinter); ok &&
 		len(stream1.regions) > 0 && shouldUseAVCRegions(stream1.regions, destW, destH) {
-		rects := make([][4]uint16, len(stream1.regions))
-		for i, r := range stream1.regions {
-			rects[i] = [4]uint16{r.left, r.top, r.right, r.bottom}
+		if cap(g.regionHintBuf) >= len(stream1.regions) {
+			g.regionHintBuf = g.regionHintBuf[:len(stream1.regions)]
+		} else {
+			g.regionHintBuf = make([][4]uint16, len(stream1.regions))
 		}
-		rh.SetRegionHint(rects)
+		for i, r := range stream1.regions {
+			g.regionHintBuf[i] = [4]uint16{r.left, r.top, r.right, r.bottom}
+		}
+		rh.SetRegionHint(g.regionHintBuf)
 	}
 
 	var frame *H264Frame
@@ -402,11 +478,11 @@ func (g *GfxHandler) decodeAVC444(data []byte, destX, destY, destW, destH int) (
 // smaller than destW×destH.  Callers must fall back to BGRA rendering when
 // i420 is nil.
 func (g *GfxHandler) decodeAVC420WithI420(data []byte, destX, destY, destW, destH int) (decoded []byte, i420 *H264FrameI420, regions []avcRect, pooled bool) {
-	stream, err := parseAVC420Stream(data)
-	if err != nil {
+	if err := fillAVC420Stream(data, &g.avcStream1); err != nil {
 		slog.Warn("RDPGFX: AVC420 parse error", "err", err)
 		return
 	}
+	stream := &g.avcStream1
 	if g.onH264Raw != nil && len(stream.h264Data) > 0 {
 		isKF := isH264Keyframe(stream.h264Data)
 		nalData := make([]byte, len(stream.h264Data))
@@ -420,6 +496,7 @@ func (g *GfxHandler) decodeAVC420WithI420(data []byte, destX, destY, destW, dest
 		g.maybeCacheStream1IDR(stream.h264Data)
 	}
 	var frame *H264Frame
+	var err error
 	i420dec, hasI420 := g.h264dec.(I420Decoder)
 	if hasI420 {
 		var i420out *H264FrameI420
@@ -467,11 +544,11 @@ func (g *GfxHandler) decodeAVC420WithI420(data []byte, destX, destY, destW, dest
 // planes when the underlying decoder produces NV12 (typically VideoToolbox).
 // If NV12 is unavailable, decoded may contain a BGRA fallback frame.
 func (g *GfxHandler) decodeAVC420WithNV12(data []byte, destX, destY, destW, destH int) (decoded []byte, nv12 *H264FrameNV12, regions []avcRect, pooled bool) {
-	stream, err := parseAVC420Stream(data)
-	if err != nil {
+	if err := fillAVC420Stream(data, &g.avcStream1); err != nil {
 		slog.Warn("RDPGFX: AVC420 parse error", "err", err)
 		return
 	}
+	stream := &g.avcStream1
 	if g.onH264Raw != nil && len(stream.h264Data) > 0 {
 		isKF := isH264Keyframe(stream.h264Data)
 		nalData := make([]byte, len(stream.h264Data))
@@ -485,6 +562,7 @@ func (g *GfxHandler) decodeAVC420WithNV12(data []byte, destX, destY, destW, dest
 		g.maybeCacheStream1IDR(stream.h264Data)
 	}
 	var frame *H264Frame
+	var err error
 	nv12dec, hasNV12 := g.h264dec.(NV12Decoder)
 	if hasNV12 {
 		var nv12out *H264FrameNV12
@@ -532,7 +610,7 @@ func (g *GfxHandler) decodeAVC420WithNV12(data []byte, destX, destY, destW, dest
 // the cached luma to produce BGRA; i420 is nil for LC=2 frames (GPU path falls
 // back to BGRA).
 func (g *GfxHandler) decodeAVC444WithI420(data []byte, destX, destY, destW, destH int) (decoded []byte, i420 *H264FrameI420, regions []avcRect, pooled bool) {
-	stream1, stream2, lc, err := parseAVC444Stream(data)
+	stream1, stream2, lc, err := g.fillAVC444Stream(data)
 	if g.onH264Raw != nil && stream1 != nil && len(stream1.h264Data) > 0 {
 		isKF := isH264Keyframe(stream1.h264Data)
 		nalData := make([]byte, len(stream1.h264Data))
@@ -1656,7 +1734,7 @@ func shouldUseAVCRegions(regions []avcRect, frameW, frameH int) bool {
 func (g *GfxHandler) blitAndEmitAVCRegions(s *surface, left, top, frameW, frameH int, decoded []byte, regions []avcRect) {
 	frameStride := frameW * 4
 	surfStride := int(s.width) * 4
-	updates := make([]BitmapUpdate, 0, len(regions))
+	g.updatesBuf = g.updatesBuf[:0]
 	for _, rc := range regions {
 		if rc.right <= rc.left || rc.bottom <= rc.top {
 			continue
@@ -1702,11 +1780,11 @@ func (g *GfxHandler) blitAndEmitAVCRegions(s *surface, left, top, frameW, frameH
 		}
 		destL := int(s.outputX) + left + rx
 		destT := int(s.outputY) + top + ry
-		updates = append(updates, BitmapUpdate{
+		g.updatesBuf = append(g.updatesBuf, BitmapUpdate{
 			DestLeft: destL, DestTop: destT,
 			DestRight: destL + rw - 1, DestBottom: destT + rh - 1,
 			Width: rw, Height: rh, Bpp: 4, Data: region,
 		})
 	}
-	g.emitAndReleaseUpdates(updates)
+	g.emitAndReleaseUpdates(g.updatesBuf)
 }

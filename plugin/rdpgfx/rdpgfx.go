@@ -335,6 +335,26 @@ type GfxHandler struct {
 	// 0 means "report the real queue length" (default, no throttling).
 	// See SetQueueDepthHint.
 	queueDepthHint atomic.Uint32
+	// singleUpdate is a pre-allocated one-element slice reused by emitBitmap
+	// and emitBitmapPooled to avoid a heap allocation on every BGRA frame.
+	// Safe: all emitBitmap* calls run on the single decode goroutine.
+	singleUpdate [1]BitmapUpdate
+	// updatesBuf is a pre-allocated slice reused by emitCaVideoRects and
+	// blitAndEmitAVCRegions to avoid make() on every multi-region frame.
+	// Safe: both functions run on the single decode goroutine and never call
+	// each other.
+	updatesBuf []BitmapUpdate
+	// avcStream1 and avcStream2 are pre-allocated AVC stream structs reused by
+	// fillAVC444Stream and the decode methods to avoid a heap allocation for
+	// the stream header (struct + regions slice) on every H.264 frame.
+	// Safe: all AVC decode calls run on the single decode goroutine.
+	avcStream1 avc420Stream
+	avcStream2 avc420Stream
+	// regionHintBuf is a pre-allocated slice reused by the SetRegionHint call
+	// sites to avoid a make([][4]uint16, ...) on every H.264 frame that carries
+	// dirty region metadata.
+	// Safe: used only on the single decode goroutine.
+	regionHintBuf [][4]uint16
 	// onH264Raw is called with raw H.264 NAL unit data when h264dec is nil
 	// (e.g. WASM builds without CGo).  The caller can forward the data to a
 	// JavaScript WebCodecs VideoDecoder instead.
@@ -1756,11 +1776,12 @@ func (g *GfxHandler) onSolidFill(data []byte) {
 			}
 			destL := int(s.outputX) + int(left)
 			destT := int(s.outputY) + int(top)
-			g.emitAndReleaseUpdates([]BitmapUpdate{{
+			g.singleUpdate[0] = BitmapUpdate{
 				DestLeft: destL, DestTop: destT,
 				DestRight: destL + w - 1, DestBottom: destT + h - 1,
 				Width: w, Height: h, Bpp: 4, Data: fillData,
-			}})
+			}
+			g.emitAndReleaseUpdates(g.singleUpdate[:])
 		}
 	}
 }
@@ -1874,7 +1895,7 @@ func (g *GfxHandler) emitCaVideoRects(s *surface, rects []rfxRect) {
 	if !s.mapped || g.onBitmap == nil || len(rects) == 0 {
 		return
 	}
-	updates := make([]BitmapUpdate, 0, len(rects))
+	g.updatesBuf = g.updatesBuf[:0]
 	stride := int(s.width) * 4
 	for _, rc := range rects {
 		needed := rc.w * rc.h * 4
@@ -1889,13 +1910,13 @@ func (g *GfxHandler) emitCaVideoRects(s *surface, rects []rfxRect) {
 		}
 		destL := int(s.outputX) + rc.x
 		destT := int(s.outputY) + rc.y
-		updates = append(updates, BitmapUpdate{
+		g.updatesBuf = append(g.updatesBuf, BitmapUpdate{
 			DestLeft: destL, DestTop: destT,
 			DestRight: destL + rc.w - 1, DestBottom: destT + rc.h - 1,
 			Width: rc.w, Height: rc.h, Bpp: 4, Data: region,
 		})
 	}
-	g.emitAndReleaseUpdates(updates)
+	g.emitAndReleaseUpdates(g.updatesBuf)
 }
 
 func blitToSurface(s *surface, x, y, w, h int, src []byte) {
@@ -1935,11 +1956,12 @@ func (g *GfxHandler) emitBitmapPooled(s *surface, x, y, w, h int, decoded []byte
 	}
 	destL := int(s.outputX) + x
 	destT := int(s.outputY) + y
-	g.emitAndReleaseUpdates([]BitmapUpdate{{
+	g.singleUpdate[0] = BitmapUpdate{
 		DestLeft: destL, DestTop: destT,
 		DestRight: destL + w - 1, DestBottom: destT + h - 1,
 		Width: w, Height: h, Bpp: 4, Data: decoded,
-	}})
+	}
+	g.emitAndReleaseUpdates(g.singleUpdate[:])
 }
 
 func (g *GfxHandler) emitBitmap(s *surface, x, y, w, h int, decoded []byte) {
@@ -1948,11 +1970,13 @@ func (g *GfxHandler) emitBitmap(s *surface, x, y, w, h int, decoded []byte) {
 	}
 	destL := int(s.outputX) + x
 	destT := int(s.outputY) + y
-	g.onBitmap([]BitmapUpdate{{
+	g.singleUpdate[0] = BitmapUpdate{
 		DestLeft: destL, DestTop: destT,
 		DestRight: destL + w - 1, DestBottom: destT + h - 1,
 		Width: w, Height: h, Bpp: 4, Data: decoded,
-	}})
+	}
+	g.onBitmap(g.singleUpdate[:])
+	g.singleUpdate[0].Data = nil // release reference; decoded is not pooled
 }
 
 // --- Codec: Uncompressed ---
