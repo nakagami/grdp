@@ -57,6 +57,7 @@ package ffmpeg
 #cgo nocallback grdp_sample_yuv
 #cgo noescape grdp_sample_nv12_at
 #cgo nocallback grdp_sample_nv12_at
+#cgo nocallback grdp_is_warmup_nv12
 #include <libavcodec/avcodec.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/hwcontext.h>
@@ -853,6 +854,27 @@ static void grdp_sample_nv12_at(const AVFrame *f, int x, int y,
     int uvy = y >> 1;
     *u_out = f->data[1][uvy * f->linesize[1] + uvx];
     *v_out = f->data[1][uvy * f->linesize[1] + uvx + 1];
+}
+
+// grdp_is_warmup_nv12 checks whether an NV12 frame looks like an uninitialised
+// VideoToolbox IOSurface where the Y plane is zeroed but UV is at neutral 128.
+// It samples Y at a 3×3 grid spread across the frame (at 25%, 50%, 75% of
+// width and height).  Returns 1 if every sampled luma value is <= threshold.
+// A threshold of 4 catches Y=0 warm-up frames while tolerating H.264 rounding
+// (luma=1 is possible).  Real video content — even a mostly-black desktop — is
+// statistically unlikely to have all 9 spread-out luma samples at or below 4.
+static int grdp_is_warmup_nv12(const AVFrame *f, int threshold) {
+    const uint8_t *yp = f->data[0];
+    int stride = f->linesize[0];
+    int w = f->width, h = f->height;
+    if (!yp || w <= 0 || h <= 0) return 0;
+    int xs[3] = { w / 4, w / 2, 3 * w / 4 };
+    int ys[3] = { h / 4, h / 2, 3 * h / 4 };
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 3; j++)
+            if (yp[ys[i] * stride + xs[j]] > (uint8_t)threshold)
+                return 0;
+    return 1;
 }
 
 static void grdp_sws_set_src_range(struct SwsContext *sws, int full_range) {
@@ -2373,9 +2395,18 @@ func (d *ffmpegDecoder) convertFrame(regionHint []C.uint16_t, nRegions C.int) (*
 		if d.useHW && d.hwNeedsZeroCheck {
 			var sy, su, sv C.uint8_t
 			C.grdp_sample_nv12(srcFrame, &sy, &su, &sv)
+			drop := false
 			if su == 0 && sv == 0 {
-				slog.Debug("H.264: dropping zero-filled HW frame in NV12 path (IOSurface not ready)",
+				drop = true
+				slog.Debug("H.264: dropping zero-UV HW frame in NV12 path (IOSurface not ready)",
 					"Y", int(sy))
+			} else if sy == 0 && su >= 124 && su <= 132 && sv >= 124 && sv <= 132 &&
+				C.grdp_is_warmup_nv12(srcFrame, 4) != 0 {
+				drop = true
+				slog.Debug("H.264: dropping black warm-up HW frame in NV12 path",
+					"Y", int(sy), "U", int(su), "V", int(sv))
+			}
+			if drop {
 				if usedMapFrame {
 					C.av_frame_unref(d.mapFrame)
 				} else if srcFrame == d.swFrame {
@@ -2418,9 +2449,18 @@ func (d *ffmpegDecoder) convertFrame(regionHint []C.uint16_t, nRegions C.int) (*
 			if srcFmt == C.AV_PIX_FMT_NV12 && d.useHW && d.hwNeedsZeroCheck {
 				var sy, su, sv C.uint8_t
 				C.grdp_sample_nv12(srcFrame, &sy, &su, &sv)
+				drop := false
 				if su == 0 && sv == 0 {
-					slog.Debug("H.264: dropping zero-filled HW frame in I420 path (IOSurface not ready)",
+					drop = true
+					slog.Debug("H.264: dropping zero-UV HW frame in I420 path (IOSurface not ready)",
 						"Y", int(sy))
+				} else if sy == 0 && su >= 124 && su <= 132 && sv >= 124 && sv <= 132 &&
+					C.grdp_is_warmup_nv12(srcFrame, 4) != 0 {
+					drop = true
+					slog.Debug("H.264: dropping black warm-up HW frame in I420 path",
+						"Y", int(sy), "U", int(su), "V", int(sv))
+				}
+				if drop {
 					if usedMapFrame {
 						C.av_frame_unref(d.mapFrame)
 					} else if srcFrame == d.swFrame {
@@ -2543,10 +2583,25 @@ func (d *ffmpegDecoder) convertFrame(regionHint []C.uint16_t, nRegions C.int) (*
 		// unambiguous indicator of an uninitialised buffer.  Drop the frame
 		// and keep hwNeedsZeroCheck set so we continue checking until a frame
 		// with valid chroma arrives.
+		//
+		// A second pattern is Y=0, U≈128, V≈128: VideoToolbox occasionally
+		// outputs a fully-black frame (Y plane zeroed, UV neutral) for the
+		// first 1-2 frames after an IDR flush while the pipeline warms up.
+		// This is detected by sampling Y at a 3×3 grid; if all 9 samples are
+		// near zero the frame is an uninitialised buffer and is dropped.
 		if needZeroCheck {
+			drop := false
 			if su == 0 && sv == 0 {
-				slog.Debug("H.264: dropping zero-filled HW frame (IOSurface not ready)",
+				drop = true
+				slog.Debug("H.264: dropping zero-UV HW frame (IOSurface not ready)",
 					"Y", int(sy))
+			} else if sy == 0 && su >= 124 && su <= 132 && sv >= 124 && sv <= 132 &&
+				C.grdp_is_warmup_nv12(srcFrame, 4) != 0 {
+				drop = true
+				slog.Debug("H.264: dropping black warm-up HW frame",
+					"Y", int(sy), "U", int(su), "V", int(sv))
+			}
+			if drop {
 				if usedMapFrame {
 					C.av_frame_unref(d.mapFrame)
 				} else if srcFrame == d.swFrame {
@@ -2557,7 +2612,7 @@ func (d *ffmpegDecoder) convertFrame(regionHint []C.uint16_t, nRegions C.int) (*
 				// and callers skip the keyframe-request / decoder-broken path.
 				return &rdpgfx.H264Frame{Dropped: true, Width: int(w), Height: int(h)}, transferNs, nil
 			}
-			// Valid chroma seen — IOSurface is properly populated.
+			// Valid frame seen — IOSurface is properly populated.
 			d.hwNeedsZeroCheck = false
 		}
 		if haveRegions {
