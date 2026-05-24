@@ -1375,6 +1375,22 @@ func (g *GfxHandler) maybeNotifyDecoderBroken() {
 	if g.softResetCount < softResetLimit {
 		g.softResetCount++
 		if reason == H264BrokenReasonHWStall && !g.usingSWFallback {
+			// If a proactive ForceRefresh was already sent before the watchdog
+			// fired and the server has not responded with an IDR, the server
+			// will not respond to another one either (observed with Windows
+			// Server + AVC444).  Skip SW fallback and reconnect immediately to
+			// avoid an extra 1 s of frozen screen waiting for a response that
+			// will never arrive.
+			const recentKFRequestWindow = 3 * time.Second
+			if !g.lastKeyframeRequest.IsZero() && time.Since(g.lastKeyframeRequest) < recentKFRequestWindow {
+				slog.Debug("H.264: proactive ForceRefresh already sent with no IDR response — skipping SW fallback, reconnecting",
+					"sinceKFRequest", time.Since(g.lastKeyframeRequest).Round(time.Millisecond))
+				g.decoderBrokenNotified = true
+				if g.onDecoderBroken != nil {
+					go g.onDecoderBroken()
+				}
+				return
+			}
 			slog.Debug("H.264: HW stall — falling back to software decoding",
 				"attempt", g.softResetCount, "limit", softResetLimit)
 			g.usingSWFallback = true

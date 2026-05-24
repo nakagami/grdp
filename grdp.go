@@ -1206,9 +1206,13 @@ func (g *RdpClient) Reconnect(width, height int) error {
 
 	const maxRetries = 3
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		// Exponential backoff: 1s, 2s, 4s — gives the server time to
-		// tear down the previous session before we reconnect.
-		delay := time.Duration(1<<uint(attempt-1)) * time.Second
+		// No delay on the first attempt: the transport was already closed above
+		// so the server has already started session teardown.  Use exponential
+		// backoff (1s, 2s) only for retries after a failed login.
+		delay := time.Duration(0)
+		if attempt > 1 {
+			delay = time.Duration(1<<uint(attempt-2)) * time.Second
+		}
 		slog.Debug("Reconnect: waiting before attempt", "attempt", attempt, "delay", delay)
 		time.Sleep(delay)
 
