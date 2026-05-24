@@ -27,3 +27,24 @@ var idwtBufPool = sync.Pool{
 		return &idwtBufs{tmp: make([]int16, 4096)}
 	},
 }
+
+// planeBufPool reuses byte slices for the per-component planes in decodePlanar.
+// The plane size varies (w×h bytes), so the pool stores capacity-keyed slices;
+// acquirePlaneBuf re-slices to exactly `size` when the capacity is sufficient.
+var planeBufPool = sync.Pool{
+	New: func() any { return []byte(nil) },
+}
+
+func acquirePlaneBuf(size int) []byte {
+	b := planeBufPool.Get().([]byte)
+	if cap(b) >= size {
+		return b[:size]
+	}
+	return make([]byte, size)
+}
+
+func releasePlaneBuf(b []byte) {
+	if b != nil {
+		planeBufPool.Put(b[:cap(b)])
+	}
+}

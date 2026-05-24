@@ -1900,6 +1900,16 @@ func (g *GfxHandler) emitCaVideoRects(s *surface, rects []rfxRect) {
 
 func blitToSurface(s *surface, x, y, w, h int, src []byte) {
 	stride := int(s.width) * 4
+	// Full-width fast path: when x==0 and w==surface.width the entire region
+	// is contiguous in both src and s.data — replace h row-copies with one.
+	if x == 0 && w == int(s.width) && y >= 0 && y+h <= int(s.height) {
+		dstOff := y * stride
+		n := h * stride
+		if n <= len(src) && dstOff+n <= len(s.data) {
+			copy(s.data[dstOff:dstOff+n], src[:n])
+			return
+		}
+	}
 	for row := range h {
 		dy := y + row
 		if dy < 0 || dy >= int(s.height) {
@@ -1973,6 +1983,12 @@ func decodePlanar(data []byte, w, h int) []byte {
 	offset := 1
 
 	var alphaPlane, redPlane, greenPlane, bluePlane []byte
+	defer func() {
+		releasePlaneBuf(alphaPlane)
+		releasePlaneBuf(redPlane)
+		releasePlaneBuf(greenPlane)
+		releasePlaneBuf(bluePlane)
+	}()
 	if rle == 0 {
 		if noAlpha == 0 {
 			alphaPlane, offset = readRawPlane(data, offset, planeSize)
@@ -2038,16 +2054,21 @@ func planeOrZero(plane []byte, size int) []byte {
 }
 
 func readRawPlane(data []byte, offset, size int) ([]byte, int) {
-	plane := make([]byte, size)
+	plane := acquirePlaneBuf(size)
 	end := min(offset+size, len(data))
 	if offset < end {
 		copy(plane, data[offset:end])
+		if end-offset < size {
+			clear(plane[end-offset:])
+		}
+	} else {
+		clear(plane)
 	}
 	return plane, offset + size
 }
 
 func decodeNRLE(data []byte, offset, planeSize int) ([]byte, int) {
-	out := make([]byte, planeSize)
+	out := acquirePlaneBuf(planeSize)
 	pos := 0
 	for pos < planeSize && offset < len(data) {
 		ctrl := data[offset]
@@ -2122,23 +2143,23 @@ func (ctx *clearCodecCtx) decode(data []byte, w, h int) []byte {
 	if len(data) < 12 {
 		return make([]byte, w*h*4)
 	}
-	r := bytes.NewReader(data)
-	residualLen, _ := core.ReadUInt32LE(r)
-	bandsLen, _ := core.ReadUInt32LE(r)
-	subcodecLen, _ := core.ReadUInt32LE(r)
+	// Direct binary indexing — avoids bytes.NewReader and per-field interface dispatch.
+	residualLen := int(binary.LittleEndian.Uint32(data[0:]))
+	bandsLen := int(binary.LittleEndian.Uint32(data[4:]))
+	subcodecLen := int(binary.LittleEndian.Uint32(data[8:]))
+	off := 12
 
 	out := make([]byte, w*h*4)
-	if residualLen > 0 {
-		residual, _ := core.ReadBytes(int(residualLen), r)
-		decodeResidual(residual, w, h, out)
+	if residualLen > 0 && off+residualLen <= len(data) {
+		decodeResidual(data[off:off+residualLen], w, h, out)
 	}
-	if bandsLen > 0 {
-		bands, _ := core.ReadBytes(int(bandsLen), r)
-		ctx.decodeBands(bands, w, out)
+	off += residualLen
+	if bandsLen > 0 && off >= 0 && off+bandsLen <= len(data) {
+		ctx.decodeBands(data[off:off+bandsLen], w, out)
 	}
-	if subcodecLen > 0 {
-		subcodec, _ := core.ReadBytes(int(subcodecLen), r)
-		decodeSubcodec(subcodec, w, out)
+	off += bandsLen
+	if subcodecLen > 0 && off >= 0 && off+subcodecLen <= len(data) {
+		decodeSubcodec(data[off:off+subcodecLen], w, out)
 	}
 	return out
 }
@@ -2166,15 +2187,17 @@ func decodeResidual(data []byte, w, h int, out []byte) {
 }
 
 func (ctx *clearCodecCtx) decodeBands(data []byte, surfW int, out []byte) {
-	r := bytes.NewReader(data)
-	for r.Len() >= 11 {
-		xStart, _ := core.ReadUint16LE(r)
-		yStart, _ := core.ReadUint16LE(r)
-		xEnd, _ := core.ReadUint16LE(r)
-		yEnd, _ := core.ReadUint16LE(r)
-		blueBg, _ := core.ReadUInt8(r)
-		greenBg, _ := core.ReadUInt8(r)
-		redBg, _ := core.ReadUInt8(r)
+	// Direct slice indexing — avoids bytes.NewReader and per-field interface dispatch.
+	off := 0
+	for off+11 <= len(data) {
+		xStart := binary.LittleEndian.Uint16(data[off:])
+		yStart := binary.LittleEndian.Uint16(data[off+2:])
+		xEnd := binary.LittleEndian.Uint16(data[off+4:])
+		yEnd := binary.LittleEndian.Uint16(data[off+6:])
+		blueBg := data[off+8]
+		greenBg := data[off+9]
+		redBg := data[off+10]
+		off += 11
 
 		bandHeight := int(yEnd - yStart)
 		colCount := int(xEnd - xStart)
@@ -2183,10 +2206,11 @@ func (ctx *clearCodecCtx) decodeBands(data []byte, surfW int, out []byte) {
 		}
 
 		for col := range colCount {
-			if r.Len() < 2 {
+			if off+2 > len(data) {
 				return
 			}
-			vBarHeader, _ := core.ReadUint16LE(r)
+			vBarHeader := binary.LittleEndian.Uint16(data[off:])
+			off += 2
 			x := int(xStart) + col
 
 			if (vBarHeader & 0xC000) == 0xC000 {
@@ -2200,18 +2224,16 @@ func (ctx *clearCodecCtx) decodeBands(data []byte, surfW int, out []byte) {
 			} else if (vBarHeader & 0xC000) == 0x4000 {
 				// SHORT_VBAR_CACHE_MISS
 				pixCount := int(vBarHeader & 0x3FFF)
-				if r.Len() < 1 {
+				if off >= len(data) {
 					return
 				}
-				yOn, _ := core.ReadUInt8(r)
-				pixels := make([]byte, pixCount*3)
-				if r.Len() >= pixCount*3 {
-					rp, _ := core.ReadBytes(pixCount*3, r)
-					copy(pixels, rp)
-				} else {
-					rp, _ := core.ReadBytes(r.Len(), r)
-					copy(pixels, rp)
-				}
+				yOn := data[off]
+				off++
+				n := pixCount * 3
+				pixels := make([]byte, n)
+				available := min(n, len(data)-off)
+				copy(pixels, data[off:off+available])
+				off += available
 				entry := vBarEntry{pixels: pixels, count: pixCount}
 				if ctx.shortVBarCursor < len(ctx.shortVBarStorage) {
 					ctx.shortVBarStorage[ctx.shortVBarCursor] = entry
@@ -2229,14 +2251,11 @@ func (ctx *clearCodecCtx) decodeBands(data []byte, surfW int, out []byte) {
 			} else {
 				// VBAR_CACHE_MISS
 				pixCount := int(vBarHeader & 0x7FFF)
-				pixels := make([]byte, pixCount*3)
-				if r.Len() >= pixCount*3 {
-					rp, _ := core.ReadBytes(pixCount*3, r)
-					copy(pixels, rp)
-				} else {
-					rp, _ := core.ReadBytes(r.Len(), r)
-					copy(pixels, rp)
-				}
+				n := pixCount * 3
+				pixels := make([]byte, n)
+				available := min(n, len(data)-off)
+				copy(pixels, data[off:off+available])
+				off += available
 				entry := vBarEntry{pixels: pixels, count: pixCount}
 				if ctx.vBarCursor < len(ctx.vBarStorage) {
 					ctx.vBarStorage[ctx.vBarCursor] = entry
@@ -2288,18 +2307,21 @@ func paintVBarPixels(out []byte, surfW, x, yStart, yOn int, entry vBarEntry) {
 }
 
 func decodeSubcodec(data []byte, surfW int, out []byte) {
-	r := bytes.NewReader(data)
-	for r.Len() >= 13 {
-		xStart, _ := core.ReadUint16LE(r)
-		yStart, _ := core.ReadUint16LE(r)
-		width, _ := core.ReadUint16LE(r)
-		height, _ := core.ReadUint16LE(r)
-		bmpLen, _ := core.ReadUInt32LE(r)
-		subcodecId, _ := core.ReadUInt8(r)
-		if int(bmpLen) > r.Len() {
+	// Direct slice indexing — avoids bytes.NewReader and per-field interface dispatch.
+	off := 0
+	for off+13 <= len(data) {
+		xStart := binary.LittleEndian.Uint16(data[off:])
+		yStart := binary.LittleEndian.Uint16(data[off+2:])
+		width := binary.LittleEndian.Uint16(data[off+4:])
+		height := binary.LittleEndian.Uint16(data[off+6:])
+		bmpLen := int(binary.LittleEndian.Uint32(data[off+8:]))
+		subcodecId := data[off+12]
+		off += 13
+		if off+bmpLen > len(data) {
 			break
 		}
-		bmpData, _ := core.ReadBytes(int(bmpLen), r)
+		bmpData := data[off : off+bmpLen]
+		off += bmpLen
 
 		if subcodecId == 0 {
 			// RAW BGR
