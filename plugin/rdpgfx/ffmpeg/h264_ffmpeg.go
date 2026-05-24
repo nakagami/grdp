@@ -1331,14 +1331,13 @@ const keyframeWaitTimeout = 15 * time.Second
 const keyframeWaitTimeoutSW = 5 * time.Second
 
 // keyframeWaitTimeoutSWFallback is the keyframe-wait timer for the main SW
-// fallback decoder (created after a VideoToolbox stall).  Set to 1 s because
-// Windows Server in AVC444 mode does not send an IDR in response to
-// ForceRefresh (SuppressOutput toggle) — observed across multiple test runs
-// where 90+ frames arrived over 3 s with no IDR after ForceRefresh.  A 1 s
-// window is sufficient to catch the rare case where the server does respond
-// promptly; if no IDR arrives the code escalates directly to reconnect
-// (usingSWFallback skips the noIDRSoftResetCount retry).
-const keyframeWaitTimeoutSWFallback = 1 * time.Second
+// fallback decoder (created after a VideoToolbox stall).  Set to 3 s to give
+// Windows Server enough time to respond to the ForceRefresh (SuppressOutput
+// toggle) with a fresh IDR before escalating to a full reconnect.  Some
+// Windows Server versions respond within 1–2 s; others never respond in
+// AVC444 mode, in which case the reconnect happens after 3 s regardless.
+// The 3 s window avoids spurious reconnects when the server responds slowly.
+const keyframeWaitTimeoutSWFallback = 3 * time.Second
 
 // profileWindow is the number of HW frames over which Decode aggregates
 // timing measurements before logging an INFO summary.  At 30 fps this is
