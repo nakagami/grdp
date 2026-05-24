@@ -2373,11 +2373,9 @@ func (d *ffmpegDecoder) convertFrame(regionHint []C.uint16_t, nRegions C.int) (*
 		if d.useHW && d.hwNeedsZeroCheck {
 			var sy, su, sv C.uint8_t
 			C.grdp_sample_nv12(srcFrame, &sy, &su, &sv)
-			isZeroUV := su == 0 && sv == 0
-			isBlackFrame := sy == 0 && su >= 124 && su <= 132 && sv >= 124 && sv <= 132
-			if isZeroUV || isBlackFrame {
+			if su == 0 && sv == 0 {
 				slog.Debug("H.264: dropping zero-filled HW frame in NV12 path (IOSurface not ready)",
-					"Y", int(sy), "U", int(su), "V", int(sv))
+					"Y", int(sy))
 				if usedMapFrame {
 					C.av_frame_unref(d.mapFrame)
 				} else if srcFrame == d.swFrame {
@@ -2420,11 +2418,9 @@ func (d *ffmpegDecoder) convertFrame(regionHint []C.uint16_t, nRegions C.int) (*
 			if srcFmt == C.AV_PIX_FMT_NV12 && d.useHW && d.hwNeedsZeroCheck {
 				var sy, su, sv C.uint8_t
 				C.grdp_sample_nv12(srcFrame, &sy, &su, &sv)
-				isZeroUV := su == 0 && sv == 0
-				isBlackFrame := sy == 0 && su >= 124 && su <= 132 && sv >= 124 && sv <= 132
-				if isZeroUV || isBlackFrame {
+				if su == 0 && sv == 0 {
 					slog.Debug("H.264: dropping zero-filled HW frame in I420 path (IOSurface not ready)",
-						"Y", int(sy), "U", int(su), "V", int(sv))
+						"Y", int(sy))
 					if usedMapFrame {
 						C.av_frame_unref(d.mapFrame)
 					} else if srcFrame == d.swFrame {
@@ -2550,7 +2546,7 @@ func (d *ffmpegDecoder) convertFrame(regionHint []C.uint16_t, nRegions C.int) (*
 		if needZeroCheck {
 			if su == 0 && sv == 0 {
 				slog.Debug("H.264: dropping zero-filled HW frame (IOSurface not ready)",
-					"Y", int(sy), "U", int(su), "V", int(sv))
+					"Y", int(sy))
 				if usedMapFrame {
 					C.av_frame_unref(d.mapFrame)
 				} else if srcFrame == d.swFrame {
@@ -2561,20 +2557,7 @@ func (d *ffmpegDecoder) convertFrame(regionHint []C.uint16_t, nRegions C.int) (*
 				// and callers skip the keyframe-request / decoder-broken path.
 				return &rdpgfx.H264Frame{Dropped: true, Width: int(w), Height: int(h)}, transferNs, nil
 			}
-			// VideoToolbox pipeline warm-up: Y=0 with neutral chroma (U≈128, V≈128)
-			// indicates the first frame(s) are black due to an uninitialized pipeline
-			// buffer, not actual video content.  Drop until real luma arrives.
-			if sy == 0 && su >= 124 && su <= 132 && sv >= 124 && sv <= 132 {
-				slog.Debug("H.264: dropping black HW frame (VideoToolbox pipeline not ready)",
-					"Y", int(sy), "U", int(su), "V", int(sv))
-				if usedMapFrame {
-					C.av_frame_unref(d.mapFrame)
-				} else if srcFrame == d.swFrame {
-					C.av_frame_unref(d.swFrame)
-				}
-				return &rdpgfx.H264Frame{Dropped: true, Width: int(w), Height: int(h)}, transferNs, nil
-			}
-			// Valid frame seen — IOSurface is properly populated.
+			// Valid chroma seen — IOSurface is properly populated.
 			d.hwNeedsZeroCheck = false
 		}
 		if haveRegions {
