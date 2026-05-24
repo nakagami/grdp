@@ -207,6 +207,9 @@ func (g *GfxHandler) decodeAVC420(data []byte, destX, destY, destW, destH int) (
 	if len(stream.h264Data) == 0 {
 		return nil, nil, false
 	}
+	if isH264Keyframe(stream.h264Data) {
+		g.maybeCacheStream1IDR(stream.h264Data)
+	}
 	// For frames where only a small dirty area changed, pass region hints so
 	// the decoder can skip converting pixels outside those rectangles.  This
 	// is safe here because decodeAVC420 uses blitAndEmitAVCRegions (which only
@@ -287,7 +290,13 @@ func (g *GfxHandler) decodeAVC444(data []byte, destX, destY, destW, destH int) (
 	var frame *H264Frame
 	var i420out *H264FrameI420
 	var err error
-	isIDR := g.h264dec2 != nil && isH264Keyframe(stream1.h264Data)
+	isKeyFrame := isH264Keyframe(stream1.h264Data)
+	if isKeyFrame {
+		// Cache IDR NAL data so the SW fallback decoder can be primed
+		// immediately after a VideoToolbox stall without waiting for VBox.
+		g.maybeCacheStream1IDR(stream1.h264Data)
+	}
+	isIDR := g.h264dec2 != nil && isKeyFrame
 	if isIDR {
 		// Reset per-GOP diagnostic flags so the LC=0 IDR and LC=2 combine
 		// after this IDR are sampled again for colour diagnostics.
@@ -407,6 +416,9 @@ func (g *GfxHandler) decodeAVC420WithI420(data []byte, destX, destY, destW, dest
 	if g.h264dec == nil || len(stream.h264Data) == 0 {
 		return
 	}
+	if isH264Keyframe(stream.h264Data) {
+		g.maybeCacheStream1IDR(stream.h264Data)
+	}
 	var frame *H264Frame
 	i420dec, hasI420 := g.h264dec.(I420Decoder)
 	if hasI420 {
@@ -468,6 +480,9 @@ func (g *GfxHandler) decodeAVC420WithNV12(data []byte, destX, destY, destW, dest
 	}
 	if g.h264dec == nil || len(stream.h264Data) == 0 {
 		return
+	}
+	if isH264Keyframe(stream.h264Data) {
+		g.maybeCacheStream1IDR(stream.h264Data)
 	}
 	var frame *H264Frame
 	nv12dec, hasNV12 := g.h264dec.(NV12Decoder)
@@ -534,6 +549,9 @@ func (g *GfxHandler) decodeAVC444WithI420(data []byte, destX, destY, destW, dest
 	}
 	if g.h264dec == nil || stream1 == nil || len(stream1.h264Data) == 0 {
 		return
+	}
+	if isH264Keyframe(stream1.h264Data) {
+		g.maybeCacheStream1IDR(stream1.h264Data)
 	}
 	var frame *H264Frame
 	i420dec, hasI420 := g.h264dec.(I420Decoder)
@@ -659,6 +677,28 @@ func (g *GfxHandler) copyAVC444YToIDRCache() {
 	dst.h = src.h
 	dst.fullRange = src.fullRange
 	dst.updatedAt = src.updatedAt
+}
+
+// maybeCacheStream1IDR stores h264Data as the latest stream1 IDR NAL data for
+// later use when priming the SW fallback decoder after a VideoToolbox stall.
+// The data is copied so the caller's buffer may be reused freely.
+// Only call when isH264Keyframe(h264Data) is true.
+func (g *GfxHandler) maybeCacheStream1IDR(h264Data []byte) {
+	g.lastStream1IDR = append(g.lastStream1IDR[:0], h264Data...)
+	g.lastStream1IDRTime = time.Now()
+	g.lastStream1IDRFrame = g.framesDecoded.Load()
+	if g.usingSWFallback {
+		// A natural IDR from the server arrived while in SW fallback mode.
+		// From this frame onwards the SW decoder has a fresh reference point and
+		// error concealment (block noise) should stop.
+		slog.Debug("H.264: natural IDR received during SW fallback — block noise should stop",
+			"idrLen", len(h264Data),
+			"framesDecoded", g.lastStream1IDRFrame)
+	} else {
+		slog.Debug("H.264: stream1 IDR cached for SW fallback priming",
+			"idrLen", len(h264Data),
+			"framesDecoded", g.lastStream1IDRFrame)
+	}
 }
 
 // isAuxChromaBlank returns true when i420aux.Y appears to be all-zero or
@@ -1342,6 +1382,21 @@ func (g *GfxHandler) decodeAVC444LC2(stream2 *avc420Stream, destW, destH int) (d
 // before escalating to a full RDP reconnect.
 const softResetLimit = 5
 
+// idrPrimeMaxStaleness is the maximum age of a cached stream1 IDR that may be
+// used to prime the SW fallback decoder after a VideoToolbox stall.  When the
+// IDR is younger than this threshold (e.g. the server sends periodic IDRs every
+// ~2 s and VTB stalled recently), priming lets the SW decoder skip the IDR wait
+// and resume decoding with only minor block noise from the few missing reference
+// frames.
+//
+// When the cached IDR is older than this threshold (e.g. VirtualBox VRDE, which
+// sends a single IDR at session start and ignores ForceRefresh), priming is
+// skipped: the SW fallback watchdog fires after keyframeWaitTimeoutSWFallback,
+// the decoder is marked broken, and the session reconnects.  Reconnecting is
+// preferable to permanent heavy block noise caused by thousands of missing
+// reference frames.
+const idrPrimeMaxStaleness = 3 * time.Second
+
 // maybeRequestKeyframe sends a keyframe request to the server when either
 // decoder needs a fresh IDR.  Requests are rate-limited to once per 2 seconds
 // so that repeated nil-frame callbacks (e.g. while waiting for the IDR) don't
@@ -1482,6 +1537,35 @@ func (g *GfxHandler) maybeNotifyDecoderBroken() {
 			g.h264dec = newH264DecoderSWWithWatchdog(g.watchdogCh)
 		} else {
 			g.h264dec = newH264DecoderWithWatchdog(g.watchdogCh)
+		}
+		// Prime the SW fallback decoder with the last cached stream1 IDR so it
+		// can decode subsequent P-frames immediately, without waiting for the
+		// server to send a fresh IDR via ForceRefresh.  Only prime when the
+		// cached IDR is recent enough (within idrPrimeMaxStaleness): a stale IDR
+		// means many reference frames are missing from the SW decoder's DPB,
+		// causing permanent heavy block noise from error concealment.
+		// VirtualBox VRDE sends a single IDR at session start and ignores
+		// ForceRefresh, so its IDR is always stale at SW fallback time →
+		// priming is skipped and the watchdog triggers a clean reconnect instead.
+		idrAge := time.Since(g.lastStream1IDRTime)
+		idrFrameAge := g.framesDecoded.Load() - g.lastStream1IDRFrame
+		if g.usingSWFallback && len(g.lastStream1IDR) > 0 &&
+			!g.lastStream1IDRTime.IsZero() && idrAge <= idrPrimeMaxStaleness {
+			slog.Debug("H.264: priming SW fallback with cached stream1 IDR to avoid IDR wait",
+				"idrLen", len(g.lastStream1IDR),
+				"idrAge", idrAge.Round(time.Millisecond),
+				"idrFrameAge", idrFrameAge,
+			)
+			if _, err := g.h264dec.Decode(g.lastStream1IDR); err != nil {
+				slog.Debug("H.264: cached IDR prime failed, watchdog will wait for natural IDR",
+					"err", err)
+			}
+		} else if g.usingSWFallback {
+			slog.Debug("H.264: cached IDR too stale for SW fallback priming — watchdog will reconnect",
+				"idrAge", idrAge.Round(time.Millisecond),
+				"idrFrameAge", idrFrameAge,
+				"maxStaleness", idrPrimeMaxStaleness,
+			)
 		}
 		// Keep h264dec2 if healthy; tear it down if already broken so
 		// primeAuxDecoder can recreate it when the next stream2 IDR arrives,

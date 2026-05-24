@@ -313,6 +313,20 @@ type GfxHandler struct {
 	// launched → transient, wait for IDR rather than logging a WARN).
 	// Reset on RESET_GRAPHICS since the server starts a fresh AVC444 sequence.
 	stream2EverSeen bool
+	// lastStream1IDR caches the most recent stream1 H.264 IDR NAL data in
+	// Annex B format.  When VideoToolbox stalls and the decoder falls back to
+	// software, this data is fed immediately to the new SW decoder so it can
+	// decode subsequent P-frames without waiting for VirtualBox to send a fresh
+	// IDR via ForceRefresh (which VirtualBox VRDE ignores).
+	// Only used when the IDR is recent enough (see idrPrimeMaxStaleness).
+	// Cleared on RESET_GRAPHICS to avoid feeding a stale IDR to a new pipeline.
+	lastStream1IDR []byte
+	// lastStream1IDRTime is the wall-clock time when the most recent stream1 IDR
+	// was cached.  Used to decide whether the cached IDR is fresh enough to prime
+	// the SW fallback decoder without causing severe block noise.
+	// lastStream1IDRFrame is framesDecoded at the same instant, logged for diagnostics.
+	lastStream1IDRTime  time.Time
+	lastStream1IDRFrame uint32
 	// avc444Disabled, when true, limits the CAPS_ADVERTISE to v8.0 and v8.1
 	// (AVC420 only).  The server will never send AVC444/AVC444v2 frames, which
 	// avoids the LC=2 colour degradation seen with VirtualBox VRDE.
@@ -1214,6 +1228,9 @@ func (g *GfxHandler) onResetGraphics(data []byte) {
 	g.auxDecoderNoIDRRetries = 0
 	g.lc2PermanentlyDegraded = false
 	g.lastKeyframeRequest = time.Time{}
+	g.lastStream1IDR = g.lastStream1IDR[:0]
+	g.lastStream1IDRTime = time.Time{}
+	g.lastStream1IDRFrame = 0
 	g.lastDecodedFrame.Store(0)
 	g.stopInputWatchdog()
 	if g.h264dec != nil {
