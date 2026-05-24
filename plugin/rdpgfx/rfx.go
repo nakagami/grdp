@@ -37,7 +37,15 @@ const (
 	cbtTile    = 0xCAC3
 )
 
-type rfxDecoder struct{}
+type rfxTileWork struct {
+	content []byte
+}
+
+type rfxDecoder struct {
+	rectsBuf  []rfxRect
+	tilesBuf  []rfxTileWork
+	quantsBuf []rfxQuant
+}
 
 func newRfxDecoder() *rfxDecoder {
 	return &rfxDecoder{}
@@ -112,7 +120,12 @@ func (d *rfxDecoder) parseRegion(data []byte, left, top int) []rfxRect {
 		return nil
 	}
 
-	rects := make([]rfxRect, numRects)
+	if cap(d.rectsBuf) >= int(numRects) {
+		d.rectsBuf = d.rectsBuf[:numRects]
+	} else {
+		d.rectsBuf = make([]rfxRect, numRects)
+	}
+	rects := d.rectsBuf
 	off := 3
 	for i := range numRects {
 		rects[i] = rfxRect{
@@ -170,17 +183,24 @@ func (d *rfxDecoder) decodeTileset(data []byte, left, top int, surfData []byte, 
 	if off+numQuant*5 > len(data) {
 		return nil
 	}
-	quants := make([]rfxQuant, numQuant)
+	if cap(d.quantsBuf) >= numQuant {
+		d.quantsBuf = d.quantsBuf[:numQuant]
+	} else {
+		d.quantsBuf = make([]rfxQuant, numQuant)
+	}
+	quants := d.quantsBuf
 	for i := range numQuant {
 		quants[i] = parseRfxQuant(data[off:])
 		off += 5
 	}
 
 	// Collect tile content slices for parallel decoding.
-	type tileWork struct {
-		content []byte
+	if cap(d.tilesBuf) >= numTiles {
+		d.tilesBuf = d.tilesBuf[:0]
+	} else {
+		d.tilesBuf = make([]rfxTileWork, 0, numTiles)
 	}
-	tiles := make([]tileWork, 0, numTiles)
+	tiles := d.tilesBuf
 	for range numTiles {
 		if off+6 > len(data) {
 			break
@@ -195,9 +215,10 @@ func (d *rfxDecoder) decodeTileset(data []byte, left, top int, surfData []byte, 
 			break
 		}
 
-		tiles = append(tiles, tileWork{content: data[off+6 : off+tileBlockLen]})
+		tiles = append(tiles, rfxTileWork{content: data[off+6 : off+tileBlockLen]})
 		off += tileBlockLen
 	}
+	d.tilesBuf = tiles
 
 	// Decode tiles concurrently — each tile writes to its own non-overlapping
 	// 64×64 region of the output buffer so no locking is needed. For small
@@ -206,7 +227,7 @@ func (d *rfxDecoder) decodeTileset(data []byte, left, top int, surfData []byte, 
 	const parallelTileThreshold = 12
 	if len(tiles) >= parallelTileThreshold {
 		workers := min(runtime.NumCPU(), len(tiles))
-		ch := make(chan tileWork, len(tiles))
+		ch := make(chan rfxTileWork, len(tiles))
 		for _, t := range tiles {
 			ch <- t
 		}

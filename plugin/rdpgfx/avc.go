@@ -259,8 +259,13 @@ func (g *GfxHandler) decodeAVC420(data []byte, destX, destY, destW, destH int) (
 	// the actual decode path, avoiding a redundant walk of the metadata.
 	parseErr := fillAVC420Stream(data, &g.avcStream1)
 	stream := &g.avcStream1
+	// Compute isKF once — shared between the onH264Raw forwarding path and the
+	// maybeCacheStream1IDR call below, avoiding two linear scans of the NAL data.
+	var isKF bool
+	if parseErr == nil && len(stream.h264Data) > 0 {
+		isKF = isH264Keyframe(stream.h264Data)
+	}
 	if g.onH264Raw != nil && parseErr == nil && len(stream.h264Data) > 0 {
-		isKF := isH264Keyframe(stream.h264Data)
 		nalData := make([]byte, len(stream.h264Data))
 		copy(nalData, stream.h264Data)
 		g.onH264Raw(destX, destY, destW, destH, isKF, nalData)
@@ -275,7 +280,7 @@ func (g *GfxHandler) decodeAVC420(data []byte, destX, destY, destW, destH int) (
 	if len(stream.h264Data) == 0 {
 		return nil, nil, false
 	}
-	if isH264Keyframe(stream.h264Data) {
+	if isKF {
 		g.maybeCacheStream1IDR(stream.h264Data)
 	}
 	// For frames where only a small dirty area changed, pass region hints so
@@ -327,8 +332,13 @@ func (g *GfxHandler) decodeAVC444(data []byte, destX, destY, destW, destH int) (
 	// Parse the stream header once and reuse for both the raw-NAL callback and
 	// the actual decode path, avoiding a redundant walk of the metadata.
 	stream1, stream2, lc, parseErr := g.fillAVC444Stream(data)
+	// Compute isKF once — shared between the onH264Raw forwarding path and the
+	// maybeCacheStream1IDR call below, avoiding two linear scans of the NAL data.
+	var isKF bool
+	if parseErr == nil && stream1 != nil && len(stream1.h264Data) > 0 {
+		isKF = isH264Keyframe(stream1.h264Data)
+	}
 	if g.onH264Raw != nil && parseErr == nil && stream1 != nil && len(stream1.h264Data) > 0 {
-		isKF := isH264Keyframe(stream1.h264Data)
 		nalData := make([]byte, len(stream1.h264Data))
 		copy(nalData, stream1.h264Data)
 		g.onH264Raw(destX, destY, destW, destH, isKF, nalData)
@@ -366,7 +376,7 @@ func (g *GfxHandler) decodeAVC444(data []byte, destX, destY, destW, destH int) (
 	var frame *H264Frame
 	var i420out *H264FrameI420
 	var err error
-	isKeyFrame := isH264Keyframe(stream1.h264Data)
+	isKeyFrame := isKF
 	if isKeyFrame {
 		// Cache IDR NAL data so the SW fallback decoder can be primed
 		// immediately after a VideoToolbox stall without waiting for VBox.
@@ -549,8 +559,13 @@ func (g *GfxHandler) decodeAVC420WithNV12(data []byte, destX, destY, destW, dest
 		return
 	}
 	stream := &g.avcStream1
+	// Compute isKF once — shared between the onH264Raw forwarding path and the
+	// maybeCacheStream1IDR call below, avoiding two linear scans of the NAL data.
+	var isKF bool
+	if len(stream.h264Data) > 0 {
+		isKF = isH264Keyframe(stream.h264Data)
+	}
 	if g.onH264Raw != nil && len(stream.h264Data) > 0 {
-		isKF := isH264Keyframe(stream.h264Data)
 		nalData := make([]byte, len(stream.h264Data))
 		copy(nalData, stream.h264Data)
 		g.onH264Raw(destX, destY, destW, destH, isKF, nalData)
@@ -558,7 +573,7 @@ func (g *GfxHandler) decodeAVC420WithNV12(data []byte, destX, destY, destW, dest
 	if g.h264dec == nil || len(stream.h264Data) == 0 {
 		return
 	}
-	if isH264Keyframe(stream.h264Data) {
+	if isKF {
 		g.maybeCacheStream1IDR(stream.h264Data)
 	}
 	var frame *H264Frame
@@ -611,8 +626,13 @@ func (g *GfxHandler) decodeAVC420WithNV12(data []byte, destX, destY, destW, dest
 // back to BGRA).
 func (g *GfxHandler) decodeAVC444WithI420(data []byte, destX, destY, destW, destH int) (decoded []byte, i420 *H264FrameI420, regions []avcRect, pooled bool) {
 	stream1, stream2, lc, err := g.fillAVC444Stream(data)
+	// Compute isKF once — shared between the onH264Raw forwarding path and the
+	// maybeCacheStream1IDR call below, avoiding two linear scans of the NAL data.
+	var isKF bool
+	if stream1 != nil && len(stream1.h264Data) > 0 {
+		isKF = isH264Keyframe(stream1.h264Data)
+	}
 	if g.onH264Raw != nil && stream1 != nil && len(stream1.h264Data) > 0 {
-		isKF := isH264Keyframe(stream1.h264Data)
 		nalData := make([]byte, len(stream1.h264Data))
 		copy(nalData, stream1.h264Data)
 		g.onH264Raw(destX, destY, destW, destH, isKF, nalData)
@@ -628,7 +648,7 @@ func (g *GfxHandler) decodeAVC444WithI420(data []byte, destX, destY, destW, dest
 	if g.h264dec == nil || stream1 == nil || len(stream1.h264Data) == 0 {
 		return
 	}
-	if isH264Keyframe(stream1.h264Data) {
+	if isKF {
 		g.maybeCacheStream1IDR(stream1.h264Data)
 	}
 	var frame *H264Frame

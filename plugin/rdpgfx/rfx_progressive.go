@@ -45,9 +45,17 @@ type rfxTileCoeffs struct {
 	cr *coeffArr
 }
 
+type rfxProgTileWork struct {
+	tileType uint16
+	data     []byte
+}
+
 type rfxProgressiveDecoder struct {
 	mu        sync.Mutex
 	tileCache map[uint32]*rfxTileCoeffs // key: yIdx<<16 | xIdx
+	rectsBuf  []rfxRect
+	quantsBuf []rfxQuant
+	tilesBuf  []rfxProgTileWork
 }
 
 func newRfxProgressiveDecoder() *rfxProgressiveDecoder {
@@ -137,7 +145,12 @@ func (d *rfxProgressiveDecoder) parseRegion(data []byte, surfData []byte, outW, 
 	offset := 12
 
 	// Parse rects (8 bytes each: x, y, width, height as uint16)
-	rects := make([]rfxRect, numRects)
+	if cap(d.rectsBuf) >= int(numRects) {
+		d.rectsBuf = d.rectsBuf[:numRects]
+	} else {
+		d.rectsBuf = make([]rfxRect, numRects)
+	}
+	rects := d.rectsBuf
 	for i := range numRects {
 		if offset+8 > len(data) {
 			return nil, nil
@@ -151,7 +164,12 @@ func (d *rfxProgressiveDecoder) parseRegion(data []byte, surfData []byte, outW, 
 	}
 
 	// Parse quant values (5 bytes each)
-	quants := make([]rfxQuant, numQuant)
+	if cap(d.quantsBuf) >= int(numQuant) {
+		d.quantsBuf = d.quantsBuf[:numQuant]
+	} else {
+		d.quantsBuf = make([]rfxQuant, numQuant)
+	}
+	quants := d.quantsBuf
 	for i := range numQuant {
 		if offset+5 > len(data) {
 			return nil, nil
@@ -166,11 +184,12 @@ func (d *rfxProgressiveDecoder) parseRegion(data []byte, surfData []byte, outW, 
 	// Collect all decodable tiles before dispatching, so we can parallelise
 	// when there are enough to amortise goroutine overhead (same threshold as
 	// non-progressive decodeTileset in rfx.go).
-	type progTileWork struct {
-		tileType uint16
-		data     []byte
+	if cap(d.tilesBuf) >= int(numTiles) {
+		d.tilesBuf = d.tilesBuf[:0]
+	} else {
+		d.tilesBuf = make([]rfxProgTileWork, 0, numTiles)
 	}
-	tiles := make([]progTileWork, 0, numTiles)
+	tiles := d.tilesBuf
 	for offset+6 <= len(data) {
 		tileType := binary.LittleEndian.Uint16(data[offset:])
 		tileLen := binary.LittleEndian.Uint32(data[offset+2:])
@@ -179,15 +198,16 @@ func (d *rfxProgressiveDecoder) parseRegion(data []byte, surfData []byte, outW, 
 		}
 		switch tileType {
 		case progWBTTileSimple, progWBTTileFirst, progWBTTileUpgrade:
-			tiles = append(tiles, progTileWork{tileType: tileType, data: data[offset+6 : offset+int(tileLen)]})
+			tiles = append(tiles, rfxProgTileWork{tileType: tileType, data: data[offset+6 : offset+int(tileLen)]})
 		default:
 			slog.Debug("RFX: unknown progressive tile type", "type", tileType)
 		}
 		offset += int(tileLen)
 	}
+	d.tilesBuf = tiles
 
 	const parallelTileThreshold = 12
-	decodeTile := func(tw progTileWork, parallel bool) {
+	decodeTile := func(tw rfxProgTileWork, parallel bool) {
 		switch tw.tileType {
 		case progWBTTileSimple:
 			d.decodeTileSimple(tw.data, quants, surfData, outW, outH, parallel)
@@ -199,7 +219,7 @@ func (d *rfxProgressiveDecoder) parseRegion(data []byte, surfData []byte, outW, 
 	}
 	if len(tiles) >= parallelTileThreshold {
 		workers := min(runtime.NumCPU(), len(tiles))
-		ch := make(chan progTileWork, len(tiles))
+		ch := make(chan rfxProgTileWork, len(tiles))
 		for _, tw := range tiles {
 			ch <- tw
 		}
