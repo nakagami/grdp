@@ -691,32 +691,44 @@ func rfxIDWT2DLevel(buf, tmp []int16, n int) {
 	const blk = 8
 	col := 0
 	for ; col+blk <= size; col += blk {
+		// Row 0: first even output (no previous odd)
+		l0 := tmp[col : col+blk]
+		h0 := tmp[n*size+col : n*size+col+blk]
+		out0 := buf[col : col+blk]
 		for b := range blk {
-			c := col + b
-			lVal := int32(tmp[c])
-			hVal := int32(tmp[n*size+c])
-			buf[c] = int16(lVal - ((hVal*2 + 1) >> 1))
+			out0[b] = int16(int32(l0[b]) - ((int32(h0[b])*2 + 1) >> 1))
 		}
+		// Rows 1..n-1: interleaved even/odd outputs
 		for row := 1; row < n; row++ {
+			lBase := row*size + col
+			hBase := (row+n)*size + col
+			hPrevBase := (row-1+n)*size + col
+			evenBase := 2*row*size + col
+			prevEvenBase := (2*row-2)*size + col
+			oddBase := (2*row-1)*size + col
+
+			l := tmp[lBase : lBase+blk]
+			h := tmp[hBase : hBase+blk]
+			hPrev := tmp[hPrevBase : hPrevBase+blk]
+			evenOut := buf[evenBase : evenBase+blk]
+			prevEvenIn := buf[prevEvenBase : prevEvenBase+blk]
+			oddOut := buf[oddBase : oddBase+blk]
+
 			for b := range blk {
-				c := col + b
-				lIdx := row*size + c
-				hIdx := (row+n)*size + c
-				hPrevIdx := (row-1+n)*size + c
-
-				even := int32(tmp[lIdx]) - ((int32(tmp[hPrevIdx]) + int32(tmp[hIdx]) + 1) >> 1)
-				buf[2*row*size+c] = int16(even)
-
-				prevEven := int32(buf[(2*row-2)*size+c])
-				odd := (int32(tmp[hPrevIdx]) << 1) + ((prevEven + even) >> 1)
-				buf[(2*row-1)*size+c] = int16(odd)
+				hPrevV := int32(hPrev[b])
+				even := int32(l[b]) - ((hPrevV + int32(h[b]) + 1) >> 1)
+				evenOut[b] = int16(even)
+				oddOut[b] = int16((hPrevV << 1) + ((int32(prevEvenIn[b]) + even) >> 1))
 			}
 		}
+		// Last odd row
+		lastEvenBase := (2*n-2)*size + col
+		lastHBase := (2*n-1)*size + col
+		lastEvenSlice := buf[lastEvenBase : lastEvenBase+blk]
+		lastHSlice := tmp[lastHBase : lastHBase+blk]
+		lastOddOut := buf[lastHBase : lastHBase+blk]
 		for b := range blk {
-			c := col + b
-			lastEven := int32(buf[(2*n-2)*size+c])
-			lastH := int32(tmp[(2*n-1)*size+c])
-			buf[(2*n-1)*size+c] = int16((lastH << 1) + lastEven)
+			lastOddOut[b] = int16((int32(lastHSlice[b]) << 1) + int32(lastEvenSlice[b]))
 		}
 	}
 	for ; col < size; col++ {

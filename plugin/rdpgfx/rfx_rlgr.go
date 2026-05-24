@@ -38,10 +38,7 @@ func rlgr1Decode(data []byte, outputSize int, dst []int16) []int16 {
 			// RL (Run-Length) Mode
 
 			// Count leading 0-bits → number of full run groups
-			vk := br.countLeadingBits(0)
-			if br.remaining() < 0 {
-				break
-			}
+			vk := br.countLeadingZeros()
 
 			// Each leading 0 adds (1 << k) to run, with k adapting upward
 			run := uint32(0)
@@ -55,29 +52,17 @@ func rlgr1Decode(data []byte, outputSize int, dst []int16) []int16 {
 			}
 
 			// Read k bits for run remainder
-			if br.remaining() < int(k) {
-				break
-			}
 			if k > 0 {
 				run += br.readBits(int(k))
 			}
 
 			// Read sign bit for the non-zero value
-			if br.remaining() < 1 {
-				break
-			}
 			sign := br.readBits(1)
 
 			// Decode non-zero magnitude using GR code with leading 1-bits
-			vk2 := br.countLeadingBits(1)
-			if br.remaining() < 0 {
-				break
-			}
+			vk2 := br.countLeadingOnes()
 
 			// Read kr bits for code remainder
-			if br.remaining() < int(kr) {
-				break
-			}
 			code := uint32(0)
 			if kr > 0 {
 				code = br.readBits(int(kr))
@@ -126,15 +111,9 @@ func rlgr1Decode(data []byte, outputSize int, dst []int16) []int16 {
 			// GR (Golomb-Rice) Mode
 
 			// Count leading 1-bits
-			vk := br.countLeadingBits(1)
-			if br.remaining() < 0 {
-				break
-			}
+			vk := br.countLeadingOnes()
 
 			// Read kr bits for code remainder
-			if br.remaining() < int(kr) {
-				break
-			}
 			code := uint32(0)
 			if kr > 0 {
 				code = br.readBits(int(kr))
@@ -218,10 +197,7 @@ func rlgr3Decode(data []byte, outputSize int, dst []int16) []int16 {
 	for br.remaining() > 0 && cnt < outputSize {
 		if k > 0 {
 			// RL Mode — identical to RLGR1
-			vk := br.countLeadingBits(0)
-			if br.remaining() < 0 {
-				break
-			}
+			vk := br.countLeadingZeros()
 
 			run := uint32(0)
 			for range vk {
@@ -233,26 +209,14 @@ func rlgr3Decode(data []byte, outputSize int, dst []int16) []int16 {
 				k = kp >> rlgrLSGR
 			}
 
-			if br.remaining() < int(k) {
-				break
-			}
 			if k > 0 {
 				run += br.readBits(int(k))
 			}
 
-			if br.remaining() < 1 {
-				break
-			}
 			sign := br.readBits(1)
 
-			vk2 := br.countLeadingBits(1)
-			if br.remaining() < 0 {
-				break
-			}
+			vk2 := br.countLeadingOnes()
 
-			if br.remaining() < int(kr) {
-				break
-			}
 			code := uint32(0)
 			if kr > 0 {
 				code = br.readBits(int(kr))
@@ -295,14 +259,8 @@ func rlgr3Decode(data []byte, outputSize int, dst []int16) []int16 {
 
 		} else {
 			// GR Mode — RLGR3 variant: decode TWO values from one GR code
-			vk := br.countLeadingBits(1)
-			if br.remaining() < 0 {
-				break
-			}
+			vk := br.countLeadingOnes()
 
-			if br.remaining() < int(kr) {
-				break
-			}
 			code := uint32(0)
 			if kr > 0 {
 				code = br.readBits(int(kr))
@@ -415,32 +373,46 @@ func (br *rlgrBitReader) fill(need int) {
 }
 
 func (br *rlgrBitReader) readBits(n int) uint32 {
+	if br.bitsInAcc >= n {
+		// Fast path (common case): accumulator already has enough bits.
+		val := uint32(br.acc >> uint(64-n))
+		br.acc <<= uint(n)
+		br.bitsInAcc -= n
+		br.read += n
+		return val
+	}
+	return br.readBitsSlow(n)
+}
+
+// readBitsSlow handles the uncommon cases: n<=0, fill needed, or EOF.
+func (br *rlgrBitReader) readBitsSlow(n int) uint32 {
 	if n <= 0 {
 		return 0
 	}
-	if br.bitsInAcc < n {
-		br.fill(n)
+	br.fill(n)
+	if br.bitsInAcc >= n {
+		val := uint32(br.acc >> uint(64-n))
+		br.acc <<= uint(n)
+		br.bitsInAcc -= n
+		br.read += n
+		return val
 	}
-	avail := min(br.bitsInAcc, n)
+	// Past EOF: consume what remains and pad with zeros.
+	avail := br.bitsInAcc
 	var val uint32
 	if avail > 0 {
 		val = uint32(br.acc >> uint(64-avail))
-		br.acc <<= uint(avail)
-		br.bitsInAcc -= avail
+		br.acc = 0
+		br.bitsInAcc = 0
 		br.read += avail
-	}
-	if avail < n {
-		// Past EOF: pad with zeros, but mark them as consumed so
-		// subsequent remaining() accurately reports underflow.
 		val <<= uint(n - avail)
-		br.read += n - avail
 	}
+	br.read += n - avail
 	return val
 }
 
-// countLeadingBits counts consecutive bits matching 'target' (0 or 1) and
-// then consumes (skips) the terminator bit of the opposite value.
-func (br *rlgrBitReader) countLeadingBits(target uint32) uint32 {
+// countLeadingZeros counts consecutive 0-bits and consumes the first 1-bit terminator.
+func (br *rlgrBitReader) countLeadingZeros() uint32 {
 	count := uint32(0)
 	for {
 		if br.bitsInAcc < 56 && br.bytePos < len(br.data) {
@@ -449,34 +421,43 @@ func (br *rlgrBitReader) countLeadingBits(target uint32) uint32 {
 		if br.bitsInAcc == 0 {
 			return count
 		}
-		var run int
-		if target == 0 {
-			// Run of 0s ends at the first 1 bit.
-			lz := bits.LeadingZeros64(br.acc)
-			if lz >= br.bitsInAcc {
-				// Entire buffered window is zeros — consume all and refill.
-				count += uint32(br.bitsInAcc)
-				br.read += br.bitsInAcc
-				br.acc = 0
-				br.bitsInAcc = 0
-				continue
-			}
-			run = lz
-		} else {
-			// Run of 1s ends at the first 0 bit. Inverting maps it to LZ.
-			lo := bits.LeadingZeros64(^br.acc)
-			if lo >= br.bitsInAcc {
-				count += uint32(br.bitsInAcc)
-				br.read += br.bitsInAcc
-				br.acc = 0
-				br.bitsInAcc = 0
-				continue
-			}
-			run = lo
+		lz := bits.LeadingZeros64(br.acc)
+		if lz >= br.bitsInAcc {
+			count += uint32(br.bitsInAcc)
+			br.read += br.bitsInAcc
+			br.acc = 0
+			br.bitsInAcc = 0
+			continue
 		}
-		// Consume `run` matching bits plus the single terminator bit.
-		consume := run + 1
-		count += uint32(run)
+		count += uint32(lz)
+		consume := lz + 1
+		br.acc <<= uint(consume)
+		br.bitsInAcc -= consume
+		br.read += consume
+		return count
+	}
+}
+
+// countLeadingOnes counts consecutive 1-bits and consumes the first 0-bit terminator.
+func (br *rlgrBitReader) countLeadingOnes() uint32 {
+	count := uint32(0)
+	for {
+		if br.bitsInAcc < 56 && br.bytePos < len(br.data) {
+			br.fill(56)
+		}
+		if br.bitsInAcc == 0 {
+			return count
+		}
+		lo := bits.LeadingZeros64(^br.acc)
+		if lo >= br.bitsInAcc {
+			count += uint32(br.bitsInAcc)
+			br.read += br.bitsInAcc
+			br.acc = 0
+			br.bitsInAcc = 0
+			continue
+		}
+		count += uint32(lo)
+		consume := lo + 1
 		br.acc <<= uint(consume)
 		br.bitsInAcc -= consume
 		br.read += consume
