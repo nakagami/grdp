@@ -150,10 +150,11 @@ type Handler struct {
 	activeFormatIndex   int
 
 	// Wave state
-	waveTimestamp uint16
-	waveBlockNo   uint8
-	pendingWave   []byte
-	expectingWave bool
+	waveTimestamp  uint16
+	waveBlockNo    uint8
+	pendingWaveHdr [4]byte // backing array for pendingWave initial bytes (avoids alloc)
+	pendingWave    []byte
+	expectingWave  bool
 
 	// DVC send callback for the current message's channel
 	dvcSendFunc func([]byte)
@@ -372,12 +373,11 @@ func (h *Handler) processWaveInfo(body []byte) {
 	wTimeStamp := binary.LittleEndian.Uint16(body[0:])
 	wFormatNo := binary.LittleEndian.Uint16(body[2:])
 	cBlockNo := body[4]
-	initialData := make([]byte, 4)
-	copy(initialData, body[8:12])
+	copy(h.pendingWaveHdr[:], body[8:12])
 
 	h.waveTimestamp = wTimeStamp
 	h.waveBlockNo = cBlockNo
-	h.pendingWave = initialData
+	h.pendingWave = h.pendingWaveHdr[:]
 
 	if int(wFormatNo) < len(h.clientFormatIndices) {
 		serverIdx := h.clientFormatIndices[wFormatNo]

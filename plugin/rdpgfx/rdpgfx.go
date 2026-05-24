@@ -1,14 +1,12 @@
 package rdpgfx
 
 import (
-	"bytes"
 	"encoding/binary"
 	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/nakagami/grdp/core"
 	"github.com/nakagami/grdp/plugin"
 )
 
@@ -715,7 +713,8 @@ func (g *GfxHandler) OnChannelCreated() {
 // The client must advertise its capabilities before the server will
 // send any graphics data (MS-RDPEGFX 2.2.3.1).
 func (g *GfxHandler) sendCapsAdvertise() {
-	p := &bytes.Buffer{}
+	p := pduBufPool.Get().([]byte)[:0]
+	defer pduBufPool.Put(p[:0])
 
 	// AVC capsets are advertised when we can deliver decoded frames either
 	// in-process (h264dec) or by handing the raw NALs off to the embedder
@@ -726,96 +725,96 @@ func (g *GfxHandler) sendCapsAdvertise() {
 		if g.avc444Disabled {
 			// AVC444 disabled: advertise only v8.0 and v8.1 so the server
 			// uses AVC420 (4:2:0) exclusively and never sends LC=2 data.
-			core.WriteUInt16LE(2, p) // capsSetCount
+			p = binary.LittleEndian.AppendUint16(p, 2) // capsSetCount
 
 			// v8.0 — baseline fallback (no AVC)
-			core.WriteUInt32LE(capVersion8, p)
-			core.WriteUInt32LE(4, p)
-			core.WriteUInt32LE(capFlagThinClient, p)
+			p = binary.LittleEndian.AppendUint32(p, capVersion8)
+			p = binary.LittleEndian.AppendUint32(p, 4)
+			p = binary.LittleEndian.AppendUint32(p, capFlagThinClient)
 
 			// v8.1 — AVC420 via explicit flag
-			core.WriteUInt32LE(capVersion81, p)
-			core.WriteUInt32LE(4, p)
-			core.WriteUInt32LE(capFlagSmallCache|capFlagAVC420Enabled, p)
+			p = binary.LittleEndian.AppendUint32(p, capVersion81)
+			p = binary.LittleEndian.AppendUint32(p, 4)
+			p = binary.LittleEndian.AppendUint32(p, capFlagSmallCache|capFlagAVC420Enabled)
 
-			g.sendPdu(cmdidCapsAdvertise, p.Bytes())
+			g.sendPdu(cmdidCapsAdvertise, p)
 			slog.Debug("RDPGFX: sent CAPS_ADVERTISE (v8.1..v8.0, AVC444 disabled)")
 		} else {
 			// Advertise capsets in ascending order (v8.0 → v10.7), matching
 			// rdpyqt / FreeRDP layout so servers pick the highest common version.
-			core.WriteUInt16LE(11, p) // capsSetCount
+			p = binary.LittleEndian.AppendUint16(p, 11) // capsSetCount
 
 			// v8.0 — baseline fallback (no AVC)
-			core.WriteUInt32LE(capVersion8, p)
-			core.WriteUInt32LE(4, p)
-			core.WriteUInt32LE(capFlagThinClient, p)
+			p = binary.LittleEndian.AppendUint32(p, capVersion8)
+			p = binary.LittleEndian.AppendUint32(p, 4)
+			p = binary.LittleEndian.AppendUint32(p, capFlagThinClient)
 
 			// v8.1 — AVC420 via explicit flag
-			core.WriteUInt32LE(capVersion81, p)
-			core.WriteUInt32LE(4, p)
-			core.WriteUInt32LE(capFlagSmallCache|capFlagAVC420Enabled, p)
+			p = binary.LittleEndian.AppendUint32(p, capVersion81)
+			p = binary.LittleEndian.AppendUint32(p, 4)
+			p = binary.LittleEndian.AppendUint32(p, capFlagSmallCache|capFlagAVC420Enabled)
 
 			// v10.0
-			core.WriteUInt32LE(capVersion10, p)
-			core.WriteUInt32LE(4, p)
-			core.WriteUInt32LE(capFlagSmallCache, p)
+			p = binary.LittleEndian.AppendUint32(p, capVersion10)
+			p = binary.LittleEndian.AppendUint32(p, 4)
+			p = binary.LittleEndian.AppendUint32(p, capFlagSmallCache)
 
 			// v10.1 — 16-byte capsData (12 zero bytes after flags)
-			core.WriteUInt32LE(capVersion101, p)
-			core.WriteUInt32LE(16, p)
-			core.WriteUInt32LE(0, p)
-			core.WriteUInt32LE(0, p)
-			core.WriteUInt32LE(0, p)
-			core.WriteUInt32LE(0, p)
+			p = binary.LittleEndian.AppendUint32(p, capVersion101)
+			p = binary.LittleEndian.AppendUint32(p, 16)
+			p = binary.LittleEndian.AppendUint32(p, 0)
+			p = binary.LittleEndian.AppendUint32(p, 0)
+			p = binary.LittleEndian.AppendUint32(p, 0)
+			p = binary.LittleEndian.AppendUint32(p, 0)
 
 			// v10.2
-			core.WriteUInt32LE(capVersion102, p)
-			core.WriteUInt32LE(4, p)
-			core.WriteUInt32LE(capFlagSmallCache, p)
+			p = binary.LittleEndian.AppendUint32(p, capVersion102)
+			p = binary.LittleEndian.AppendUint32(p, 4)
+			p = binary.LittleEndian.AppendUint32(p, capFlagSmallCache)
 
 			// v10.3
-			core.WriteUInt32LE(capVersion103, p)
-			core.WriteUInt32LE(4, p)
-			core.WriteUInt32LE(0, p)
+			p = binary.LittleEndian.AppendUint32(p, capVersion103)
+			p = binary.LittleEndian.AppendUint32(p, 4)
+			p = binary.LittleEndian.AppendUint32(p, 0)
 
 			// v10.4
-			core.WriteUInt32LE(capVersion104, p)
-			core.WriteUInt32LE(4, p)
-			core.WriteUInt32LE(capFlagSmallCache, p)
+			p = binary.LittleEndian.AppendUint32(p, capVersion104)
+			p = binary.LittleEndian.AppendUint32(p, 4)
+			p = binary.LittleEndian.AppendUint32(p, capFlagSmallCache)
 
 			// v10.5
-			core.WriteUInt32LE(capVersion105, p)
-			core.WriteUInt32LE(4, p)
-			core.WriteUInt32LE(capFlagSmallCache, p)
+			p = binary.LittleEndian.AppendUint32(p, capVersion105)
+			p = binary.LittleEndian.AppendUint32(p, 4)
+			p = binary.LittleEndian.AppendUint32(p, capFlagSmallCache)
 
 			// v10.6
-			core.WriteUInt32LE(capVersion106, p)
-			core.WriteUInt32LE(4, p)
-			core.WriteUInt32LE(capFlagSmallCache, p)
+			p = binary.LittleEndian.AppendUint32(p, capVersion106)
+			p = binary.LittleEndian.AppendUint32(p, 4)
+			p = binary.LittleEndian.AppendUint32(p, capFlagSmallCache)
 
 			// v10.6.1
-			core.WriteUInt32LE(capVersion1061, p)
-			core.WriteUInt32LE(4, p)
-			core.WriteUInt32LE(capFlagSmallCache, p)
+			p = binary.LittleEndian.AppendUint32(p, capVersion1061)
+			p = binary.LittleEndian.AppendUint32(p, 4)
+			p = binary.LittleEndian.AppendUint32(p, capFlagSmallCache)
 
 			// v10.7
-			core.WriteUInt32LE(capVersion107, p)
-			core.WriteUInt32LE(4, p)
-			core.WriteUInt32LE(capFlagSmallCache, p)
+			p = binary.LittleEndian.AppendUint32(p, capVersion107)
+			p = binary.LittleEndian.AppendUint32(p, 4)
+			p = binary.LittleEndian.AppendUint32(p, capFlagSmallCache)
 
-			g.sendPdu(cmdidCapsAdvertise, p.Bytes())
+			g.sendPdu(cmdidCapsAdvertise, p)
 			slog.Debug("RDPGFX: sent CAPS_ADVERTISE (v10.7..v8.0, AVC enabled)")
 		}
 	} else {
-		core.WriteUInt16LE(1, p) // capsSetCount
-		core.WriteUInt32LE(capVersion8, p)
-		core.WriteUInt32LE(4, p) // capsDataLength
+		p = binary.LittleEndian.AppendUint16(p, 1) // capsSetCount
+		p = binary.LittleEndian.AppendUint32(p, capVersion8)
+		p = binary.LittleEndian.AppendUint32(p, 4) // capsDataLength
 		// Use flags that intentionally cause servers to reject the RDPGFX
 		// channel, forcing fallback to surface bitmap commands (NSCodec /
 		// RemoteFX). We do not yet support ClearCodec (0x0008) or Planar
 		// (0x0009) which servers send over RDPGFX when it stays open.
-		core.WriteUInt32LE(capFlagThinClient|capFlagSmallCache|capFlagAVCDisabled, p)
-		g.sendPdu(cmdidCapsAdvertise, p.Bytes())
+		p = binary.LittleEndian.AppendUint32(p, capFlagThinClient|capFlagSmallCache|capFlagAVCDisabled)
+		g.sendPdu(cmdidCapsAdvertise, p)
 		slog.Debug("RDPGFX: sent CAPS_ADVERTISE (v8.0)")
 	}
 }

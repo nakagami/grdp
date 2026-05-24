@@ -17,6 +17,32 @@ var writePool = sync.Pool{
 	New: func() any { return make([]byte, 0, 4096) },
 }
 
+// readBufPool reuses packet body buffers in readLoop.
+// Typical RDP packets are well under 4 KiB; the pool avoids a heap
+// allocation for every incoming packet (~60/s during active sessions).
+// Buffers larger than maxPooledReadBuf are not pooled to avoid keeping
+// large slices alive in the pool between bursts.
+const maxPooledReadBuf = 32 * 1024
+
+var readBufPool = sync.Pool{
+	New: func() any { return make([]byte, 0, 4096) },
+}
+
+func acquireReadBuf(n int) []byte {
+	b := readBufPool.Get().([]byte)
+	if cap(b) >= n {
+		return b[:n]
+	}
+	readBufPool.Put(b[:0])
+	return make([]byte, n)
+}
+
+func releaseReadBuf(b []byte) {
+	if cap(b) <= maxPooledReadBuf {
+		readBufPool.Put(b[:0])
+	}
+}
+
 // take idea from https://github.com/Madnikulin50/gordp
 
 /**
@@ -77,12 +103,13 @@ func (t *TPKT) readLoop() {
 				t.Emit("error", fmt.Errorf("TPKT: invalid packet size %d", size))
 				return
 			}
-			body := make([]byte, int(size)-4)
+			body := acquireReadBuf(int(size) - 4)
 			if _, err := io.ReadFull(t.Conn, body); err != nil {
 				t.Emit("error", err)
 				return
 			}
 			t.Emit("data", body)
+			releaseReadBuf(body)
 		} else {
 			// FastPath packet: 2- or 3-byte header
 			secFlag := (version >> 6) & 0x3
@@ -107,12 +134,13 @@ func (t *TPKT) readLoop() {
 				t.Emit("error", fmt.Errorf("TPKT FastPath: invalid packet size %d", packetSize))
 				return
 			}
-			body := make([]byte, packetSize)
+			body := acquireReadBuf(packetSize)
 			if _, err := io.ReadFull(t.Conn, body); err != nil {
 				slog.Debug("TPKT recvFastPath error", "err", err)
 				return
 			}
 			t.fastPathListener.RecvFastPath(secFlag, body)
+			releaseReadBuf(body)
 		}
 	}
 }
