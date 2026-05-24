@@ -2251,12 +2251,24 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*rdpgfx.H264Frame, error) {
 			//     Normal GOP boundaries produce ≤25 null frames so there is
 			//     minimal headroom; genuine stalls persist for hundreds of
 			//     null frames.  Reduces visible freeze from ~2.5 s to ~1 s.
+			//
+			// IDR-flush suppression: when VideoToolbox just received a new IDR
+			// (hwNeedsZeroCheck=true), null frames are part of its normal pipeline
+			// flush — it must drain its internal reference frames before outputting
+			// the new intra picture.  Triggering a stall probe on these IDR-induced
+			// null frames causes premature SW fallback and an unnecessary reconnect:
+			// observed logs show VT recovering naturally within ~1-2 s of the IDR,
+			// and the post-reconnect VT session exhibits the same null-frame burst
+			// (which resolves on its own).  Suppress the count-based probe while
+			// hwNeedsZeroCheck is true; the 7-second safety valve below remains
+			// the backstop for genuine stalls that do not self-resolve.
 			earlyStall := d.hwSentCount < avcHWEarlyFrameLimit &&
 				d.hwConsecNullFrames >= avcHWNullFrameStallLimit &&
 				!d.hwFirstSendTime.IsZero() &&
 				time.Since(d.hwFirstSendTime) >= avcHWEarlyStallMinElapsed
 			midStall := d.hwSentCount >= avcHWEarlyFrameLimit &&
-				d.hwConsecNullFrames >= avcHWMidSessionNullFrameLimit
+				d.hwConsecNullFrames >= avcHWMidSessionNullFrameLimit &&
+				!d.hwNeedsZeroCheck // IDR-flush null frames: let VT recover naturally
 			if (earlyStall || midStall) && d.stallProbeStart.IsZero() {
 				slog.Debug("H.264: HW decoder stall detected (null frame count), entering probe",
 					"consecNullFrames", d.hwConsecNullFrames,
