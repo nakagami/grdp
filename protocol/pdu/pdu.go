@@ -14,6 +14,12 @@ var readerPool = sync.Pool{
 	New: func() any { return new(bytes.Reader) },
 }
 
+// fastPathBufPool reuses byte slices for serializing fast-path input PDUs.
+// Capacity 128 covers the maximum frame: 1 + 7*15 = 106 bytes.
+var fastPathBufPool = sync.Pool{
+	New: func() any { return make([]byte, 0, 128) },
+}
+
 type PDULayer struct {
 	emission.Emitter
 	transport          core.Transport
@@ -583,13 +589,15 @@ func (c *Client) canSendFastPathInput(events []InputEventsInterface) bool {
 }
 
 func (c *Client) sendFastPathInputEvents(events []InputEventsInterface) bool {
-	// Worst case: 1 byte numberEvents + 7 bytes per event (mouse).
-	buf := make([]byte, 0, 1+7*len(events))
+	buf := fastPathBufPool.Get().([]byte)
+	buf = buf[:0]
 	buf = append(buf, byte(len(events)))
 	for _, e := range events {
 		buf = e.(fastPathEncoder).FastPathEncode(buf)
 	}
-	if _, err := c.fastPathSender.SendFastPath(0, buf); err != nil {
+	_, err := c.fastPathSender.SendFastPath(0, buf)
+	fastPathBufPool.Put(buf[:cap(buf)])
+	if err != nil {
 		// Disable for the rest of the session so we don't keep paying the
 		// failed-attempt cost on every input event.
 		c.serverFastPathInput = false

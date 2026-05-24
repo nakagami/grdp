@@ -28,6 +28,32 @@ import (
 	"github.com/nakagami/grdp/protocol/x224"
 )
 
+// mouseCoalescer holds all state for mouse-move coalescing.
+// High-frequency move events are collapsed into at most one network PDU per
+// mouseCoalesceInterval, with the latest position always winning.
+type mouseCoalescer struct {
+	mu      sync.Mutex
+	pending bool
+	x, y    int
+	timer   *time.Timer
+	lastTx  time.Time
+	pdu     pdu.PointerEvent
+	pduBuf  [1]pdu.InputEventsInterface
+}
+
+// wheelCoalescer holds all state for vertical-scroll coalescing.
+// Rapid scroll events are accumulated over mouseCoalesceInterval and sent as
+// a single PDU whose rotation value is the sum of all deltas in that window.
+// wheelAccum is stored in RDP WHEEL_DELTA units (120 per physical notch).
+type wheelCoalescer struct {
+	mu     sync.Mutex
+	accum  float64
+	timer  *time.Timer
+	lastTx time.Time
+	pdu    pdu.PointerEvent
+	pduBuf [1]pdu.InputEventsInterface
+}
+
 // stubChannel is a no-op virtual channel handler for channels the server
 // expects to be present (e.g. rdpdr, cliprdr) but that we don't process.
 type stubChannel struct {
@@ -53,11 +79,10 @@ type RdpClient struct {
 	sec             *sec.Client
 	pdu             *pdu.Client
 	channels        *plugin.Channels
-	eventReady      atomic.Bool
-	redirecting     atomic.Bool // true during async redirect reconnection
-	decompressPool  sync.Pool   // pools []uint8 buffers for bitmap decompression
-	flipLinePool    sync.Pool   // pools line-sized []uint8 buffers for bitmap vertical flip
-	closed          atomic.Bool
+	eventReady     atomic.Bool
+	decompressPool sync.Pool // pools []uint8 buffers for bitmap decompression
+	flipLinePool   sync.Pool // pools line-sized []uint8 buffers for bitmap vertical flip
+	closed         atomic.Bool
 
 	// credentials stored for reconnection
 	domain   string
@@ -85,37 +110,15 @@ type RdpClient struct {
 	getClipboardFn func() string     // local → remote
 	cliprdrHandler *cliprdr.CliprdrHandler
 
-	// Mouse-move coalescing.  High-frequency UI move events (often one per
-	// host pixel) are collapsed into at most one network PDU per
-	// mouseCoalesceInterval, with the latest position always winning.
-	// Button/key events are sent immediately but flush any pending move
-	// first so server-side ordering is preserved.
-	mouseMu      sync.Mutex
-	mousePending bool
-	mouseX       int
-	mouseY       int
-	mouseTimer   *time.Timer
-	mouseLastTx  time.Time
-	// Pre-allocated mouse-move PDU and single-element slice, reused under
-	// mouseMu to eliminate per-move heap allocations on the hot path.
-	mousePDU    pdu.PointerEvent
-	mousePDUBuf [1]pdu.InputEventsInterface
-
-	// Wheel-scroll coalescing.  Rapid scroll events are accumulated over
-	// mouseCoalesceInterval and sent as a single PDU whose rotation value
-	// is the sum of all deltas received in that window.
-	// wheelAccum is stored in RDP WHEEL_DELTA units (120 per physical notch).
-	wheelMu     sync.Mutex
-	wheelAccum  float64
-	wheelTimer  *time.Timer
-	wheelLastTx time.Time
-	// Pre-allocated wheel PDU and single-element slice, reused under wheelMu.
-	wheelPDU    pdu.PointerEvent
-	wheelPDUBuf [1]pdu.InputEventsInterface
-
 	// reconnectMu serialises concurrent Reconnect() calls.
+	// reconnecting is also set during async server redirects to suppress
+	// user-facing callbacks while the transport is being re-established.
 	reconnectMu  sync.Mutex
 	reconnecting atomic.Bool
+
+	// mouse and wheel hold all coalescing state for pointer input.
+	mouse mouseCoalescer
+	wheel wheelCoalescer
 
 	// gfxHandler is the active RDPGFX handler; nil when not connected.
 	// Stored here so closeTransport() can stop its goroutines.
@@ -234,8 +237,8 @@ func NewRdpClient(host string, width, height int, dialer func(string) (net.Conn,
 	}
 	// Point the cached single-element slices at the cached PDU fields so
 	// sendMouseMoveLocked / sendWheelLocked need no per-call allocations.
-	g.mousePDUBuf[0] = &g.mousePDU
-	g.wheelPDUBuf[0] = &g.wheelPDU
+	g.mouse.pduBuf[0] = &g.mouse.pdu
+	g.wheel.pduBuf[0] = &g.wheel.pdu
 	return g
 }
 
@@ -304,21 +307,32 @@ func (g *RdpClient) DisableAVC444() *RdpClient {
 	return g
 }
 
-func bpp(BitsPerPixel uint16) (pixel int) {
+func bpp(BitsPerPixel uint16) int {
 	switch BitsPerPixel {
 	case 15, 16:
-		pixel = 2
-
+		return 2
 	case 24:
-		pixel = 3
-
+		return 3
 	case 32:
-		pixel = 4
-
+		return 4
 	default:
 		slog.Error("invalid bitmap data format")
+		return 0
 	}
-	return
+}
+
+// mouseButtonFlag returns the PTRFLAGS constant for button index 0/1/2.
+func mouseButtonFlag(button int) uint16 {
+	switch button {
+	case 0:
+		return pdu.PTRFLAGS_BUTTON1
+	case 2:
+		return pdu.PTRFLAGS_BUTTON2
+	case 1:
+		return pdu.PTRFLAGS_BUTTON3
+	default:
+		return pdu.PTRFLAGS_MOVE
+	}
 }
 
 func (g *RdpClient) Login(domain string, user string, password string) error {
@@ -589,12 +603,12 @@ func (g *RdpClient) doLogin(routingToken []byte) error {
 // "ready" (e.g. GNOME Remote Desktop). Runs asynchronously.
 func (g *RdpClient) handleRedirect(redir *pdu.ServerRedirectionPDU) {
 	slog.Debug("Async server redirect", "loadBalanceInfo", string(redir.LoadBalanceInfo))
-	g.redirecting.Store(true)
+	g.reconnecting.Store(true)
 	g.tpkt.Close()
 	g.eventReady.Store(false)
 
 	err := g.doLogin(redir.LoadBalanceInfo)
-	g.redirecting.Store(false)
+	g.reconnecting.Store(false)
 	if err != nil {
 		slog.Error("handleRedirect: login failed", "err", err)
 		if g.onErrorFn != nil {
@@ -617,7 +631,7 @@ func (g *RdpClient) OnError(f func(e error)) *RdpClient {
 	g.onErrorFn = f
 	if g.pdu != nil {
 		g.pdu.On("error", func(e error) {
-			if !g.redirecting.Load() {
+			if !g.reconnecting.Load() {
 				f(e)
 			}
 		})
@@ -629,7 +643,7 @@ func (g *RdpClient) OnClose(f func()) *RdpClient {
 	g.onCloseFn = f
 	if g.pdu != nil {
 		g.pdu.On("close", func() {
-			if !g.redirecting.Load() && !g.reconnecting.Load() {
+			if !g.reconnecting.Load() {
 				f()
 			}
 		})
@@ -917,62 +931,62 @@ func (g *RdpClient) MouseMove(x, y int) {
 		return
 	}
 
-	g.mouseMu.Lock()
-	g.mouseX = x
-	g.mouseY = y
-	g.mousePending = true
+	g.mouse.mu.Lock()
+	g.mouse.x = x
+	g.mouse.y = y
+	g.mouse.pending = true
 
 	now := time.Now()
-	since := now.Sub(g.mouseLastTx)
+	since := now.Sub(g.mouse.lastTx)
 	if since >= mouseCoalesceInterval {
 		// Throttle window has elapsed — send right away.
 		g.sendMouseMoveLocked(now)
-		g.mouseMu.Unlock()
+		g.mouse.mu.Unlock()
 		return
 	}
 
 	// Within throttle window: schedule a flush for the remainder of it
 	// (unless one is already scheduled).
-	if g.mouseTimer == nil {
+	if g.mouse.timer == nil {
 		delay := mouseCoalesceInterval - since
-		g.mouseTimer = time.AfterFunc(delay, g.flushMouseMoveTimer)
+		g.mouse.timer = time.AfterFunc(delay, g.flushMouseMoveTimer)
 	}
-	g.mouseMu.Unlock()
+	g.mouse.mu.Unlock()
 }
 
 // flushMouseMove sends any pending mouse-move event synchronously.  Called
 // before any non-move input event to preserve server-side ordering.
 func (g *RdpClient) flushMouseMove() {
-	g.mouseMu.Lock()
-	if g.mouseTimer != nil {
-		g.mouseTimer.Stop()
-		g.mouseTimer = nil
+	g.mouse.mu.Lock()
+	if g.mouse.timer != nil {
+		g.mouse.timer.Stop()
+		g.mouse.timer = nil
 	}
-	if g.mousePending {
+	if g.mouse.pending {
 		g.sendMouseMoveLocked(time.Now())
 	}
-	g.mouseMu.Unlock()
+	g.mouse.mu.Unlock()
 }
 
 // flushMouseMoveTimer is the time.AfterFunc callback.  Acquires the lock
 // itself and sends whatever's pending.
 func (g *RdpClient) flushMouseMoveTimer() {
-	g.mouseMu.Lock()
-	g.mouseTimer = nil
-	if g.mousePending && g.eventReady.Load() {
+	g.mouse.mu.Lock()
+	g.mouse.timer = nil
+	if g.mouse.pending && g.eventReady.Load() {
 		g.sendMouseMoveLocked(time.Now())
 	}
-	g.mouseMu.Unlock()
+	g.mouse.mu.Unlock()
 }
 
-// sendMouseMoveLocked must be called with mouseMu held.
+// sendMouseMoveLocked must be called with mouse.mu held.
 func (g *RdpClient) sendMouseMoveLocked(now time.Time) {
-	g.mousePDU.PointerFlags = pdu.PTRFLAGS_MOVE
-	g.mousePDU.XPos = uint16(g.mouseX)
-	g.mousePDU.YPos = uint16(g.mouseY)
-	g.mousePending = false
-	g.mouseLastTx = now
-	g.pdu.SendInputEvents(pdu.INPUT_EVENT_MOUSE, g.mousePDUBuf[:])
+	g.mouse.pdu.PointerFlags = pdu.PTRFLAGS_MOVE
+	g.mouse.pdu.XPos = uint16(g.mouse.x)
+	g.mouse.pdu.YPos = uint16(g.mouse.y)
+	g.mouse.pending = false
+	g.mouse.lastTx = now
+	g.pdu.SendInputEvents(pdu.INPUT_EVENT_MOUSE, g.mouse.pduBuf[:])
 }
 
 // MouseWheel sends a vertical scroll event to the remote desktop.
@@ -989,61 +1003,61 @@ func (g *RdpClient) MouseWheel(delta float64) {
 
 	// Convert notch count to RDP WHEEL_DELTA units (120 per notch).
 	const wheelDelta = 120
-	g.wheelMu.Lock()
-	g.wheelAccum += delta * wheelDelta
-	if g.wheelAccum == 0 {
+	g.wheel.mu.Lock()
+	g.wheel.accum += delta * wheelDelta
+	if g.wheel.accum == 0 {
 		// Opposite deltas cancelled out; nothing to send.
-		g.wheelMu.Unlock()
+		g.wheel.mu.Unlock()
 		return
 	}
 
 	now := time.Now()
-	since := now.Sub(g.wheelLastTx)
+	since := now.Sub(g.wheel.lastTx)
 	if since >= mouseCoalesceInterval {
 		g.sendWheelLocked(now)
-		g.wheelMu.Unlock()
+		g.wheel.mu.Unlock()
 		return
 	}
 
-	if g.wheelTimer == nil {
+	if g.wheel.timer == nil {
 		delay := mouseCoalesceInterval - since
-		g.wheelTimer = time.AfterFunc(delay, g.flushWheelTimer)
+		g.wheel.timer = time.AfterFunc(delay, g.flushWheelTimer)
 	}
-	g.wheelMu.Unlock()
+	g.wheel.mu.Unlock()
 }
 
 // flushWheel sends any pending wheel event synchronously.  Called before any
 // non-wheel input event to preserve server-side ordering.
 func (g *RdpClient) flushWheel() {
-	g.wheelMu.Lock()
-	if g.wheelTimer != nil {
-		g.wheelTimer.Stop()
-		g.wheelTimer = nil
+	g.wheel.mu.Lock()
+	if g.wheel.timer != nil {
+		g.wheel.timer.Stop()
+		g.wheel.timer = nil
 	}
-	if g.wheelAccum != 0 {
+	if g.wheel.accum != 0 {
 		g.sendWheelLocked(time.Now())
 	}
-	g.wheelMu.Unlock()
+	g.wheel.mu.Unlock()
 }
 
 // flushWheelTimer is the time.AfterFunc callback for wheel coalescing.
 func (g *RdpClient) flushWheelTimer() {
-	g.wheelMu.Lock()
-	g.wheelTimer = nil
-	if g.wheelAccum != 0 && g.eventReady.Load() {
+	g.wheel.mu.Lock()
+	g.wheel.timer = nil
+	if g.wheel.accum != 0 && g.eventReady.Load() {
 		g.sendWheelLocked(time.Now())
 	}
-	g.wheelMu.Unlock()
+	g.wheel.mu.Unlock()
 }
 
-// sendWheelLocked must be called with wheelMu held.
+// sendWheelLocked must be called with wheel.mu held.
 // Modelled on FreeRDP's send_mouse_wheel in client/SDL/SDL2/sdl_touch.cpp.
 func (g *RdpClient) sendWheelLocked(now time.Time) {
 	// Truncate the accumulated float to a whole WHEEL_DELTA integer; keep the
 	// fractional remainder so sub-notch trackpad movements aren't discarded.
-	iaccum := int(g.wheelAccum)
-	g.wheelAccum -= float64(iaccum)
-	g.wheelLastTx = now
+	iaccum := int(g.wheel.accum)
+	g.wheel.accum -= float64(iaccum)
+	g.wheel.lastTx = now
 
 	if iaccum == 0 {
 		return
@@ -1071,11 +1085,11 @@ func (g *RdpClient) sendWheelLocked(now time.Time) {
 		if negative {
 			// 9-bit two's complement: keep flags in bits 8–15, set bits 0–7
 			// to (0x100 - cval) so the receiver recovers the correct magnitude.
-			g.wheelPDU.PointerFlags = (baseFlags & 0xFF00) | uint16(0x100-cval)
+			g.wheel.pdu.PointerFlags = (baseFlags & 0xFF00) | uint16(0x100-cval)
 		} else {
-			g.wheelPDU.PointerFlags = baseFlags | uint16(cval)
+			g.wheel.pdu.PointerFlags = baseFlags | uint16(cval)
 		}
-		g.pdu.SendInputEvents(pdu.INPUT_EVENT_MOUSE, g.wheelPDUBuf[:])
+		g.pdu.SendInputEvents(pdu.INPUT_EVENT_MOUSE, g.wheel.pduBuf[:])
 	}
 	g.notifyGfxLocalInput()
 }
@@ -1088,18 +1102,7 @@ func (g *RdpClient) MouseUp(button int, x, y int) {
 	g.flushMouseMove()
 	g.flushWheel()
 	p := &pdu.PointerEvent{}
-
-	switch button {
-	case 0:
-		p.PointerFlags |= pdu.PTRFLAGS_BUTTON1
-	case 2:
-		p.PointerFlags |= pdu.PTRFLAGS_BUTTON2
-	case 1:
-		p.PointerFlags |= pdu.PTRFLAGS_BUTTON3
-	default:
-		p.PointerFlags |= pdu.PTRFLAGS_MOVE
-	}
-
+	p.PointerFlags = mouseButtonFlag(button)
 	p.XPos = uint16(x)
 	p.YPos = uint16(y)
 	g.pdu.SendInputEvents(pdu.INPUT_EVENT_MOUSE, []pdu.InputEventsInterface{p})
@@ -1114,20 +1117,7 @@ func (g *RdpClient) MouseDown(button int, x, y int) {
 	g.flushMouseMove()
 	g.flushWheel()
 	p := &pdu.PointerEvent{}
-
-	p.PointerFlags |= pdu.PTRFLAGS_DOWN
-
-	switch button {
-	case 0:
-		p.PointerFlags |= pdu.PTRFLAGS_BUTTON1
-	case 2:
-		p.PointerFlags |= pdu.PTRFLAGS_BUTTON2
-	case 1:
-		p.PointerFlags |= pdu.PTRFLAGS_BUTTON3
-	default:
-		p.PointerFlags |= pdu.PTRFLAGS_MOVE
-	}
-
+	p.PointerFlags = pdu.PTRFLAGS_DOWN | mouseButtonFlag(button)
 	p.XPos = uint16(x)
 	p.YPos = uint16(y)
 	g.pdu.SendInputEvents(pdu.INPUT_EVENT_MOUSE, []pdu.InputEventsInterface{p})

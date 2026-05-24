@@ -1178,22 +1178,6 @@ func (g *GfxHandler) sendPdu(cmdId uint16, payload []byte) {
 	pduBufPool.Put(buf[:0])
 }
 
-// sendPduAsync enqueues a PDU for the writeLoop goroutine to send.
-// Every ACK must be delivered to the server, so this uses a buffered
-// channel rather than a single-value "latest" slot.
-func (g *GfxHandler) sendPduAsync(cmdId uint16, payload []byte) {
-	pdu := make([]byte, headerSize+len(payload))
-	binary.LittleEndian.PutUint16(pdu[0:], cmdId)
-	// pdu[2:4] = flags (0) — zero value
-	binary.LittleEndian.PutUint32(pdu[4:], uint32(headerSize+len(payload)))
-	copy(pdu[headerSize:], payload)
-	select {
-	case g.ackCh <- pdu:
-	default:
-		slog.Warn("RDPGFX: ackCh full, ACK dropped")
-	}
-}
-
 // --- Command Handlers ---
 
 func (g *GfxHandler) onCapsConfirm(data []byte) {

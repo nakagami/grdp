@@ -45,11 +45,7 @@ func UnicodeEncode(p string) []byte {
 }
 
 func UnicodeDecode(p []byte) string {
-	n := make([]uint16, len(p)/2)
-	for i := range n {
-		n[i] = binary.LittleEndian.Uint16(p[i*2:])
-	}
-	return string(utf16.Decode(n))
+	return string(utf16.Decode(LittleEndianBytesToUTF16(p)))
 }
 
 func BytesToUint64(b []byte) uint64 {

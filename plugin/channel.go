@@ -2,14 +2,22 @@ package plugin
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"log/slog"
 	"slices"
+	"sync"
 	"unsafe"
 
 	"github.com/nakagami/grdp/core"
 	"github.com/nakagami/grdp/emission"
 )
+
+// chunkBufPool reuses the header+payload buffers for outbound channel chunks.
+// Each buffer is pre-sized to the largest possible chunk (8-byte header + 1600 bytes data).
+var chunkBufPool = sync.Pool{
+	New: func() any { return make([]byte, 0, 8+CHANNEL_CHUNK_LENGTH) },
+}
 
 const (
 	CHANNEL_RC_OK                         = 0
@@ -249,7 +257,7 @@ func (c *Channels) SendToChannel(channel string, s []byte) (int, error) {
 	if cli.Options&CHANNEL_OPTION_SHOW_PROTOCOL != 0 {
 		baseFlag |= CHANNEL_FLAG_SHOW_PROTOCOL
 	}
-	b := &bytes.Buffer{}
+	buf := chunkBufPool.Get().([]byte)
 	first := true
 	remaining := totalLen
 	for chunk := range slices.Chunk(s, CHANNEL_CHUNK_LENGTH) {
@@ -263,12 +271,13 @@ func (c *Channels) SendToChannel(channel string, s []byte) (int, error) {
 			flag |= CHANNEL_FLAG_LAST
 		}
 		slog.Debug("SendToChannel", "len", len(chunk), "flag", flag)
-		b.Reset()
-		core.WriteUInt32LE(uint32(totalLen), b)
-		core.WriteUInt32LE(flag, b)
-		b.Write(chunk)
-		c.channelSender.SendToChannel(channel, b.Bytes())
+		buf = buf[:8+len(chunk)]
+		binary.LittleEndian.PutUint32(buf[0:], uint32(totalLen))
+		binary.LittleEndian.PutUint32(buf[4:], flag)
+		copy(buf[8:], chunk)
+		c.channelSender.SendToChannel(channel, buf)
 	}
+	chunkBufPool.Put(buf[:0])
 	return 0, nil
 }
 
