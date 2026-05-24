@@ -18,22 +18,45 @@ package ffmpeg
 #cgo nocallback av_frame_free
 #cgo nocallback av_frame_unref
 #cgo nocallback av_hwdevice_ctx_create
+#cgo nocallback av_hwdevice_get_type_name
+#cgo nocallback av_hwdevice_iterate_types
 #cgo nocallback av_hwframe_transfer_data
 #cgo nocallback av_packet_alloc
 #cgo nocallback av_packet_free
 #cgo nocallback grdp_find_v4l2m2m
+#cgo nocallback grdp_hwframe_map
+#cgo nocallback grdp_is_full_range_fmt
+#cgo nocallback grdp_set_get_format
+#cgo nocallback grdp_set_hw_pix_fmt
+#cgo nocallback grdp_set_low_delay
+#cgo nocallback grdp_suppress_av_log
+#cgo nocallback grdp_yuvj_to_yuv
+#cgo nocallback sws_freeContext
+#cgo nocallback sws_getContext
+#cgo nocallback grdp_sws_set_src_range
 #cgo noescape avcodec_send_packet
 #cgo noescape grdp_copy_yuv420p_to_i420
+#cgo nocallback grdp_copy_yuv420p_to_i420
 #cgo noescape grdp_copy_nv12_to_i420
+#cgo nocallback grdp_copy_nv12_to_i420
 #cgo noescape grdp_copy_nv12
-#cgo noescape grdp_yuv420p_to_bgra
+#cgo nocallback grdp_copy_nv12
 #cgo noescape grdp_yuv420p_to_bgra_regions
-#cgo noescape grdp_nv12_to_bgra
+#cgo nocallback grdp_yuv420p_to_bgra_regions
+#cgo noescape grdp_yuv420p_to_bgra_rows
+#cgo nocallback grdp_yuv420p_to_bgra_rows
 #cgo noescape grdp_nv12_to_bgra_regions
+#cgo nocallback grdp_nv12_to_bgra_regions
+#cgo noescape grdp_nv12_to_bgra_rows
+#cgo nocallback grdp_nv12_to_bgra_rows
 #cgo noescape grdp_frame_to_bgra
+#cgo nocallback grdp_frame_to_bgra
 #cgo noescape grdp_sample_nv12
+#cgo nocallback grdp_sample_nv12
 #cgo noescape grdp_sample_yuv
+#cgo nocallback grdp_sample_yuv
 #cgo noescape grdp_sample_nv12_at
+#cgo nocallback grdp_sample_nv12_at
 #include <libavcodec/avcodec.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/hwcontext.h>
@@ -44,6 +67,9 @@ package ffmpeg
 #include <stdint.h>
 #ifdef __ARM_NEON__
 #include <arm_neon.h>
+#endif
+#ifdef __SSE2__
+#include <emmintrin.h>
 #endif
 
 // grdp_suppress_av_log sets FFmpeg's global log level to FATAL so that
@@ -208,7 +234,184 @@ static inline void grdp_yuv420p_to_bgra_neon_8(
     bgra.val[3] = vdup_n_u8(255);
     vst4_u8(drow + col * 4, bgra);
 }
+
+// grdp_yuv420p_to_bgra_neon_16 processes 16 luma pixels (8 UV pairs) per call.
+// One vld1_u8 covers all 8 U (and V) samples needed for 16 luma columns.
+// vzip_u8 duplicates the low half for pixels 0-7 and the high half for 8-15,
+// giving twice the throughput of grdp_yuv420p_to_bgra_neon_8 per iteration.
+static inline void grdp_yuv420p_to_bgra_neon_16(
+    const uint8_t *yrow, const uint8_t *urow, const uint8_t *vrow,
+    uint8_t *drow, int col,
+    int16_t ky, int16_t kr, int16_t kgu, int16_t kgv, int16_t kb,
+    int16_t yoff)
+{
+    // Load 16 luma bytes, subtract Y offset.
+    uint8x16_t y_u8 = vld1q_u8(yrow + col);
+    int16x8_t c_lo = vsubq_s16(vreinterpretq_s16_u16(vmovl_u8(vget_low_u8(y_u8))),
+                                vdupq_n_s16(yoff));
+    int16x8_t c_hi = vsubq_s16(vreinterpretq_s16_u16(vmovl_u8(vget_high_u8(y_u8))),
+                                vdupq_n_s16(yoff));
+
+    // Load 8 U and 8 V bytes; duplicate each to cover its two luma pixels.
+    uint8x8_t u_raw = vld1_u8(urow + (col >> 1));
+    uint8x8_t v_raw = vld1_u8(vrow + (col >> 1));
+    uint8x8x2_t u_zip = vzip_u8(u_raw, u_raw); // val[0]=[U0,U0,...,U3,U3] val[1]=[U4,U4,...,U7,U7]
+    uint8x8x2_t v_zip = vzip_u8(v_raw, v_raw);
+
+    // Pixels 0-7 (low half).
+    {
+        int16x8_t u8 = vsubq_s16(vreinterpretq_s16_u16(vmovl_u8(u_zip.val[0])), vdupq_n_s16(128));
+        int16x8_t v8 = vsubq_s16(vreinterpretq_s16_u16(vmovl_u8(v_zip.val[0])), vdupq_n_s16(128));
+        int16x4_t cl = vget_low_s16(c_lo),  ul = vget_low_s16(u8),  vl = vget_low_s16(v8);
+        int16x4_t ch = vget_high_s16(c_lo), uh = vget_high_s16(u8), vh = vget_high_s16(v8);
+        int32x4_t kyl = vmull_n_s16(cl, ky), kyh = vmull_n_s16(ch, ky);
+        int32x4_t rl = vaddq_s32(vaddq_s32(kyl, vmull_n_s16(vl, kr)), vdupq_n_s32(128));
+        int32x4_t gl = vaddq_s32(vsubq_s32(vsubq_s32(kyl, vmull_n_s16(ul, kgu)), vmull_n_s16(vl, kgv)), vdupq_n_s32(128));
+        int32x4_t bl = vaddq_s32(vaddq_s32(kyl, vmull_n_s16(ul, kb)),  vdupq_n_s32(128));
+        int32x4_t rh = vaddq_s32(vaddq_s32(kyh, vmull_n_s16(vh, kr)), vdupq_n_s32(128));
+        int32x4_t gh = vaddq_s32(vsubq_s32(vsubq_s32(kyh, vmull_n_s16(uh, kgu)), vmull_n_s16(vh, kgv)), vdupq_n_s32(128));
+        int32x4_t bh = vaddq_s32(vaddq_s32(kyh, vmull_n_s16(uh, kb)),  vdupq_n_s32(128));
+        uint8x8_t r = vqmovun_s16(vcombine_s16(vqmovn_s32(vshrq_n_s32(rl,8)), vqmovn_s32(vshrq_n_s32(rh,8))));
+        uint8x8_t g = vqmovun_s16(vcombine_s16(vqmovn_s32(vshrq_n_s32(gl,8)), vqmovn_s32(vshrq_n_s32(gh,8))));
+        uint8x8_t b = vqmovun_s16(vcombine_s16(vqmovn_s32(vshrq_n_s32(bl,8)), vqmovn_s32(vshrq_n_s32(bh,8))));
+        uint8x8x4_t bgra; bgra.val[0]=b; bgra.val[1]=g; bgra.val[2]=r; bgra.val[3]=vdup_n_u8(255);
+        vst4_u8(drow + col * 4, bgra);
+    }
+    // Pixels 8-15 (high half).
+    {
+        int16x8_t u8 = vsubq_s16(vreinterpretq_s16_u16(vmovl_u8(u_zip.val[1])), vdupq_n_s16(128));
+        int16x8_t v8 = vsubq_s16(vreinterpretq_s16_u16(vmovl_u8(v_zip.val[1])), vdupq_n_s16(128));
+        int16x4_t cl = vget_low_s16(c_hi),  ul = vget_low_s16(u8),  vl = vget_low_s16(v8);
+        int16x4_t ch = vget_high_s16(c_hi), uh = vget_high_s16(u8), vh = vget_high_s16(v8);
+        int32x4_t kyl = vmull_n_s16(cl, ky), kyh = vmull_n_s16(ch, ky);
+        int32x4_t rl = vaddq_s32(vaddq_s32(kyl, vmull_n_s16(vl, kr)), vdupq_n_s32(128));
+        int32x4_t gl = vaddq_s32(vsubq_s32(vsubq_s32(kyl, vmull_n_s16(ul, kgu)), vmull_n_s16(vl, kgv)), vdupq_n_s32(128));
+        int32x4_t bl = vaddq_s32(vaddq_s32(kyl, vmull_n_s16(ul, kb)),  vdupq_n_s32(128));
+        int32x4_t rh = vaddq_s32(vaddq_s32(kyh, vmull_n_s16(vh, kr)), vdupq_n_s32(128));
+        int32x4_t gh = vaddq_s32(vsubq_s32(vsubq_s32(kyh, vmull_n_s16(uh, kgu)), vmull_n_s16(vh, kgv)), vdupq_n_s32(128));
+        int32x4_t bh = vaddq_s32(vaddq_s32(kyh, vmull_n_s16(uh, kb)),  vdupq_n_s32(128));
+        uint8x8_t r = vqmovun_s16(vcombine_s16(vqmovn_s32(vshrq_n_s32(rl,8)), vqmovn_s32(vshrq_n_s32(rh,8))));
+        uint8x8_t g = vqmovun_s16(vcombine_s16(vqmovn_s32(vshrq_n_s32(gl,8)), vqmovn_s32(vshrq_n_s32(gh,8))));
+        uint8x8_t b = vqmovun_s16(vcombine_s16(vqmovn_s32(vshrq_n_s32(bl,8)), vqmovn_s32(vshrq_n_s32(bh,8))));
+        uint8x8x4_t bgra; bgra.val[0]=b; bgra.val[1]=g; bgra.val[2]=r; bgra.val[3]=vdup_n_u8(255);
+        vst4_u8(drow + (col + 8) * 4, bgra);
+    }
+}
 #endif // __ARM_NEON__
+
+// ----------------------------------------------------------------------------
+// SSE2 YUV→BGRA inline helpers (x86_64)
+// Each function converts 8 luma pixels per call using 128-bit SIMD.
+// Coefficients and arithmetic match the NEON paths above (BT.601, fixed-point
+// with 8 fractional bits): R = (ky*Y + kr*V + 128) >> 8, etc.
+// _mm_madd_epi16 is used for the R and B channels because kb=516 overflows
+// int16 multiplication (516×127 = 65532 > 32767); madd widens to int32.
+// ----------------------------------------------------------------------------
+#ifdef __SSE2__
+
+// Shared BT.601 arithmetic core.  Receives pre-biased int16 vectors
+// y16 (Y − yoff), u16 (U − 128), v16 (V − 128) and stores 8 BGRA pixels.
+static inline void grdp_yuv_to_bgra_sse2_core(
+    __m128i y16, __m128i u16, __m128i v16,
+    uint8_t *drow, int col,
+    int16_t ky, int16_t kr, int16_t kgu, int16_t kgv, int16_t kb)
+{
+    const __m128i add128   = _mm_set1_epi32(128);
+    const __m128i alpha    = _mm_set1_epi8((char)255);
+    // Interleaved coefficient pairs for _mm_madd_epi16: elem0=ky, elem1=k?
+    const __m128i coeff_r  = _mm_set_epi16(kr,          ky, kr,          ky,
+                                            kr,          ky, kr,          ky);
+    const __m128i coeff_b  = _mm_set_epi16(kb,          ky, kb,          ky,
+                                            kb,          ky, kb,          ky);
+    // Green uses ky*Y − kgv*V (via madd) then adds −kgu*U (sign-extended).
+    const __m128i coeff_yv = _mm_set_epi16((int16_t)-kgv, ky, (int16_t)-kgv, ky,
+                                            (int16_t)-kgv, ky, (int16_t)-kgv, ky);
+    const __m128i neg_kgu  = _mm_set1_epi16((int16_t)-kgu);
+
+    __m128i yv_lo = _mm_unpacklo_epi16(y16, v16);
+    __m128i yu_lo = _mm_unpacklo_epi16(y16, u16);
+    __m128i r32_lo = _mm_add_epi32(_mm_madd_epi16(yv_lo, coeff_r), add128);
+    __m128i b32_lo = _mm_add_epi32(_mm_madd_epi16(yu_lo, coeff_b), add128);
+    __m128i g32_lo = _mm_madd_epi16(yv_lo, coeff_yv);
+    {
+        __m128i ngu = _mm_mullo_epi16(u16, neg_kgu);
+        // Sign-extend int16 ngu to int32 using srai-15 trick, then unpack.
+        g32_lo = _mm_add_epi32(g32_lo,
+            _mm_add_epi32(_mm_unpacklo_epi16(ngu, _mm_srai_epi16(ngu, 15)), add128));
+    }
+    __m128i yv_hi = _mm_unpackhi_epi16(y16, v16);
+    __m128i yu_hi = _mm_unpackhi_epi16(y16, u16);
+    __m128i r32_hi = _mm_add_epi32(_mm_madd_epi16(yv_hi, coeff_r), add128);
+    __m128i b32_hi = _mm_add_epi32(_mm_madd_epi16(yu_hi, coeff_b), add128);
+    __m128i g32_hi = _mm_madd_epi16(yv_hi, coeff_yv);
+    {
+        __m128i ngu = _mm_mullo_epi16(u16, neg_kgu);
+        g32_hi = _mm_add_epi32(g32_hi,
+            _mm_add_epi32(_mm_unpackhi_epi16(ngu, _mm_srai_epi16(ngu, 15)), add128));
+    }
+
+    // Shift right 8 (un-scale), pack int32→int16→uint8 (auto-saturating clamp).
+    __m128i r16 = _mm_packs_epi32(_mm_srai_epi32(r32_lo, 8), _mm_srai_epi32(r32_hi, 8));
+    __m128i g16 = _mm_packs_epi32(_mm_srai_epi32(g32_lo, 8), _mm_srai_epi32(g32_hi, 8));
+    __m128i b16 = _mm_packs_epi32(_mm_srai_epi32(b32_lo, 8), _mm_srai_epi32(b32_hi, 8));
+    __m128i r8  = _mm_packus_epi16(r16, r16);
+    __m128i g8  = _mm_packus_epi16(g16, g16);
+    __m128i b8  = _mm_packus_epi16(b16, b16);
+
+    // Interleave B,G,R,A into two 16-byte stores covering 8 BGRA pixels.
+    __m128i bg = _mm_unpacklo_epi8(b8, g8);
+    __m128i ra = _mm_unpacklo_epi8(r8, alpha);
+    _mm_storeu_si128((__m128i *)(drow + col * 4),      _mm_unpacklo_epi16(bg, ra));
+    _mm_storeu_si128((__m128i *)(drow + col * 4 + 16), _mm_unpackhi_epi16(bg, ra));
+}
+
+// 8-pixel NV12 (semi-planar Y + interleaved UV) → BGRA.
+static inline void grdp_nv12_to_bgra_sse2_8(
+    const uint8_t *yrow, const uint8_t *uvrow, uint8_t *drow, int col,
+    int16_t ky, int16_t kr, int16_t kgu, int16_t kgv, int16_t kb, int16_t yoff)
+{
+    const __m128i zero = _mm_setzero_si128();
+    __m128i y8  = _mm_loadl_epi64((const __m128i *)(yrow + col));
+    __m128i y16 = _mm_sub_epi16(_mm_unpacklo_epi8(y8, zero), _mm_set1_epi16(yoff));
+
+    // Load 8 interleaved UV bytes [U0,V0,U1,V1,...,U3,V3].
+    __m128i uv8    = _mm_loadl_epi64((const __m128i *)(uvrow + col));
+    // Isolate U (even bytes) and V (odd bytes), pack to low 8 bytes.
+    __m128i u_pack = _mm_packus_epi16(_mm_and_si128(uv8, _mm_set1_epi16((int16_t)0x00FF)), zero);
+    __m128i v_pack = _mm_packus_epi16(_mm_srli_epi16(uv8, 8), zero);
+    // Duplicate each sample to cover its two luma pixels, then extend to int16.
+    __m128i u16 = _mm_sub_epi16(
+        _mm_unpacklo_epi8(_mm_unpacklo_epi8(u_pack, u_pack), zero), _mm_set1_epi16(128));
+    __m128i v16 = _mm_sub_epi16(
+        _mm_unpacklo_epi8(_mm_unpacklo_epi8(v_pack, v_pack), zero), _mm_set1_epi16(128));
+
+    grdp_yuv_to_bgra_sse2_core(y16, u16, v16, drow, col, ky, kr, kgu, kgv, kb);
+}
+
+// 8-pixel planar YUV420P → BGRA.
+// FFmpeg guarantees at least 64-byte padding at end of each line buffer, so
+// loading 8 bytes when only 4 U/V bytes are needed per 8 luma pixels is safe.
+static inline void grdp_yuv420p_to_bgra_sse2_8(
+    const uint8_t *yrow, const uint8_t *urow, const uint8_t *vrow,
+    uint8_t *drow, int col,
+    int16_t ky, int16_t kr, int16_t kgu, int16_t kgv, int16_t kb, int16_t yoff)
+{
+    const __m128i zero = _mm_setzero_si128();
+    __m128i y8  = _mm_loadl_epi64((const __m128i *)(yrow + col));
+    __m128i y16 = _mm_sub_epi16(_mm_unpacklo_epi8(y8, zero), _mm_set1_epi16(yoff));
+
+    // Load 4 U and 4 V bytes (8-byte load; only low 4 used after duplication).
+    __m128i u4  = _mm_loadl_epi64((const __m128i *)(urow + (col >> 1)));
+    __m128i u16 = _mm_sub_epi16(
+        _mm_unpacklo_epi8(_mm_unpacklo_epi8(u4, u4), zero), _mm_set1_epi16(128));
+    __m128i v4  = _mm_loadl_epi64((const __m128i *)(vrow + (col >> 1)));
+    __m128i v16 = _mm_sub_epi16(
+        _mm_unpacklo_epi8(_mm_unpacklo_epi8(v4, v4), zero), _mm_set1_epi16(128));
+
+    grdp_yuv_to_bgra_sse2_core(y16, u16, v16, drow, col, ky, kr, kgu, kgv, kb);
+}
+
+#endif // __SSE2__
 
 static void grdp_yuv420p_to_bgra(
     const AVFrame *src, uint8_t *dst, int dst_stride, int full_range)
@@ -228,10 +431,35 @@ static void grdp_yuv420p_to_bgra(
         const uint8_t *vrow = src->data[2] + (row >> 1) * src->linesize[2];
         uint8_t *drow = dst + row * dst_stride;
         int col = 0;
+        for (; col + 15 < width; col += 16)
+            grdp_yuv420p_to_bgra_neon_16(yrow, urow, vrow, drow, col,
+                                          ky, kr, kgu, kgv, kb, yoff);
         for (; col + 7 < width; col += 8)
             grdp_yuv420p_to_bgra_neon_8(yrow, urow, vrow, drow, col,
                                         ky, kr, kgu, kgv, kb, yoff);
         // Scalar tail for widths not a multiple of 8.
+        for (; col < width; col++) {
+            int u = (int)urow[col >> 1] - 128;
+            int v = (int)vrow[col >> 1] - 128;
+            grdp_bt601_pixel((int)yrow[col], u, v, full_range, drow + col*4);
+        }
+    }
+#elif defined(__SSE2__)
+    int16_t ky   = full_range ? 256 : 298;
+    int16_t kr   = full_range ? 359 : 409;
+    int16_t kgu  = full_range ?  88 : 100;
+    int16_t kgv  = full_range ? 183 : 208;
+    int16_t kb   = full_range ? 454 : 516;
+    int16_t yoff = full_range ?   0 :  16;
+    for (int row = 0; row < height; row++) {
+        const uint8_t *yrow = src->data[0] + row        * src->linesize[0];
+        const uint8_t *urow = src->data[1] + (row >> 1) * src->linesize[1];
+        const uint8_t *vrow = src->data[2] + (row >> 1) * src->linesize[2];
+        uint8_t *drow = dst + row * dst_stride;
+        int col = 0;
+        for (; col + 7 < width; col += 8)
+            grdp_yuv420p_to_bgra_sse2_8(yrow, urow, vrow, drow, col,
+                                        ky, kr, kgu, kgv, kb, yoff);
         for (; col < width; col++) {
             int u = (int)urow[col >> 1] - 128;
             int v = (int)vrow[col >> 1] - 128;
@@ -271,6 +499,13 @@ static void grdp_yuv420p_to_bgra_regions(
     int16_t kgv  = full_range ? 183 : 208;
     int16_t kb   = full_range ? 454 : 516;
     int16_t yoff = full_range ?   0 :  16;
+#elif defined(__SSE2__)
+    int16_t ky   = full_range ? 256 : 298;
+    int16_t kr   = full_range ? 359 : 409;
+    int16_t kgu  = full_range ?  88 : 100;
+    int16_t kgv  = full_range ? 183 : 208;
+    int16_t kb   = full_range ? 454 : 516;
+    int16_t yoff = full_range ?   0 :  16;
 #endif
     for (int i = 0; i < n_rects; i++) {
         int left   = (int)rects[i*4+0];
@@ -290,17 +525,31 @@ static void grdp_yuv420p_to_bgra_regions(
             int col = left;
 #ifdef __ARM_NEON__
             // Advance scalar to the next multiple-of-8 boundary before the
-            // NEON loop.  The NEON helper loads 8 luma bytes and 8 UV bytes
-            // starting at col; col must be even for correct NV12 UV pairing.
-            // A multiple of 8 satisfies both that and the 8-pixel alignment.
+            // NEON loop.  The only requirement for correct UV subsampling is
+            // that col is even; 8-alignment satisfies that and reduces the
+            // scalar pre-loop to at most 7 pixels (vs. 15 for 16-alignment).
             int neon_start = (col + 7) & ~7;
             for (; col < neon_start && col < right; col++) {
                 int u = (int)urow[col >> 1] - 128;
                 int v = (int)vrow[col >> 1] - 128;
                 grdp_bt601_pixel((int)yrow[col], u, v, full_range, drow + col*4);
             }
+            for (; col + 15 < right; col += 16)
+                grdp_yuv420p_to_bgra_neon_16(yrow, urow, vrow, drow, col,
+                                              ky, kr, kgu, kgv, kb, yoff);
             for (; col + 7 < right; col += 8)
                 grdp_yuv420p_to_bgra_neon_8(yrow, urow, vrow, drow, col,
+                                             ky, kr, kgu, kgv, kb, yoff);
+#elif defined(__SSE2__)
+            // Advance to 8-aligned column so UV subsampling is always correct.
+            int sse_start = (col + 7) & ~7;
+            for (; col < sse_start && col < right; col++) {
+                int u = (int)urow[col >> 1] - 128;
+                int v = (int)vrow[col >> 1] - 128;
+                grdp_bt601_pixel((int)yrow[col], u, v, full_range, drow + col*4);
+            }
+            for (; col + 7 < right; col += 8)
+                grdp_yuv420p_to_bgra_sse2_8(yrow, urow, vrow, drow, col,
                                              ky, kr, kgu, kgv, kb, yoff);
 #endif
             for (; col < right; col++) {
@@ -334,12 +583,12 @@ static inline void grdp_nv12_to_bgra_neon_8(
                                 vdupq_n_s16(yoff));
 
     // Load 8 UV bytes: [U0,V0,U1,V1,U2,V2,U3,V3].
-    // vuzp deinterleaves into .val[0]=[U0,U1,U2,U3,…] .val[1]=[V0,V1,V2,V3,…].
-    // vzip then duplicates each value for the two luma pixels it serves.
-    uint8x8_t uv_u8    = vld1_u8(uvrow + col);
-    uint8x8x2_t uv_sep = vuzp_u8(uv_u8, uv_u8);
-    uint8x8_t u8       = vzip_u8(uv_sep.val[0], uv_sep.val[0]).val[0]; // [U0,U0,U1,U1,…]
-    uint8x8_t v8       = vzip_u8(uv_sep.val[1], uv_sep.val[1]).val[0]; // [V0,V0,V1,V1,…]
+    // vtrn_u8(a,a) transposes pairs: val[0]=[a[0],a[0],a[2],a[2],…] val[1]=[a[1],a[1],a[3],a[3],…].
+    // Applied to interleaved NV12 this deinterleaves AND duplicates U and V in one instruction.
+    uint8x8_t uv_u8      = vld1_u8(uvrow + col);
+    uint8x8x2_t uv_dup   = vtrn_u8(uv_u8, uv_u8);
+    uint8x8_t u8         = uv_dup.val[0]; // [U0,U0,U1,U1,U2,U2,U3,U3]
+    uint8x8_t v8         = uv_dup.val[1]; // [V0,V0,V1,V1,V2,V2,V3,V3]
 
     int16x8_t u16 = vsubq_s16(vreinterpretq_s16_u16(vmovl_u8(u8)), vdupq_n_s16(128));
     int16x8_t v16 = vsubq_s16(vreinterpretq_s16_u16(vmovl_u8(v8)), vdupq_n_s16(128));
@@ -369,6 +618,68 @@ static inline void grdp_nv12_to_bgra_neon_8(
     bgra.val[3] = vdup_n_u8(255);
     vst4_u8(drow + col * 4, bgra);
 }
+
+// grdp_nv12_to_bgra_neon_16 processes 16 luma pixels (8 UV pairs) per call.
+// vld2_u8 deinterleaves U and V in one instruction; vzip_u8 then duplicates
+// each chroma sample for the two luma pixels it serves, giving twice the
+// throughput of grdp_nv12_to_bgra_neon_8 per loop iteration.
+static inline void grdp_nv12_to_bgra_neon_16(
+    const uint8_t *yrow, const uint8_t *uvrow, uint8_t *drow,
+    int col, int16_t ky, int16_t kr, int16_t kgu, int16_t kgv, int16_t kb,
+    int16_t yoff)
+{
+    // Load 16 luma bytes, subtract Y offset.
+    uint8x16_t y_u8 = vld1q_u8(yrow + col);
+    int16x8_t c_lo = vsubq_s16(vreinterpretq_s16_u16(vmovl_u8(vget_low_u8(y_u8))),
+                                vdupq_n_s16(yoff));
+    int16x8_t c_hi = vsubq_s16(vreinterpretq_s16_u16(vmovl_u8(vget_high_u8(y_u8))),
+                                vdupq_n_s16(yoff));
+
+    // Load 8 UV pairs (16 bytes) with automatic deinterleave.
+    // val[0]=[U0..U7], val[1]=[V0..V7]; each serves 2 luma pixels.
+    uint8x8x2_t uv = vld2_u8(uvrow + col);
+    uint8x8x2_t u_zip = vzip_u8(uv.val[0], uv.val[0]); // val[0]=[U0,U0,...,U3,U3] val[1]=[U4,U4,...,U7,U7]
+    uint8x8x2_t v_zip = vzip_u8(uv.val[1], uv.val[1]);
+
+    // Pixels 0-7 (low half).
+    {
+        int16x8_t u8 = vsubq_s16(vreinterpretq_s16_u16(vmovl_u8(u_zip.val[0])), vdupq_n_s16(128));
+        int16x8_t v8 = vsubq_s16(vreinterpretq_s16_u16(vmovl_u8(v_zip.val[0])), vdupq_n_s16(128));
+        int16x4_t cl = vget_low_s16(c_lo),  ul = vget_low_s16(u8),  vl = vget_low_s16(v8);
+        int16x4_t ch = vget_high_s16(c_lo), uh = vget_high_s16(u8), vh = vget_high_s16(v8);
+        int32x4_t kyl = vmull_n_s16(cl, ky), kyh = vmull_n_s16(ch, ky);
+        int32x4_t rl = vaddq_s32(vaddq_s32(kyl, vmull_n_s16(vl, kr)), vdupq_n_s32(128));
+        int32x4_t gl = vaddq_s32(vsubq_s32(vsubq_s32(kyl, vmull_n_s16(ul, kgu)), vmull_n_s16(vl, kgv)), vdupq_n_s32(128));
+        int32x4_t bl = vaddq_s32(vaddq_s32(kyl, vmull_n_s16(ul, kb)),  vdupq_n_s32(128));
+        int32x4_t rh = vaddq_s32(vaddq_s32(kyh, vmull_n_s16(vh, kr)), vdupq_n_s32(128));
+        int32x4_t gh = vaddq_s32(vsubq_s32(vsubq_s32(kyh, vmull_n_s16(uh, kgu)), vmull_n_s16(vh, kgv)), vdupq_n_s32(128));
+        int32x4_t bh = vaddq_s32(vaddq_s32(kyh, vmull_n_s16(uh, kb)),  vdupq_n_s32(128));
+        uint8x8_t r = vqmovun_s16(vcombine_s16(vqmovn_s32(vshrq_n_s32(rl,8)), vqmovn_s32(vshrq_n_s32(rh,8))));
+        uint8x8_t g = vqmovun_s16(vcombine_s16(vqmovn_s32(vshrq_n_s32(gl,8)), vqmovn_s32(vshrq_n_s32(gh,8))));
+        uint8x8_t b = vqmovun_s16(vcombine_s16(vqmovn_s32(vshrq_n_s32(bl,8)), vqmovn_s32(vshrq_n_s32(bh,8))));
+        uint8x8x4_t bgra; bgra.val[0]=b; bgra.val[1]=g; bgra.val[2]=r; bgra.val[3]=vdup_n_u8(255);
+        vst4_u8(drow + col * 4, bgra);
+    }
+    // Pixels 8-15 (high half).
+    {
+        int16x8_t u8 = vsubq_s16(vreinterpretq_s16_u16(vmovl_u8(u_zip.val[1])), vdupq_n_s16(128));
+        int16x8_t v8 = vsubq_s16(vreinterpretq_s16_u16(vmovl_u8(v_zip.val[1])), vdupq_n_s16(128));
+        int16x4_t cl = vget_low_s16(c_hi),  ul = vget_low_s16(u8),  vl = vget_low_s16(v8);
+        int16x4_t ch = vget_high_s16(c_hi), uh = vget_high_s16(u8), vh = vget_high_s16(v8);
+        int32x4_t kyl = vmull_n_s16(cl, ky), kyh = vmull_n_s16(ch, ky);
+        int32x4_t rl = vaddq_s32(vaddq_s32(kyl, vmull_n_s16(vl, kr)), vdupq_n_s32(128));
+        int32x4_t gl = vaddq_s32(vsubq_s32(vsubq_s32(kyl, vmull_n_s16(ul, kgu)), vmull_n_s16(vl, kgv)), vdupq_n_s32(128));
+        int32x4_t bl = vaddq_s32(vaddq_s32(kyl, vmull_n_s16(ul, kb)),  vdupq_n_s32(128));
+        int32x4_t rh = vaddq_s32(vaddq_s32(kyh, vmull_n_s16(vh, kr)), vdupq_n_s32(128));
+        int32x4_t gh = vaddq_s32(vsubq_s32(vsubq_s32(kyh, vmull_n_s16(uh, kgu)), vmull_n_s16(vh, kgv)), vdupq_n_s32(128));
+        int32x4_t bh = vaddq_s32(vaddq_s32(kyh, vmull_n_s16(uh, kb)),  vdupq_n_s32(128));
+        uint8x8_t r = vqmovun_s16(vcombine_s16(vqmovn_s32(vshrq_n_s32(rl,8)), vqmovn_s32(vshrq_n_s32(rh,8))));
+        uint8x8_t g = vqmovun_s16(vcombine_s16(vqmovn_s32(vshrq_n_s32(gl,8)), vqmovn_s32(vshrq_n_s32(gh,8))));
+        uint8x8_t b = vqmovun_s16(vcombine_s16(vqmovn_s32(vshrq_n_s32(bl,8)), vqmovn_s32(vshrq_n_s32(bh,8))));
+        uint8x8x4_t bgra; bgra.val[0]=b; bgra.val[1]=g; bgra.val[2]=r; bgra.val[3]=vdup_n_u8(255);
+        vst4_u8(drow + (col + 8) * 4, bgra);
+    }
+}
 #endif // __ARM_NEON__
 
 static void grdp_nv12_to_bgra(
@@ -389,9 +700,31 @@ static void grdp_nv12_to_bgra(
         const uint8_t *uvrow = src->data[1] + (row >> 1) * src->linesize[1];
         uint8_t *drow = dst + row * dst_stride;
         int col = 0;
+        for (; col + 15 < width; col += 16)
+            grdp_nv12_to_bgra_neon_16(yrow, uvrow, drow, col, ky, kr, kgu, kgv, kb, yoff);
         for (; col + 7 < width; col += 8)
             grdp_nv12_to_bgra_neon_8(yrow, uvrow, drow, col, ky, kr, kgu, kgv, kb, yoff);
         // Scalar tail for widths not a multiple of 8.
+        for (; col < width; col++) {
+            int u = (int)uvrow[(col >> 1) * 2    ] - 128;
+            int v = (int)uvrow[(col >> 1) * 2 + 1] - 128;
+            grdp_bt601_pixel((int)yrow[col], u, v, full_range, drow + col*4);
+        }
+    }
+#elif defined(__SSE2__)
+    int16_t ky  = full_range ? 256 : 298;
+    int16_t kr  = full_range ? 359 : 409;
+    int16_t kgu = full_range ?  88 : 100;
+    int16_t kgv = full_range ? 183 : 208;
+    int16_t kb  = full_range ? 454 : 516;
+    int16_t yoff = full_range ? 0 : 16;
+    for (int row = 0; row < height; row++) {
+        const uint8_t *yrow  = src->data[0] + row        * src->linesize[0];
+        const uint8_t *uvrow = src->data[1] + (row >> 1) * src->linesize[1];
+        uint8_t *drow = dst + row * dst_stride;
+        int col = 0;
+        for (; col + 7 < width; col += 8)
+            grdp_nv12_to_bgra_sse2_8(yrow, uvrow, drow, col, ky, kr, kgu, kgv, kb, yoff);
         for (; col < width; col++) {
             int u = (int)uvrow[(col >> 1) * 2    ] - 128;
             int v = (int)uvrow[(col >> 1) * 2 + 1] - 128;
@@ -428,6 +761,13 @@ static void grdp_nv12_to_bgra_regions(
     int16_t kgv  = full_range ? 183 : 208;
     int16_t kb   = full_range ? 454 : 516;
     int16_t yoff = full_range ?   0 :  16;
+#elif defined(__SSE2__)
+    int16_t ky   = full_range ? 256 : 298;
+    int16_t kr   = full_range ? 359 : 409;
+    int16_t kgu  = full_range ?  88 : 100;
+    int16_t kgv  = full_range ? 183 : 208;
+    int16_t kb   = full_range ? 454 : 516;
+    int16_t yoff = full_range ?   0 :  16;
 #endif
     for (int i = 0; i < n_rects; i++) {
         int left   = (int)rects[i*4+0];
@@ -451,8 +791,19 @@ static void grdp_nv12_to_bgra_regions(
                 int v = (int)uvrow[(col >> 1) * 2 + 1] - 128;
                 grdp_bt601_pixel((int)yrow[col], u, v, full_range, drow + col*4);
             }
+            for (; col + 15 < right; col += 16)
+                grdp_nv12_to_bgra_neon_16(yrow, uvrow, drow, col, ky, kr, kgu, kgv, kb, yoff);
             for (; col + 7 < right; col += 8)
                 grdp_nv12_to_bgra_neon_8(yrow, uvrow, drow, col, ky, kr, kgu, kgv, kb, yoff);
+#elif defined(__SSE2__)
+            int sse_start = (col + 7) & ~7;
+            for (; col < sse_start && col < right; col++) {
+                int u = (int)uvrow[(col >> 1) * 2    ] - 128;
+                int v = (int)uvrow[(col >> 1) * 2 + 1] - 128;
+                grdp_bt601_pixel((int)yrow[col], u, v, full_range, drow + col*4);
+            }
+            for (; col + 7 < right; col += 8)
+                grdp_nv12_to_bgra_sse2_8(yrow, uvrow, drow, col, ky, kr, kgu, kgv, kb, yoff);
 #endif
             for (; col < right; col++) {
                 int u = (int)uvrow[(col >> 1) * 2    ] - 128;
@@ -575,6 +926,17 @@ static void grdp_copy_nv12_to_i420(
             vst1q_u8(ud + x, uv.val[0]);
             vst1q_u8(vd + x, uv.val[1]);
         }
+#elif defined(__SSE2__)
+        // SSE2: deinterleave 8 UV pairs (16 bytes) per iteration.
+        // _mm_and_si128 extracts even bytes (U) and _mm_srli_epi16 shifts odd bytes (V).
+        // _mm_packus_epi16 packs 8 × 16-bit values to 8 bytes in the low half.
+        for (; x + 7 < pw; x += 8) {
+            __m128i uv128 = _mm_loadu_si128((const __m128i *)(row + x * 2));
+            __m128i u_vec = _mm_and_si128(uv128, _mm_set1_epi16(0x00FF));
+            __m128i v_vec = _mm_srli_epi16(uv128, 8);
+            _mm_storel_epi64((__m128i *)(ud + x), _mm_packus_epi16(u_vec, u_vec));
+            _mm_storel_epi64((__m128i *)(vd + x), _mm_packus_epi16(v_vec, v_vec));
+        }
 #endif
         for (; x < pw; x++) {
             ud[x] = row[x * 2];
@@ -608,6 +970,142 @@ static void grdp_copy_nv12(
             memcpy(uvdst + y * uv_bytes, f->data[1] + y * f->linesize[1], uv_bytes);
 }
 
+// grdp_nv12_to_bgra_rows is the row-range variant of grdp_nv12_to_bgra.
+// Only rows [start_row, end_row) are written; the rest of dst is untouched.
+// This allows the caller to parallelise the conversion across goroutines.
+static void grdp_nv12_to_bgra_rows(
+    const AVFrame *src, uint8_t *dst, int dst_stride, int full_range,
+    int start_row, int end_row)
+{
+    int width = src->width;
+    if (start_row < 0) start_row = 0;
+    if (end_row > src->height) end_row = src->height;
+#ifdef __ARM_NEON__
+    int16_t ky  = full_range ? 256 : 298;
+    int16_t kr  = full_range ? 359 : 409;
+    int16_t kgu = full_range ?  88 : 100;
+    int16_t kgv = full_range ? 183 : 208;
+    int16_t kb  = full_range ? 454 : 516;
+    int16_t yoff = full_range ? 0 : 16;
+    for (int row = start_row; row < end_row; row++) {
+        const uint8_t *yrow  = src->data[0] + row        * src->linesize[0];
+        const uint8_t *uvrow = src->data[1] + (row >> 1) * src->linesize[1];
+        uint8_t *drow = dst + row * dst_stride;
+        int col = 0;
+        for (; col + 15 < width; col += 16)
+            grdp_nv12_to_bgra_neon_16(yrow, uvrow, drow, col, ky, kr, kgu, kgv, kb, yoff);
+        for (; col + 7 < width; col += 8)
+            grdp_nv12_to_bgra_neon_8(yrow, uvrow, drow, col, ky, kr, kgu, kgv, kb, yoff);
+        for (; col < width; col++) {
+            int u = (int)uvrow[(col >> 1) * 2    ] - 128;
+            int v = (int)uvrow[(col >> 1) * 2 + 1] - 128;
+            grdp_bt601_pixel((int)yrow[col], u, v, full_range, drow + col*4);
+        }
+    }
+#elif defined(__SSE2__)
+    int16_t ky  = full_range ? 256 : 298;
+    int16_t kr  = full_range ? 359 : 409;
+    int16_t kgu = full_range ?  88 : 100;
+    int16_t kgv = full_range ? 183 : 208;
+    int16_t kb  = full_range ? 454 : 516;
+    int16_t yoff = full_range ? 0 : 16;
+    for (int row = start_row; row < end_row; row++) {
+        const uint8_t *yrow  = src->data[0] + row        * src->linesize[0];
+        const uint8_t *uvrow = src->data[1] + (row >> 1) * src->linesize[1];
+        uint8_t *drow = dst + row * dst_stride;
+        int col = 0;
+        for (; col + 7 < width; col += 8)
+            grdp_nv12_to_bgra_sse2_8(yrow, uvrow, drow, col, ky, kr, kgu, kgv, kb, yoff);
+        for (; col < width; col++) {
+            int u = (int)uvrow[(col >> 1) * 2    ] - 128;
+            int v = (int)uvrow[(col >> 1) * 2 + 1] - 128;
+            grdp_bt601_pixel((int)yrow[col], u, v, full_range, drow + col*4);
+        }
+    }
+#else
+    for (int row = start_row; row < end_row; row++) {
+        const uint8_t *yrow  = src->data[0] + row        * src->linesize[0];
+        const uint8_t *uvrow = src->data[1] + (row >> 1) * src->linesize[1];
+        uint8_t *drow = dst + row * dst_stride;
+        for (int col = 0; col < width; col++) {
+            int u = (int)uvrow[(col >> 1) * 2    ] - 128;
+            int v = (int)uvrow[(col >> 1) * 2 + 1] - 128;
+            grdp_bt601_pixel((int)yrow[col], u, v, full_range, drow + col*4);
+        }
+    }
+#endif
+}
+
+// grdp_yuv420p_to_bgra_rows is the row-range variant of grdp_yuv420p_to_bgra.
+static void grdp_yuv420p_to_bgra_rows(
+    const AVFrame *src, uint8_t *dst, int dst_stride, int full_range,
+    int start_row, int end_row)
+{
+    int width = src->width;
+    if (start_row < 0) start_row = 0;
+    if (end_row > src->height) end_row = src->height;
+#ifdef __ARM_NEON__
+    int16_t ky   = full_range ? 256 : 298;
+    int16_t kr   = full_range ? 359 : 409;
+    int16_t kgu  = full_range ?  88 : 100;
+    int16_t kgv  = full_range ? 183 : 208;
+    int16_t kb   = full_range ? 454 : 516;
+    int16_t yoff = full_range ?   0 :  16;
+    for (int row = start_row; row < end_row; row++) {
+        const uint8_t *yrow = src->data[0] + row        * src->linesize[0];
+        const uint8_t *urow = src->data[1] + (row >> 1) * src->linesize[1];
+        const uint8_t *vrow = src->data[2] + (row >> 1) * src->linesize[2];
+        uint8_t *drow = dst + row * dst_stride;
+        int col = 0;
+        for (; col + 15 < width; col += 16)
+            grdp_yuv420p_to_bgra_neon_16(yrow, urow, vrow, drow, col,
+                                          ky, kr, kgu, kgv, kb, yoff);
+        for (; col + 7 < width; col += 8)
+            grdp_yuv420p_to_bgra_neon_8(yrow, urow, vrow, drow, col,
+                                        ky, kr, kgu, kgv, kb, yoff);
+        for (; col < width; col++) {
+            int u = (int)urow[col >> 1] - 128;
+            int v = (int)vrow[col >> 1] - 128;
+            grdp_bt601_pixel((int)yrow[col], u, v, full_range, drow + col*4);
+        }
+    }
+#elif defined(__SSE2__)
+    int16_t ky   = full_range ? 256 : 298;
+    int16_t kr   = full_range ? 359 : 409;
+    int16_t kgu  = full_range ?  88 : 100;
+    int16_t kgv  = full_range ? 183 : 208;
+    int16_t kb   = full_range ? 454 : 516;
+    int16_t yoff = full_range ?   0 :  16;
+    for (int row = start_row; row < end_row; row++) {
+        const uint8_t *yrow = src->data[0] + row        * src->linesize[0];
+        const uint8_t *urow = src->data[1] + (row >> 1) * src->linesize[1];
+        const uint8_t *vrow = src->data[2] + (row >> 1) * src->linesize[2];
+        uint8_t *drow = dst + row * dst_stride;
+        int col = 0;
+        for (; col + 7 < width; col += 8)
+            grdp_yuv420p_to_bgra_sse2_8(yrow, urow, vrow, drow, col,
+                                        ky, kr, kgu, kgv, kb, yoff);
+        for (; col < width; col++) {
+            int u = (int)urow[col >> 1] - 128;
+            int v = (int)vrow[col >> 1] - 128;
+            grdp_bt601_pixel((int)yrow[col], u, v, full_range, drow + col*4);
+        }
+    }
+#else
+    for (int row = start_row; row < end_row; row++) {
+        const uint8_t *yrow = src->data[0] + row        * src->linesize[0];
+        const uint8_t *urow = src->data[1] + (row >> 1) * src->linesize[1];
+        const uint8_t *vrow = src->data[2] + (row >> 1) * src->linesize[2];
+        uint8_t *drow = dst + row * dst_stride;
+        for (int col = 0; col < width; col++) {
+            int u = (int)urow[col >> 1] - 128;
+            int v = (int)vrow[col >> 1] - 128;
+            grdp_bt601_pixel((int)yrow[col], u, v, full_range, drow + col*4);
+        }
+    }
+#endif
+}
+
 // grdp_find_v4l2m2m returns the h264_v4l2m2m decoder if FFmpeg was compiled
 // with V4L2 M2M support (common on Linux/Raspberry Pi). Returns NULL otherwise.
 static const AVCodec *grdp_find_v4l2m2m(void) {
@@ -634,6 +1132,92 @@ import (
 // producing a strong green cast; the hand-written BT.601 loops are used instead.
 // On x86_64, swscale is both correct and significantly faster (SSSE3/AVX2).
 var useSwscale = runtime.GOARCH != "arm64"
+
+// convertWorkers is the number of goroutines used to parallelise the YUV→BGRA
+// conversion.  Capped at 4 so we don't thrash the cache with too many threads
+// writing into the same output buffer.
+var convertWorkers = min(runtime.GOMAXPROCS(0), 4)
+
+// convertParallelMinH is the minimum frame height at which row-parallel
+// conversion is enabled.  For small frames the goroutine overhead outweighs
+// the gain from parallelism.
+const convertParallelMinH = 480
+
+// rowConvertJob is the work item dispatched to convertWorkerPool goroutines.
+type rowConvertJob struct {
+	fn   func(s, e C.int)
+	s, e C.int
+}
+
+// convertWorkerPool maintains N persistent goroutines for row-parallel
+// YUV→BGRA conversion, eliminating the per-frame goroutine allocation cost.
+// At 30fps with 4 workers the old code created ~120 goroutines/second; this
+// pool amortises that overhead down to zero after the first frame.
+type convertWorkerPool struct {
+	jobs chan rowConvertJob
+	done chan struct{}
+	n    int
+}
+
+func newConvertWorkerPool(n int) *convertWorkerPool {
+	p := &convertWorkerPool{
+		jobs: make(chan rowConvertJob, n),
+		done: make(chan struct{}, n),
+		n:    n,
+	}
+	for range n {
+		go func() {
+			for job := range p.jobs {
+				job.fn(job.s, job.e)
+				p.done <- struct{}{}
+			}
+		}()
+	}
+	return p
+}
+
+// dispatch partitions [0, h) into p.n equal bands and executes fn
+// concurrently across the pool's persistent goroutines.
+func (p *convertWorkerPool) dispatch(h int, fn func(s, e C.int)) {
+	step := (h + p.n - 1) / p.n
+	count := 0
+	for i := 0; i < p.n; i++ {
+		s := i * step
+		e := s + step
+		if e > h {
+			e = h
+		}
+		if s >= h {
+			break
+		}
+		p.jobs <- rowConvertJob{fn: fn, s: C.int(s), e: C.int(e)}
+		count++
+	}
+	for range count {
+		<-p.done
+	}
+}
+
+var (
+	globalConvertPool     *convertWorkerPool
+	globalConvertPoolOnce sync.Once
+)
+
+// parallelConvertRows partitions [0, h) into convertWorkers equal bands and
+// calls fn(startRow, endRow) concurrently via a persistent worker pool.  For
+// small frames (h < convertParallelMinH) or when convertWorkers <= 1 the
+// function is called serially to avoid scheduling overhead.
+func parallelConvertRows(h int, fn func(s, e C.int)) {
+	n := convertWorkers
+	if n <= 1 || h < convertParallelMinH {
+		fn(0, C.int(h))
+		return
+	}
+	globalConvertPoolOnce.Do(func() {
+		globalConvertPool = newConvertWorkerPool(n)
+	})
+	globalConvertPool.dispatch(h, fn)
+}
 
 // avLogOnce ensures grdp_suppress_av_log is called only once per process.
 var avLogOnce sync.Once
@@ -701,13 +1285,26 @@ const avcHWRecoveryWindow = 500 * time.Millisecond
 // session start (observed: 5–25 frames / up to ~1 s at 30 fps).
 const avcHWNullFrameStallLimit = 25
 
+// avcHWEarlyStallMinElapsed is the minimum wall-clock time since the first
+// packet was sent (hwFirstSendTime) before the early-window null-frame stall
+// probe is allowed to fire.  VideoToolbox needs roughly 1 s to initialise
+// its pipeline regardless of how fast packets arrive, so at high packet rates
+// (e.g. a burst at session start) the 25-frame count threshold is hit in
+// milliseconds — far too quickly to distinguish a genuine stall from normal
+// initialisation.  By requiring at least 2 s of elapsed time we avoid
+// false-positive probes while still detecting real stalls well before the
+// 7-second safety valve.
+const avcHWEarlyStallMinElapsed = 2 * time.Second
+
 // avcHWMidSessionNullFrameLimit is the null-frame count threshold used for
 // mid-session stall detection (hwSentCount >= avcHWEarlyFrameLimit).
 // Normal GOP / mid-session IDR boundaries produce at most ~25 null frames
-// (~1 s at 30 fps); a genuine VideoToolbox stall produces hundreds.  150
-// frames ≈ 5 s at 30 fps — well above normal GOP noise but 2 s before the
-// 7-second safety valve, reducing visible freeze duration by ~2 s.
-const avcHWMidSessionNullFrameLimit = 150
+// (~1 s at 30 fps); a genuine VideoToolbox stall produces hundreds.  30
+// frames ≈ 1 s at 30 fps — safely above normal GOP noise (25 frames) while
+// detecting genuine stalls ~1.5 s earlier than the previous 75-frame
+// threshold.  Observed logs show zero mid-session null frames outside of
+// the fatal VT stall, so the 3× safety margin is not needed in practice.
+const avcHWMidSessionNullFrameLimit = 30
 
 // keyframeWaitLimit is the maximum number of non-IDR packets we drop while
 // waiting for a keyframe after a decoder reset or flush.  gnome-remote-desktop
@@ -733,23 +1330,14 @@ const keyframeWaitTimeout = 15 * time.Second
 // sooner and let the caller tear down and recreate the decoder on the next IDR.
 const keyframeWaitTimeoutSW = 5 * time.Second
 
-// auxEAGAINThreshold is the number of consecutive EAGAIN results from h264dec2
-// (aux SW decoder, no watchdog channel) before it is marked broken.  After a
-// flush the existing torn-down/recreate-on-IDR machinery in avc.go rebuilds
-// the decoder from the next stream2 IDR without requiring a full reconnect.
-// Stream2 data appears in ~1–2 % of LC=0 packets (~0.5 events/s at 30 fps),
-// so 10 events correspond to roughly 5–20 s of visible stale chroma — much
-// better than the previous ~3-minute wait for the session reconnect.
-const auxEAGAINThreshold = 10
-
 // keyframeWaitTimeoutSWFallback is the keyframe-wait timer for the main SW
-// fallback decoder (created after a VideoToolbox stall).  By the time SW
-// fallback is activated, the proactive ForceRefresh mechanism has already been
-// sending keyframe requests for ~7 s.  Windows servers consistently do not
-// deliver an IDR in response to keyframe requests post-stall; only a full
-// reconnect forces a new IDR.  A short window here triggers reconnect quickly
-// (total freeze ≈ 7 s VT stall + 3 s IDR wait + ~4 s reconnect ≈ 14 s total)
-// rather than waiting the full 8 s (19 s total).
+// fallback decoder (created after a VideoToolbox stall).  Set to 1 s because
+// Windows Server in AVC444 mode does not send an IDR in response to
+// ForceRefresh (SuppressOutput toggle) — observed across multiple test runs
+// where 90+ frames arrived over 3 s with no IDR after ForceRefresh.  A 1 s
+// window is sufficient to catch the rare case where the server does respond
+// promptly; if no IDR arrives the code escalates directly to reconnect
+// (usingSWFallback skips the noIDRSoftResetCount retry).
 const keyframeWaitTimeoutSWFallback = 1 * time.Second
 
 // profileWindow is the number of HW frames over which Decode aggregates
@@ -793,8 +1381,6 @@ type ffmpegDecoder struct {
 	kfWaitTimer              *time.Timer     // fires after kfWaitTimeoutVal to mark broken independently of frame rate
 	kfWaitTimeoutVal         time.Duration   // per-decoder IDR wait limit (varies by decoder type)
 	watchdogCh               chan<- struct{} // signals GfxHandler.decodeLoop to call maybeNotifyDecoderBroken
-	auxEAGAINCount           int            // consecutive EAGAINs from h264dec2; reset on success, markBroken at threshold
-	auxEAGAINFlush           bool           // set after EAGAIN flush; suppresses error-concealment until stream2 IDR arrives
 
 	// Profiling: aggregated timing stats over the last profileWindow frames
 	// for the HW path.  Helps determine whether convertFrame
@@ -1306,18 +1892,6 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*rdpgfx.H264Frame, error) {
 					d.markBroken(rdpgfx.H264BrokenReasonNoIDR)
 					return nil, nil
 				}
-				if d.auxEAGAINFlush {
-					// After an EAGAIN-based flush the decoder has no reference
-					// frame; error-concealment would immediately fail with EINVAL
-					// and trigger markBroken → reconnect.  Instead, keep waiting
-					// for the next natural stream2 IDR (Windows Server delivers
-					// one at every GOP boundary, typically every 30–60 s).
-					// Reset the wait clock so we keep dropping P-frames silently
-					// rather than entering the concealment path.
-					d.keyframeWaitCount = 0
-					d.keyframeWaitStart = time.Now()
-					return nil, nil
-				}
 				slog.Debug("H.264: aux SW decoder: no IDR received, attempting error-concealment",
 					"waited", d.keyframeWaitCount,
 					"waitedFor", time.Since(d.keyframeWaitStart).Round(time.Millisecond))
@@ -1327,15 +1901,6 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*rdpgfx.H264Frame, error) {
 				d.proceededWithoutKeyframe = true
 				// fall through and attempt SW error-concealment decode
 			} else {
-				if !d.useHW && d.watchdogCh == nil {
-					// Aux SW decoder (h264dec2) silently dropping packets while
-					// waiting for an IDR.  Log once at first drop so we can
-					// distinguish this from the EAGAIN case.
-					if d.keyframeWaitCount == 1 {
-						slog.Debug("H.264: aux SW decoder lost IDR sync, waiting",
-							"h264Len", len(h264Data))
-					}
-				}
 				return nil, nil // drop P-frames while waiting
 			}
 		} else {
@@ -1348,7 +1913,6 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*rdpgfx.H264Frame, error) {
 			d.needsKeyFrame = false
 			d.keyframeWaitCount = 0
 			d.keyframeWaitStart = time.Time{}
-			d.auxEAGAINFlush = false // IDR received; EAGAIN recovery complete
 			// IDR received — cancel the background wait timer.
 			if d.kfWaitTimer != nil {
 				d.kfWaitTimer.Stop()
@@ -1494,7 +2058,7 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*rdpgfx.H264Frame, error) {
 					// No output yet.  Enter / stay in recovery-probe window.
 					if d.stallProbeStart.IsZero() {
 						d.stallProbeStart = now
-						slog.Warn("H.264: HW decoder stall detected, probing for recovery",
+						slog.Debug("H.264: HW decoder stall detected, probing for recovery",
 							"frozenFor", stalledFor.Round(time.Millisecond),
 							"hwSentCount", d.hwSentCount)
 						// Start a background timer so the probe window expires
@@ -1541,10 +2105,11 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*rdpgfx.H264Frame, error) {
 	// Count packets sent to HW decoder (for init timeout tracking).
 	if d.useHW {
 		d.hwSentCount++
+		hwNow := time.Now()
 		if d.hwSentCount == 1 {
-			d.hwFirstSendTime = time.Now()
+			d.hwFirstSendTime = hwNow
 		}
-		d.lastSendTime = time.Now()
+		d.lastSendTime = hwNow
 	}
 
 	sendStart := time.Now()
@@ -1561,16 +2126,8 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*rdpgfx.H264Frame, error) {
 		// Both HW and SW: flush the decoder pipeline and wait for a fresh IDR.
 		// Reset the HW stall-timer so it starts fresh after the IDR arrives,
 		// not from before this failed send attempt.
-		if !d.useHW && d.watchdogCh == nil {
-			// Aux SW decoder (h264dec2): a send failure is unexpected and
-			// causes all subsequent LC=2 frames to be buffered until the next
-			// stream2 IDR.  Upgrade to WARN so it's visible without DEBUG logging.
-			slog.Warn("H.264: aux SW decoder send failed, waiting for stream2 IDR",
-				"err", int(ret))
-		} else {
-			slog.Debug("H.264: avcodec_send_packet failed, flushing decoder to recover",
-				"hw", d.useHW, "err", int(ret))
-		}
+		slog.Debug("H.264: avcodec_send_packet failed, flushing decoder to recover",
+			"hw", d.useHW, "err", int(ret))
 		C.avcodec_flush_buffers(d.codecCtx)
 		prev := d.proceededWithoutKeyframe
 		d.needsKeyFrame = true
@@ -1635,9 +2192,6 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*rdpgfx.H264Frame, error) {
 	if gotFrame {
 		d.lastSuccessTime = time.Now()
 		d.hwConsecNullFrames = 0
-		if !d.useHW && d.watchdogCh == nil {
-			d.auxEAGAINCount = 0 // successful decode; reset stuck-EAGAIN counter
-		}
 		if d.useHW {
 			if !d.hwReady {
 				slog.Debug("H.264: HW decoder produced first frame",
@@ -1682,34 +2236,6 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*rdpgfx.H264Frame, error) {
 			}
 		}
 	} else { // !gotFrame
-		if !d.useHW && d.watchdogCh == nil {
-			// Aux SW decoder (h264dec2) returned no output.  Log for diagnosis.
-			slog.Debug("H.264: aux SW decoder produced no output",
-				"h264Len", len(h264Data),
-				"isIDR", scan.HasKeyFrame,
-				"needsKeyFrame", d.needsKeyFrame,
-				"recvRet", int(ret))
-			d.auxEAGAINCount++
-			if d.auxEAGAINCount >= auxEAGAINThreshold {
-				// h264dec2 is stuck: avcodec_receive_frame permanently returns
-				// EAGAIN despite successful avcodec_send_packet.  This occurs
-				// after ~26 decoded frames due to an internal FFmpeg H.264 SW
-				// decoder DPB/reorder state that can't self-resolve.
-				//
-				// Flush the decoder and wait for the next natural stream2 IDR
-				// (Windows Server sends IDRs at every GOP boundary, typically
-				// every 30–60 s).  This avoids triggering the auxDecoderBroken
-				// timer and therefore avoids a session reconnect.
-				slog.Warn("H.264: aux SW decoder stuck in EAGAIN, flushing and waiting for stream2 IDR",
-					"eagainCount", d.auxEAGAINCount)
-				C.avcodec_flush_buffers(d.codecCtx)
-				d.needsKeyFrame = true
-				d.keyframeWaitCount = 0
-				d.keyframeWaitStart = time.Time{}
-				d.auxEAGAINCount = 0
-				d.auxEAGAINFlush = true // suppress error-concealment until stream2 IDR
-			}
-		}
 		if d.useHW && d.hwReady {
 			stalledFor := time.Since(d.lastSuccessTime)
 			d.hwConsecNullFrames++
@@ -1721,16 +2247,18 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*rdpgfx.H264Frame, error) {
 			//     avcHWNullFrameStallLimit (25).  Reduces visible freeze from
 			//     ~10 s to ~4 s for a genuine VT stall at session start.
 			//   • Mid-session (hwSentCount >= avcHWEarlyFrameLimit): use
-			//     avcHWMidSessionNullFrameLimit (150 ≈ 5 s at 30 fps).
+			//     avcHWMidSessionNullFrameLimit (30 ≈ 1 s at 30 fps).
 			//     Normal GOP boundaries produce ≤25 null frames so there is
-			//     comfortable headroom before the false-positive risk zone.
-			//     Reduces visible freeze from 7 s to ~5.5 s mid-session.
+			//     minimal headroom; genuine stalls persist for hundreds of
+			//     null frames.  Reduces visible freeze from ~2.5 s to ~1 s.
 			earlyStall := d.hwSentCount < avcHWEarlyFrameLimit &&
-				d.hwConsecNullFrames >= avcHWNullFrameStallLimit
+				d.hwConsecNullFrames >= avcHWNullFrameStallLimit &&
+				!d.hwFirstSendTime.IsZero() &&
+				time.Since(d.hwFirstSendTime) >= avcHWEarlyStallMinElapsed
 			midStall := d.hwSentCount >= avcHWEarlyFrameLimit &&
 				d.hwConsecNullFrames >= avcHWMidSessionNullFrameLimit
 			if (earlyStall || midStall) && d.stallProbeStart.IsZero() {
-				slog.Warn("H.264: HW decoder stall detected (null frame count), entering probe",
+				slog.Debug("H.264: HW decoder stall detected (null frame count), entering probe",
 					"consecNullFrames", d.hwConsecNullFrames,
 					"frozenFor", stalledFor.Round(time.Millisecond),
 					"hwSentCount", d.hwSentCount)
@@ -1827,6 +2355,25 @@ func (d *ffmpegDecoder) convertFrame(regionHint []C.uint16_t, nRegions C.int) (*
 	// hardware-decoded H.264 frames as NV12, so keeping the interleaved UV plane
 	// intact avoids the chroma deinterleave required by I420.
 	if d.outNV12Enabled && srcFmt == C.AV_PIX_FMT_NV12 {
+		// Apply the same zero-filled IOSurface check as the BGRA NV12 path
+		// (see comment near hwNeedsZeroCheck below).  The NV12 fast path
+		// previously bypassed this check, allowing zero UV (→ green) frames to
+		// reach the NV12 callback.
+		if d.useHW && d.hwNeedsZeroCheck {
+			var sy, su, sv C.uint8_t
+			C.grdp_sample_nv12(srcFrame, &sy, &su, &sv)
+			if su == 0 && sv == 0 {
+				slog.Debug("H.264: dropping zero-filled HW frame in NV12 path (IOSurface not ready)",
+					"Y", int(sy))
+				if usedMapFrame {
+					C.av_frame_unref(d.mapFrame)
+				} else if srcFrame == d.swFrame {
+					C.av_frame_unref(d.swFrame)
+				}
+				return &rdpgfx.H264Frame{Dropped: true, Width: int(w), Height: int(h)}, transferNs, nil
+			}
+			d.hwNeedsZeroCheck = false
+		}
 		d.extractNV12fromSrc(srcFrame)
 		if usedMapFrame {
 			C.av_frame_unref(d.mapFrame)
@@ -1848,6 +2395,33 @@ func (d *ffmpegDecoder) convertFrame(regionHint []C.uint16_t, nRegions C.int) (*
 	if d.outI420Enabled {
 		if srcFmt == C.AV_PIX_FMT_YUV420P || srcFmt == C.AV_PIX_FMT_YUVJ420P ||
 			srcFmt == C.AV_PIX_FMT_NV12 {
+			// Apply the zero-filled IOSurface check before extracting I420.
+			// The I420 fast path previously bypassed hwNeedsZeroCheck entirely:
+			// VT could output Y≠0, UV=0 (partially initialised IOSurface) which
+			// isNullYUVFrame would not catch (only Y=0 && UV=0 triggers it),
+			// causing a bright-green frame.  Additionally, even an all-zero
+			// frame (Y=0, UV=0) would poison the AVC444 Y cache via
+			// updateAVC444YCache(), producing green LC=2 combine artifacts for
+			// the next 500 ms window.  Check UV here and drop the frame if zero,
+			// matching the BGRA NV12 path behaviour.
+			if srcFmt == C.AV_PIX_FMT_NV12 && d.useHW && d.hwNeedsZeroCheck {
+				var sy, su, sv C.uint8_t
+				C.grdp_sample_nv12(srcFrame, &sy, &su, &sv)
+				if su == 0 && sv == 0 {
+					slog.Debug("H.264: dropping zero-filled HW frame in I420 path (IOSurface not ready)",
+						"Y", int(sy))
+					if usedMapFrame {
+						C.av_frame_unref(d.mapFrame)
+					} else if srcFrame == d.swFrame {
+						C.av_frame_unref(d.swFrame)
+					}
+					// Return Dropped so Decode() counts this as success (health
+					// tracking stays correct) while signalling grdp to skip the
+					// I420 callback and Y-cache update.
+					return &rdpgfx.H264Frame{Dropped: true, Width: int(w), Height: int(h)}, transferNs, nil
+				}
+				d.hwNeedsZeroCheck = false
+			}
 			d.extractI420fromSrc(srcFrame)
 			if usedMapFrame {
 				C.av_frame_unref(d.mapFrame)
@@ -1881,9 +2455,17 @@ func (d *ffmpegDecoder) convertFrame(regionHint []C.uint16_t, nRegions C.int) (*
 	// For NV12 (VideoToolbox HW transfer output) on ARM64, bypass swscale for
 	// the same reason: the non-accelerated ARM64 path ignores
 	// sws_setColorspaceDetails and produces a green cast on zero-filled frames.
+	//
+	// Exception: when dirty-region hints are provided, always use the
+	// hand-written region-aware functions even on x86_64.  swscale has no
+	// partial-frame API, so it would convert the full frame unconditionally.
+	// For typical RDP partial-screen updates (cursors, small windows) the
+	// scalar BT.601 loop over only the dirty pixels is significantly faster
+	// than running swscale over the entire frame.
+	haveRegions := nRegions > 0 && len(regionHint) > 0
 	var convErr error
 	switch {
-	case (srcFmt == C.AV_PIX_FMT_YUV420P || srcFmt == C.AV_PIX_FMT_YUVJ420P) && !useSwscale:
+	case (srcFmt == C.AV_PIX_FMT_YUV420P || srcFmt == C.AV_PIX_FMT_YUVJ420P) && (!useSwscale || haveRegions):
 		fullRange := C.int(0)
 		if srcFmt == C.AV_PIX_FMT_YUVJ420P || srcFrame.color_range == 2 {
 			fullRange = 1
@@ -1907,16 +2489,18 @@ func (d *ffmpegDecoder) convertFrame(regionHint []C.uint16_t, nRegions C.int) (*
 				d.swFrameCount++
 			}
 		}
-		if nRegions > 0 && len(regionHint) > 0 {
+		if haveRegions {
 			C.grdp_yuv420p_to_bgra_regions(srcFrame,
 				(*C.uint8_t)(unsafe.Pointer(&out[0])), C.int(w*4), fullRange,
 				(*C.uint16_t)(unsafe.Pointer(&regionHint[0])), nRegions)
 		} else {
-			C.grdp_yuv420p_to_bgra(srcFrame,
-				(*C.uint8_t)(unsafe.Pointer(&out[0])), C.int(w*4), fullRange)
+			dstPtr := (*C.uint8_t)(unsafe.Pointer(&out[0]))
+			parallelConvertRows(int(h), func(s, e C.int) {
+				C.grdp_yuv420p_to_bgra_rows(srcFrame, dstPtr, C.int(w*4), fullRange, s, e)
+			})
 		}
 
-	case srcFmt == C.AV_PIX_FMT_NV12 && !useSwscale:
+	case srcFmt == C.AV_PIX_FMT_NV12 && (!useSwscale || haveRegions):
 		fullRange := C.int(0)
 		if srcFrame.color_range == 2 { // AVCOL_RANGE_JPEG
 			fullRange = 1
@@ -1965,13 +2549,15 @@ func (d *ffmpegDecoder) convertFrame(regionHint []C.uint16_t, nRegions C.int) (*
 			// Valid chroma seen — IOSurface is properly populated.
 			d.hwNeedsZeroCheck = false
 		}
-		if nRegions > 0 && len(regionHint) > 0 {
+		if haveRegions {
 			C.grdp_nv12_to_bgra_regions(srcFrame,
 				(*C.uint8_t)(unsafe.Pointer(&out[0])), C.int(w*4), fullRange,
 				(*C.uint16_t)(unsafe.Pointer(&regionHint[0])), nRegions)
 		} else {
-			C.grdp_nv12_to_bgra(srcFrame,
-				(*C.uint8_t)(unsafe.Pointer(&out[0])), C.int(w*4), fullRange)
+			dstPtr := (*C.uint8_t)(unsafe.Pointer(&out[0]))
+			parallelConvertRows(int(h), func(s, e C.int) {
+				C.grdp_nv12_to_bgra_rows(srcFrame, dstPtr, C.int(w*4), fullRange, s, e)
+			})
 		}
 		if logThis {
 			// Sample NV12 input and BGRA output at multiple positions for
