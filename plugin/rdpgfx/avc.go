@@ -6,6 +6,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log/slog"
+	"runtime"
+	"sync"
 	"time"
 )
 
@@ -888,9 +890,57 @@ func isAuxChromaBlank(f *H264FrameI420) bool {
 //	cachedU/cachedV      – Cb/Cr from stream1, half-res (stride=uvStride=(w+1)/2)
 //	i420aux              – I420 output from decoding stream2
 //	fullRange            – true for PC-range [0-255], false for video [16-235]
+// maxConvertWorkers caps the number of goroutines used to parallelise the
+// per-row YCbCr→BGRA conversions.  Beyond ~8 workers the conversion is limited
+// by memory bandwidth rather than CPU, so additional workers only add
+// scheduling overhead without speeding up the conversion.
+const maxConvertWorkers = 8
+
+// parallelConvertMinPixels is the frame-area threshold below which conversion
+// runs serially: for small frames the goroutine spawn/join overhead exceeds the
+// work saved by splitting the rows across cores.
+const parallelConvertMinPixels = 256 * 256
+
+// parallelRows splits the row range [0,h) into up to maxConvertWorkers
+// contiguous chunks and runs fn(y0,y1) for each chunk concurrently, returning
+// only once every chunk has finished.  Each chunk writes a disjoint set of
+// output rows and reads the shared input planes read-only, so the chunks are
+// data-race free and the combined result is identical to a serial run.
+//
+// For small frames (area < parallelConvertMinPixels) fn is invoked once over
+// the full range on the calling goroutine, avoiding goroutine overhead.
+func parallelRows(w, h int, fn func(y0, y1 int)) {
+	workers := runtime.GOMAXPROCS(0)
+	if workers > maxConvertWorkers {
+		workers = maxConvertWorkers
+	}
+	if workers <= 1 || h < 2 || w*h < parallelConvertMinPixels {
+		fn(0, h)
+		return
+	}
+	if workers > h {
+		workers = h
+	}
+	chunk := (h + workers - 1) / workers
+	var wg sync.WaitGroup
+	for y0 := 0; y0 < h; y0 += chunk {
+		y1 := y0 + chunk
+		if y1 > h {
+			y1 = h
+		}
+		wg.Add(1)
+		go func(a, b int) {
+			defer wg.Done()
+			fn(a, b)
+		}(y0, y1)
+	}
+	wg.Wait()
+}
+
 // combineAVC444v2BGRA combines luma from stream1 with per-pixel chroma from
 // stream1 and stream2 to produce a BGRA frame.  The fullRange branch is hoisted
-// outside the inner loop; row-level offsets are computed once per row.
+// outside the inner loop; row-level offsets are computed once per row.  The row
+// range is split across cores via parallelRows for large frames.
 func combineAVC444v2BGRA(
 	yPlane []byte, yStride int,
 	cachedU, cachedV []byte, uvStride int,
@@ -912,88 +962,95 @@ func combineAVC444v2BGRA(
 	auxVStride := i420aux.VStride
 
 	// Split on fullRange once so the inner loop body is branch-free for the
-	// YCbCr→BGRA conversion coefficients.
+	// YCbCr→BGRA conversion coefficients.  Each output row is independent, so
+	// parallelRows splits the rows across cores for large frames.
+	var rowFn func(y0, y1 int)
 	if fullRange {
-		for row := range h {
-			yRowOff := row * yStride
-			uvRow := row >> 1
-			uvRowOff := uvRow * uvStride
-			auxYRowOff := row * auxYStride
-			auxURowOff := uvRow * auxUStride
-			auxVRowOff := uvRow * auxVStride
-			outIdx := row * w * 4
-			for col := range w {
-				Y := yPlane[yRowOff+col]
-				var Cb, Cr byte
-				if col&1 == 1 {
-					k := col >> 1
-					Cb = i420aux.Y[auxYRowOff+k]
-					Cr = i420aux.Y[auxYRowOff+halfW+k]
-				} else if row&1 == 0 {
-					k := col >> 1
-					Cb = cachedU[uvRowOff+k]
-					Cr = cachedV[uvRowOff+k]
-				} else {
-					k := col >> 2
-					if col&2 == 0 {
-						Cb = i420aux.U[auxURowOff+k]
-						Cr = i420aux.U[auxURowOff+quarterW+k]
+		rowFn = func(y0, y1 int) {
+			for row := y0; row < y1; row++ {
+				yRowOff := row * yStride
+				uvRow := row >> 1
+				uvRowOff := uvRow * uvStride
+				auxYRowOff := row * auxYStride
+				auxURowOff := uvRow * auxUStride
+				auxVRowOff := uvRow * auxVStride
+				outIdx := row * w * 4
+				for col := range w {
+					Y := yPlane[yRowOff+col]
+					var Cb, Cr byte
+					if col&1 == 1 {
+						k := col >> 1
+						Cb = i420aux.Y[auxYRowOff+k]
+						Cr = i420aux.Y[auxYRowOff+halfW+k]
+					} else if row&1 == 0 {
+						k := col >> 1
+						Cb = cachedU[uvRowOff+k]
+						Cr = cachedV[uvRowOff+k]
 					} else {
-						Cb = i420aux.V[auxVRowOff+k]
-						Cr = i420aux.V[auxVRowOff+quarterW+k]
+						k := col >> 2
+						if col&2 == 0 {
+							Cb = i420aux.U[auxURowOff+k]
+							Cr = i420aux.U[auxURowOff+quarterW+k]
+						} else {
+							Cb = i420aux.V[auxVRowOff+k]
+							Cr = i420aux.V[auxVRowOff+quarterW+k]
+						}
 					}
+					y := int(Y)
+					u := int(Cb) - 128
+					v := int(Cr) - 128
+					out[outIdx] = clampByte((256*y + 475*u + 128) >> 8)
+					out[outIdx+1] = clampByte((256*y - 48*u - 120*v + 128) >> 8)
+					out[outIdx+2] = clampByte((256*y + 403*v + 128) >> 8)
+					out[outIdx+3] = 255
+					outIdx += 4
 				}
-				y := int(Y)
-				u := int(Cb) - 128
-				v := int(Cr) - 128
-				out[outIdx] = clampByte((256*y + 475*u + 128) >> 8)
-				out[outIdx+1] = clampByte((256*y - 48*u - 120*v + 128) >> 8)
-				out[outIdx+2] = clampByte((256*y + 403*v + 128) >> 8)
-				out[outIdx+3] = 255
-				outIdx += 4
 			}
 		}
 	} else {
-		for row := range h {
-			yRowOff := row * yStride
-			uvRow := row >> 1
-			uvRowOff := uvRow * uvStride
-			auxYRowOff := row * auxYStride
-			auxURowOff := uvRow * auxUStride
-			auxVRowOff := uvRow * auxVStride
-			outIdx := row * w * 4
-			for col := range w {
-				Y := yPlane[yRowOff+col]
-				var Cb, Cr byte
-				if col&1 == 1 {
-					k := col >> 1
-					Cb = i420aux.Y[auxYRowOff+k]
-					Cr = i420aux.Y[auxYRowOff+halfW+k]
-				} else if row&1 == 0 {
-					k := col >> 1
-					Cb = cachedU[uvRowOff+k]
-					Cr = cachedV[uvRowOff+k]
-				} else {
-					k := col >> 2
-					if col&2 == 0 {
-						Cb = i420aux.U[auxURowOff+k]
-						Cr = i420aux.U[auxURowOff+quarterW+k]
+		rowFn = func(y0, y1 int) {
+			for row := y0; row < y1; row++ {
+				yRowOff := row * yStride
+				uvRow := row >> 1
+				uvRowOff := uvRow * uvStride
+				auxYRowOff := row * auxYStride
+				auxURowOff := uvRow * auxUStride
+				auxVRowOff := uvRow * auxVStride
+				outIdx := row * w * 4
+				for col := range w {
+					Y := yPlane[yRowOff+col]
+					var Cb, Cr byte
+					if col&1 == 1 {
+						k := col >> 1
+						Cb = i420aux.Y[auxYRowOff+k]
+						Cr = i420aux.Y[auxYRowOff+halfW+k]
+					} else if row&1 == 0 {
+						k := col >> 1
+						Cb = cachedU[uvRowOff+k]
+						Cr = cachedV[uvRowOff+k]
 					} else {
-						Cb = i420aux.V[auxVRowOff+k]
-						Cr = i420aux.V[auxVRowOff+quarterW+k]
+						k := col >> 2
+						if col&2 == 0 {
+							Cb = i420aux.U[auxURowOff+k]
+							Cr = i420aux.U[auxURowOff+quarterW+k]
+						} else {
+							Cb = i420aux.V[auxVRowOff+k]
+							Cr = i420aux.V[auxVRowOff+quarterW+k]
+						}
 					}
+					c := int(Y) - 16
+					u := int(Cb) - 128
+					v := int(Cr) - 128
+					out[outIdx] = clampByte((298*c + 541*u + 128) >> 8)
+					out[outIdx+1] = clampByte((298*c - 55*u - 136*v + 128) >> 8)
+					out[outIdx+2] = clampByte((298*c + 459*v + 128) >> 8)
+					out[outIdx+3] = 255
+					outIdx += 4
 				}
-				c := int(Y) - 16
-				u := int(Cb) - 128
-				v := int(Cr) - 128
-				out[outIdx] = clampByte((298*c + 541*u + 128) >> 8)
-				out[outIdx+1] = clampByte((298*c - 55*u - 136*v + 128) >> 8)
-				out[outIdx+2] = clampByte((298*c + 459*v + 128) >> 8)
-				out[outIdx+3] = 255
-				outIdx += 4
 			}
 		}
 	}
+	parallelRows(w, h, rowFn)
 	return out, true
 }
 
@@ -1010,43 +1067,49 @@ func i420ToBGRA(src *H264FrameI420) ([]byte, bool) {
 	}
 	w, h := src.Width, src.Height
 	out := acquireBitmapBuf(w * h * 4)
+	var rowFn func(y0, y1 int)
 	if src.FullRange {
-		for row := range h {
-			yOff := row * src.YStride
-			uvOff := (row >> 1) * src.UStride
-			uvOffV := (row >> 1) * src.VStride
-			outIdx := row * w * 4
-			for col := range w {
-				y := int(src.Y[yOff+col])
-				uv := col >> 1
-				u := int(src.U[uvOff+uv]) - 128
-				v := int(src.V[uvOffV+uv]) - 128
-				out[outIdx] = clampByte((256*y + 475*u + 128) >> 8)
-				out[outIdx+1] = clampByte((256*y - 48*u - 120*v + 128) >> 8)
-				out[outIdx+2] = clampByte((256*y + 403*v + 128) >> 8)
-				out[outIdx+3] = 255
-				outIdx += 4
+		rowFn = func(yStart, yEnd int) {
+			for row := yStart; row < yEnd; row++ {
+				yOff := row * src.YStride
+				uvOff := (row >> 1) * src.UStride
+				uvOffV := (row >> 1) * src.VStride
+				outIdx := row * w * 4
+				for col := range w {
+					y := int(src.Y[yOff+col])
+					uv := col >> 1
+					u := int(src.U[uvOff+uv]) - 128
+					v := int(src.V[uvOffV+uv]) - 128
+					out[outIdx] = clampByte((256*y + 475*u + 128) >> 8)
+					out[outIdx+1] = clampByte((256*y - 48*u - 120*v + 128) >> 8)
+					out[outIdx+2] = clampByte((256*y + 403*v + 128) >> 8)
+					out[outIdx+3] = 255
+					outIdx += 4
+				}
 			}
 		}
 	} else {
-		for row := range h {
-			yOff := row * src.YStride
-			uvOffU := (row >> 1) * src.UStride
-			uvOffV := (row >> 1) * src.VStride
-			outIdx := row * w * 4
-			for col := range w {
-				c := int(src.Y[yOff+col]) - 16
-				uv := col >> 1
-				u := int(src.U[uvOffU+uv]) - 128
-				v := int(src.V[uvOffV+uv]) - 128
-				out[outIdx] = clampByte((298*c + 541*u + 128) >> 8)
-				out[outIdx+1] = clampByte((298*c - 55*u - 136*v + 128) >> 8)
-				out[outIdx+2] = clampByte((298*c + 459*v + 128) >> 8)
-				out[outIdx+3] = 255
-				outIdx += 4
+		rowFn = func(yStart, yEnd int) {
+			for row := yStart; row < yEnd; row++ {
+				yOff := row * src.YStride
+				uvOffU := (row >> 1) * src.UStride
+				uvOffV := (row >> 1) * src.VStride
+				outIdx := row * w * 4
+				for col := range w {
+					c := int(src.Y[yOff+col]) - 16
+					uv := col >> 1
+					u := int(src.U[uvOffU+uv]) - 128
+					v := int(src.V[uvOffV+uv]) - 128
+					out[outIdx] = clampByte((298*c + 541*u + 128) >> 8)
+					out[outIdx+1] = clampByte((298*c - 55*u - 136*v + 128) >> 8)
+					out[outIdx+2] = clampByte((298*c + 459*v + 128) >> 8)
+					out[outIdx+3] = 255
+					outIdx += 4
+				}
 			}
 		}
 	}
+	parallelRows(w, h, rowFn)
 	return out, true
 }
 

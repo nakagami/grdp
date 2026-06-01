@@ -219,6 +219,17 @@ func (bm *Bitmap) RGBA() *image.RGBA {
 	return bm.FillRGBA(nil)
 }
 
+// SwapRB swaps the red and blue byte of every 32-bit pixel in p in place and
+// forces the alpha byte to 0xFF, converting between RGBA and BGRA byte order
+// (the operation is its own inverse).  It reuses the SIMD-accelerated batch
+// converter (SSE2 on amd64, NEON on arm64), so callers that need BGRA pixels
+// for an SDL_PIXELFORMAT_BGRA32 texture can convert an *image.RGBA buffer with
+// a single vectorised pass instead of a scalar per-byte swap loop.  len(p) must
+// be a multiple of 4; any trailing bytes are ignored.
+func SwapRB(p []byte) {
+	bgr32BatchToRGBA(p, p, len(p)/4)
+}
+
 func NewRdpClient(host string, width, height int, dialer func(string) (net.Conn, error)) *RdpClient {
 	g := &RdpClient{
 		hostPort:        host,
