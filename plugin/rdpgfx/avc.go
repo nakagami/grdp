@@ -1925,3 +1925,53 @@ func (g *GfxHandler) blitAndEmitAVCRegions(s *surface, left, top, frameW, frameH
 	}
 	g.emitAndReleaseUpdates(g.updatesBuf)
 }
+
+// blitAVCRegionsToSurface copies only the dirty rectangles of a decoded AVC
+// frame into the persistent CPU surface shadow (s.data), without allocating
+// per-region buffers or emitting BitmapUpdates.  It is the shadow-only
+// counterpart to blitAndEmitAVCRegions, used on the GPU display path
+// (onNV12/onI420) where the display is driven directly from the YUV planes and
+// only the CPU shadow needs maintaining for later surface-to-surface / cache /
+// mixed-codec operations.
+//
+// The caller must ensure the shadow is not stale (surface.shadowStale == false)
+// before using this partial update; otherwise a full blitToSurface is required
+// to repair regions that earlier GPU-only frames advanced without a shadow
+// update.  Region coordinates are in decoded-frame space (relative to
+// (left, top) on the surface); both source and destination are bounds-clamped.
+func (g *GfxHandler) blitAVCRegionsToSurface(s *surface, left, top, frameW, frameH int, decoded []byte, regions []avcRect) {
+	frameStride := frameW * 4
+	surfStride := int(s.width) * 4
+	for _, rc := range regions {
+		if rc.right <= rc.left || rc.bottom <= rc.top {
+			continue
+		}
+		rx, ry := int(rc.left), int(rc.top)
+		rw, rh := int(rc.right-rc.left), int(rc.bottom-rc.top)
+		if rx+rw > frameW {
+			rw = frameW - rx
+		}
+		if ry+rh > frameH {
+			rh = frameH - ry
+		}
+		if rw <= 0 || rh <= 0 {
+			continue
+		}
+		rowBytes := rw * 4
+		for row := 0; row < rh; row++ {
+			srcOff := (ry+row)*frameStride + rx*4
+			if srcOff+rowBytes > len(decoded) {
+				break
+			}
+			dy := top + ry + row
+			if dy < 0 || dy >= int(s.height) {
+				continue
+			}
+			dstOff := dy*surfStride + (left+rx)*4
+			if dstOff < 0 || dstOff+rowBytes > len(s.data) {
+				continue
+			}
+			copy(s.data[dstOff:dstOff+rowBytes], decoded[srcOff:srcOff+rowBytes])
+		}
+	}
+}

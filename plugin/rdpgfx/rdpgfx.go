@@ -161,6 +161,15 @@ type surface struct {
 	outputX       uint32
 	outputY       uint32
 	mapped        bool
+	// shadowStale is true when the CPU surface shadow (data) may not match the
+	// pixels currently shown on the GPU display.  It is set when an AVC frame
+	// advances the GPU display (onNV12/onI420) without a corresponding BGRA
+	// shadow update (decoded == nil), and cleared by a full-surface blit.  While
+	// stale, the region-only shadow blit fast path is bypassed in favour of a
+	// full blit so the shadow is fully repaired before the next partial update.
+	// Initialised true so the first frame on a fresh (zero-filled) surface always
+	// takes the full-blit path.
+	shadowStale bool
 }
 
 type vBarEntry struct {
@@ -1260,7 +1269,8 @@ func (g *GfxHandler) onCreateSurface(data []byte) {
 	slog.Debug("RDPGFX: CREATE_SURFACE", "id", id, "w", w, "h", h)
 	g.surfaces[id] = &surface{
 		width: w, height: h, format: f,
-		data: make([]byte, int(w)*int(h)*4),
+		data:        make([]byte, int(w)*int(h)*4),
+		shadowStale: true,
 	}
 }
 
@@ -1428,6 +1438,10 @@ func (g *GfxHandler) onWireToSurface1Decode(data []byte, skipHeavy bool) {
 					if owned {
 						releaseBitmapBuf(decoded)
 					}
+				} else {
+					// Display advanced without a shadow update; mark stale so a
+					// later full-surface (WTS2) frame fully repairs the shadow.
+					s.shadowStale = true
 				}
 				g.onNV12(destX, destY, w, h, nv12.Y, nv12.YStride, nv12.UV, nv12.UVStride)
 				return
@@ -1444,6 +1458,8 @@ func (g *GfxHandler) onWireToSurface1Decode(data []byte, skipHeavy bool) {
 					if owned {
 						releaseBitmapBuf(decoded)
 					}
+				} else {
+					s.shadowStale = true
 				}
 				g.onI420(destX, destY, w, h, i420.Y, i420.YStride, i420.U, i420.UStride, i420.V, i420.VStride)
 				return
@@ -1468,6 +1484,8 @@ func (g *GfxHandler) onWireToSurface1Decode(data []byte, skipHeavy bool) {
 					if owned {
 						releaseBitmapBuf(decoded)
 					}
+				} else {
+					s.shadowStale = true
 				}
 				g.onI420(destX, destY, w, h, i420.Y, i420.YStride, i420.U, i420.UStride, i420.V, i420.VStride)
 				return
@@ -1554,10 +1572,23 @@ func (g *GfxHandler) onWireToSurface2Decode(data []byte, skipHeavy bool) {
 			decoded, nv12, avcRegions, ownedAVC := g.decodeAVC420WithNV12(bmpData, destX, destY, w, h)
 			if nv12 != nil {
 				if decoded != nil {
-					blitToSurface(s, 0, 0, w, h, decoded)
+					// GPU drives the display via onNV12; the CPU shadow only needs
+					// the dirty regions when it is already in sync.  A full blit is
+					// forced when the shadow is stale (a prior GPU-only frame
+					// advanced the display without updating it).
+					if !s.shadowStale && len(avcRegions) > 0 && shouldUseAVCRegions(avcRegions, w, h) {
+						g.blitAVCRegionsToSurface(s, 0, 0, w, h, decoded, avcRegions)
+					} else {
+						blitToSurface(s, 0, 0, w, h, decoded)
+						s.shadowStale = false
+					}
 					if ownedAVC {
 						releaseBitmapBuf(decoded)
 					}
+				} else {
+					// Display advanced (onNV12) without a BGRA shadow update; mark
+					// the shadow stale so the next decoded frame fully repairs it.
+					s.shadowStale = true
 				}
 				g.onNV12(destX, destY, w, h, nv12.Y, nv12.YStride, nv12.UV, nv12.UVStride)
 			} else if decoded != nil {
@@ -1580,10 +1611,17 @@ func (g *GfxHandler) onWireToSurface2Decode(data []byte, skipHeavy bool) {
 			decoded, i420, avcRegions, ownedAVC := g.decodeAVC420WithI420(bmpData, destX, destY, w, h)
 			if i420 != nil {
 				if decoded != nil {
-					blitToSurface(s, 0, 0, w, h, decoded)
+					if !s.shadowStale && len(avcRegions) > 0 && shouldUseAVCRegions(avcRegions, w, h) {
+						g.blitAVCRegionsToSurface(s, 0, 0, w, h, decoded, avcRegions)
+					} else {
+						blitToSurface(s, 0, 0, w, h, decoded)
+						s.shadowStale = false
+					}
 					if ownedAVC {
 						releaseBitmapBuf(decoded)
 					}
+				} else {
+					s.shadowStale = true
 				}
 				g.onI420(destX, destY, w, h, i420.Y, i420.YStride, i420.U, i420.UStride, i420.V, i420.VStride)
 			} else if decoded != nil {
@@ -1627,10 +1665,17 @@ func (g *GfxHandler) onWireToSurface2Decode(data []byte, skipHeavy bool) {
 			decoded, i420, avcRegions, ownedAVC := g.decodeAVC444WithI420(bmpData, destX, destY, w, h)
 			if i420 != nil {
 				if decoded != nil {
-					blitToSurface(s, 0, 0, w, h, decoded)
+					if !s.shadowStale && len(avcRegions) > 0 && shouldUseAVCRegions(avcRegions, w, h) {
+						g.blitAVCRegionsToSurface(s, 0, 0, w, h, decoded, avcRegions)
+					} else {
+						blitToSurface(s, 0, 0, w, h, decoded)
+						s.shadowStale = false
+					}
 					if ownedAVC {
 						releaseBitmapBuf(decoded)
 					}
+				} else {
+					s.shadowStale = true
 				}
 				g.onI420(destX, destY, w, h, i420.Y, i420.YStride, i420.U, i420.UStride, i420.V, i420.VStride)
 			} else if decoded != nil {
