@@ -214,7 +214,7 @@ aux.U[i] = byte(rng.Intn(256))
 aux.V[i] = byte(rng.Intn(256))
 }
 for _, fr := range []bool{false, true} {
-got, pooled := combineAVC444v2BGRA(yPlane, w, cachedU, cachedV, uvStride, aux, fr, w, h)
+got, pooled := combineAVC444v2BGRA(yPlane, w, cachedU, cachedV, uvStride, aux, fr, w, h, nil)
 want := serialCombineAVC444v2BGRA(yPlane, w, cachedU, cachedV, uvStride, aux, fr, w, h)
 for i := range want {
 if got[i] != want[i] {

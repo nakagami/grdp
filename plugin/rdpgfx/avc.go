@@ -732,9 +732,21 @@ func (g *GfxHandler) updateAVC444YCache(i420 *H264FrameI420) {
 		g.avc444YPlane.v = g.avc444YPlane.v[:neededUV]
 	}
 	// i420 planes are already tight-packed (strides == width/height from extractI420fromSrc).
-	copy(g.avc444YPlane.data, i420.Y)
-	copy(g.avc444YPlane.u, i420.U)
-	copy(g.avc444YPlane.v, i420.V)
+	// Run Y, U, V copies in parallel for large frames: each slice is an independent
+	// allocation so there is no aliasing between the goroutines' writes.
+	totalBytes := neededY + neededUV*2
+	if totalBytes >= parallelConvertMinPixels*4 {
+		var wg sync.WaitGroup
+		wg.Add(3)
+		go func() { defer wg.Done(); copy(g.avc444YPlane.data, i420.Y) }()
+		go func() { defer wg.Done(); copy(g.avc444YPlane.u, i420.U) }()
+		go func() { defer wg.Done(); copy(g.avc444YPlane.v, i420.V) }()
+		wg.Wait()
+	} else {
+		copy(g.avc444YPlane.data, i420.Y)
+		copy(g.avc444YPlane.u, i420.U)
+		copy(g.avc444YPlane.v, i420.V)
+	}
 	g.avc444YPlane.stride = w
 	g.avc444YPlane.uvStride = uvStride
 	g.avc444YPlane.w = w
@@ -768,9 +780,20 @@ func (g *GfxHandler) copyAVC444YToIDRCache() {
 	} else {
 		dst.v = dst.v[:len(src.v)]
 	}
-	copy(dst.data, src.data)
-	copy(dst.u, src.u)
-	copy(dst.v, src.v)
+	// Parallel copy for large frames: each slice is a separate allocation.
+	totalBytes := len(src.data) + len(src.u) + len(src.v)
+	if totalBytes >= parallelConvertMinPixels*4 {
+		var wg sync.WaitGroup
+		wg.Add(3)
+		go func() { defer wg.Done(); copy(dst.data, src.data) }()
+		go func() { defer wg.Done(); copy(dst.u, src.u) }()
+		go func() { defer wg.Done(); copy(dst.v, src.v) }()
+		wg.Wait()
+	} else {
+		copy(dst.data, src.data)
+		copy(dst.u, src.u)
+		copy(dst.v, src.v)
+	}
 	dst.stride = src.stride
 	dst.uvStride = src.uvStride
 	dst.w = src.w
@@ -941,12 +964,19 @@ func parallelRows(w, h int, fn func(y0, y1 int)) {
 // stream1 and stream2 to produce a BGRA frame.  The fullRange branch is hoisted
 // outside the inner loop; row-level offsets are computed once per row.  The row
 // range is split across cores via parallelRows for large frames.
+//
+// When dirtyRegions is non-nil, only rows covered by at least one region are
+// converted; all other rows in the output buffer are left as pool garbage.
+// Callers must only pass non-nil dirtyRegions when shouldUseAVCRegions is true,
+// because in that case blitAndEmitAVCRegions reads only within the dirty rects
+// and never accesses the uninitialised rows.
 func combineAVC444v2BGRA(
 	yPlane []byte, yStride int,
 	cachedU, cachedV []byte, uvStride int,
 	i420aux *H264FrameI420,
 	fullRange bool,
 	w, h int,
+	dirtyRegions []avcRect,
 ) (out []byte, pooled bool) {
 	if len(yPlane) == 0 || len(cachedU) == 0 || len(cachedV) == 0 || w <= 0 || h <= 0 {
 		return nil, false
@@ -961,6 +991,22 @@ func combineAVC444v2BGRA(
 	auxUStride := i420aux.UStride
 	auxVStride := i420aux.VStride
 
+	// Build per-row dirty mask when only partial conversion is needed.  Rows not
+	// covered by any dirty region are skipped inside rowFn; the corresponding
+	// output bytes remain as pool-buffer data that blitAndEmitAVCRegions never
+	// reads (it only accesses pixels within the dirty rectangles).
+	var rowDirty []bool
+	if len(dirtyRegions) > 0 {
+		rowDirty = make([]bool, h)
+		for _, r := range dirtyRegions {
+			r0 := max(0, int(r.top))
+			r1 := min(h, int(r.bottom))
+			for y := r0; y < r1; y++ {
+				rowDirty[y] = true
+			}
+		}
+	}
+
 	// Split on fullRange once so the inner loop body is branch-free for the
 	// YCbCr→BGRA conversion coefficients.  Each output row is independent, so
 	// parallelRows splits the rows across cores for large frames.
@@ -968,6 +1014,9 @@ func combineAVC444v2BGRA(
 	if fullRange {
 		rowFn = func(y0, y1 int) {
 			for row := y0; row < y1; row++ {
+				if rowDirty != nil && !rowDirty[row] {
+					continue
+				}
 				yRowOff := row * yStride
 				uvRow := row >> 1
 				uvRowOff := uvRow * uvStride
@@ -1010,6 +1059,9 @@ func combineAVC444v2BGRA(
 	} else {
 		rowFn = func(y0, y1 int) {
 			for row := y0; row < y1; row++ {
+				if rowDirty != nil && !rowDirty[row] {
+					continue
+				}
 				yRowOff := row * yStride
 				uvRow := row >> 1
 				uvRowOff := uvRow * uvStride
@@ -1424,12 +1476,23 @@ func (g *GfxHandler) decodeAVC444LC2(stream2 *avc420Stream, destW, destH int) (d
 			"auxW", i420aux.Width, "auxH", i420aux.Height, "lumaW", w, "lumaH", h)
 		return
 	}
+	// Pass dirty regions to combineAVC444v2BGRA so it can skip unchanged rows
+	// (significant savings for frames where only a small area updates).
+	// Only do this when shouldUseAVCRegions is true: in that case the caller
+	// (decodeAVC444 / decodeAVC444WithI420) routes the output through
+	// blitAndEmitAVCRegions, which reads only within the dirty rectangles, so
+	// any uninitialized rows in the output buffer are never accessed.
+	var combineRegions []avcRect
+	if len(stream2.regions) > 0 && shouldUseAVCRegions(stream2.regions, w, h) {
+		combineRegions = stream2.regions
+	}
 	combined, _ := combineAVC444v2BGRA(
 		yp.data, yp.stride,
 		yp.u, yp.v, yp.uvStride,
 		i420aux,
 		yp.fullRange,
 		w, h,
+		combineRegions,
 	)
 	if combined == nil {
 		return

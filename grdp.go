@@ -230,6 +230,58 @@ func SwapRB(p []byte) {
 	bgr32BatchToRGBA(p, p, len(p)/4)
 }
 
+// FillBGRA converts the bitmap pixel data into packed BGRA32 (4 bytes/pixel,
+// B at offset 0) and writes it into dst, growing dst if necessary.  The caller
+// may pass a previously returned slice to reuse the allocation across calls
+// (common for tiled rendering where many same-sized bitmaps are converted in a
+// loop). The returned slice has length == bm.Width * bm.Height * 4.
+//
+// Unlike RGBA() + SwapRB, FillBGRA avoids an intermediate *image.RGBA
+// allocation and the second-pass R/B swap for BGR24/BGRA32 inputs.  For
+// BGR24 the output is a single-pass direct pack; for BGRA32 it is a memcopy.
+func (bm *Bitmap) FillBGRA(dst []byte) []byte {
+	n := bm.Width * bm.Height
+	need := n * 4
+	if cap(dst) < need {
+		dst = make([]byte, need)
+	}
+	dst = dst[:need]
+	data := bm.Data
+
+	switch bm.BitsPerPixel {
+	case 2:
+		// 16-bit RGB565: convert to RGBA then swap R↔B in-place → BGRA.
+		if len(data) < n*2 {
+			n = len(data) / 2
+		}
+		rgb565BatchToRGBA(dst, data, n)
+		bgr32BatchToRGBA(dst, dst, n)
+	default:
+		stride := bm.BitsPerPixel
+		if stride < 3 {
+			stride = 4 // treat unknown as BGRA32
+		}
+		if stride == 4 {
+			// BGRA32 source — already in the target format; bulk copy.
+			if len(data) < n*4 {
+				n = len(data) / 4
+			}
+			copy(dst[:n*4], data[:n*4])
+		} else {
+			// BGR24 source — pack B,G,R directly with A=0xFF; no R/B swap.
+			if len(data) < n*3 {
+				n = len(data) / 3
+			}
+			for i := range n {
+				s := i * 3
+				*(*uint32)(unsafe.Pointer(&dst[i*4])) =
+					uint32(data[s]) | uint32(data[s+1])<<8 | uint32(data[s+2])<<16 | 0xFF000000
+			}
+		}
+	}
+	return dst
+}
+
 func NewRdpClient(host string, width, height int, dialer func(string) (net.Conn, error)) *RdpClient {
 	g := &RdpClient{
 		hostPort:        host,
