@@ -314,14 +314,12 @@ type GfxHandler struct {
 	// lastStream1IDR caches the most recent stream1 H.264 IDR NAL data in
 	// Annex B format.  When VideoToolbox stalls and the decoder falls back to
 	// software, this data is fed immediately to the new SW decoder so it can
-	// decode subsequent P-frames without waiting for VirtualBox to send a fresh
-	// IDR via ForceRefresh (which VirtualBox VRDE ignores).
-	// Only used when the IDR is recent enough (see idrPrimeMaxStaleness).
+	// decode subsequent P-frames without waiting for the server to send a fresh
+	// IDR via ForceRefresh (which some servers, e.g. VirtualBox VRDE, ignore).
 	// Cleared on RESET_GRAPHICS to avoid feeding a stale IDR to a new pipeline.
 	lastStream1IDR []byte
 	// lastStream1IDRTime is the wall-clock time when the most recent stream1 IDR
-	// was cached.  Used to decide whether the cached IDR is fresh enough to prime
-	// the SW fallback decoder without causing severe block noise.
+	// was cached, logged for diagnostics (e.g. how stale the priming IDR was).
 	// lastStream1IDRFrame is framesDecoded at the same instant, logged for diagnostics.
 	lastStream1IDRTime  time.Time
 	lastStream1IDRFrame uint32
