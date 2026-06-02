@@ -706,6 +706,93 @@ func (g *GfxHandler) decodeAVC444WithI420(data []byte, destX, destY, destW, dest
 	return
 }
 
+// decodeAVC444WithNV12 decodes AVC444 bitmap data, returning native NV12 planes
+// for LC=0/LC=1 frames and BGRA for LC=2 chroma-combination frames.
+// nv12 is non-nil only when the hardware decoder (VideoToolbox) produced NV12
+// output for a LC=0/LC=1 stream1 packet.  LC=2 frames always return decoded
+// BGRA with nv12==nil because the chroma supplement requires a CPU combine step.
+func (g *GfxHandler) decodeAVC444WithNV12(data []byte, destX, destY, destW, destH int) (decoded []byte, nv12 *H264FrameNV12, regions []avcRect, pooled bool) {
+	stream1, stream2, lc, err := g.fillAVC444Stream(data)
+	var isKF bool
+	if stream1 != nil && len(stream1.h264Data) > 0 {
+		isKF = isH264Keyframe(stream1.h264Data)
+	}
+	if g.onH264Raw != nil && stream1 != nil && len(stream1.h264Data) > 0 {
+		nalData := make([]byte, len(stream1.h264Data))
+		copy(nalData, stream1.h264Data)
+		g.onH264Raw(destX, destY, destW, destH, isKF, nalData)
+	}
+	if err != nil {
+		slog.Warn("RDPGFX: AVC444 parse error", "err", err)
+		return
+	}
+	if lc == 2 {
+		decoded, regions, pooled = g.decodeAVC444LC2(stream2, destW, destH)
+		return
+	}
+	if g.h264dec == nil || stream1 == nil || len(stream1.h264Data) == 0 {
+		return
+	}
+	if isKF {
+		g.maybeCacheStream1IDR(stream1.h264Data)
+	}
+	isIDR := g.h264dec2 != nil && isKF
+	if isIDR {
+		g.lc2SampleLogged = false
+		g.lc2PFrameSampleLogged = false
+		g.lc0SampleLogged = false
+	}
+	var frame *H264Frame
+	nv12dec, hasNV12 := g.h264dec.(NV12Decoder)
+	if hasNV12 {
+		var nv12out *H264FrameNV12
+		frame, nv12out, err = nv12dec.DecodeWithNV12(stream1.h264Data)
+		if err != nil {
+			slog.Warn("RDPGFX: H.264 decode error (AVC444 WithNV12)", "err", err)
+			return
+		}
+		if nv12out != nil && nv12out.Width >= destW && nv12out.Height >= destH {
+			nv12 = nv12out
+			if g.h264dec2 != nil {
+				g.updateAVC444YCacheFromNV12(nv12out)
+				if isIDR {
+					g.copyAVC444YToIDRCache()
+				}
+			}
+		}
+	} else {
+		frame, err = g.h264dec.Decode(stream1.h264Data)
+		if err != nil {
+			slog.Warn("RDPGFX: H.264 decode error (AVC444 WithNV12 fallback)", "err", err)
+			return
+		}
+	}
+	// Prime aux decoder before nil/dropped checks so stream2 IDR data is never lost.
+	if lc == 0 && stream2 != nil && len(stream2.h264Data) > 0 {
+		g.primeAuxDecoder(stream2.h264Data)
+	}
+	if frame == nil && nv12 == nil {
+		g.maybeRequestKeyframe()
+		g.maybeNotifyDecoderBroken()
+		slog.Debug("RDPGFX: H.264 decode returned nil frame/nv12 (buffering?)")
+		return
+	}
+	if frame != nil && frame.Dropped {
+		slog.Debug("RDPGFX: AVC444 (WithNV12) frame intentionally dropped (zero-fill)")
+		return
+	}
+	g.noteSuccessfulDecode()
+	if frame != nil {
+		if slog.Default().Enabled(nil, slog.LevelDebug) {
+			slog.Debug("RDPGFX: AVC444 decoded (WithNV12)", "frameW", frame.Width, "frameH", frame.Height,
+				"destW", destW, "destH", destH, "hasNV12", nv12 != nil, "h264Len", len(stream1.h264Data))
+		}
+		decoded, pooled = cropBGRA(frame.Data, frame.Width, frame.Height, destW, destH)
+	}
+	regions = stream1.regions
+	return
+}
+
 // updateAVC444YCache copies the Y, U, and V planes from stream1's i420 into
 // g.avc444YPlane for use when combining with an LC=2 auxiliary chroma frame.
 // The U/V planes are stored half-res (stride = (w+1)/2) and provide the B2/B3
@@ -755,6 +842,62 @@ func (g *GfxHandler) updateAVC444YCache(i420 *H264FrameI420) {
 	g.avc444YPlane.updatedAt = time.Now()
 	// HW decoder is producing real frames again — clear any stall throttle so
 	// the server resumes its normal quality/bitrate.
+	g.SetQueueDepthHint(0)
+}
+
+// updateAVC444YCacheFromNV12 updates the AVC444 Y/UV cache from a native NV12
+// frame produced by the hardware decoder (VideoToolbox on macOS).  The NV12
+// interleaved UV plane is de-interleaved into separate U/V planes so that the
+// cache layout matches what combineAVC444v2BGRA expects.
+func (g *GfxHandler) updateAVC444YCacheFromNV12(nv12 *H264FrameNV12) {
+	w, h := nv12.Width, nv12.Height
+	uvStride := (w + 1) / 2
+	uvH := (h + 1) / 2
+	neededY := w * h
+	neededUV := uvStride * uvH
+	if cap(g.avc444YPlane.data) < neededY {
+		g.avc444YPlane.data = make([]byte, neededY)
+	} else {
+		g.avc444YPlane.data = g.avc444YPlane.data[:neededY]
+	}
+	if cap(g.avc444YPlane.u) < neededUV {
+		g.avc444YPlane.u = make([]byte, neededUV)
+	} else {
+		g.avc444YPlane.u = g.avc444YPlane.u[:neededUV]
+	}
+	if cap(g.avc444YPlane.v) < neededUV {
+		g.avc444YPlane.v = make([]byte, neededUV)
+	} else {
+		g.avc444YPlane.v = g.avc444YPlane.v[:neededUV]
+	}
+	// Copy Y rows, respecting the source stride.
+	srcYStride := nv12.YStride
+	if srcYStride <= 0 {
+		srcYStride = w
+	}
+	for row := range h {
+		copy(g.avc444YPlane.data[row*w:row*w+w], nv12.Y[row*srcYStride:row*srcYStride+w])
+	}
+	// De-interleave NV12 UV (interleaved UVUVUV…) into separate U/V planes.
+	srcUVStride := nv12.UVStride
+	if srcUVStride <= 0 {
+		srcUVStride = w
+	}
+	for row := range uvH {
+		srcRow := nv12.UV[row*srcUVStride : row*srcUVStride+w]
+		dstU := g.avc444YPlane.u[row*uvStride : row*uvStride+uvStride]
+		dstV := g.avc444YPlane.v[row*uvStride : row*uvStride+uvStride]
+		for col := range uvStride {
+			dstU[col] = srcRow[col*2]
+			dstV[col] = srcRow[col*2+1]
+		}
+	}
+	g.avc444YPlane.stride = w
+	g.avc444YPlane.uvStride = uvStride
+	g.avc444YPlane.w = w
+	g.avc444YPlane.h = h
+	g.avc444YPlane.fullRange = nv12.FullRange
+	g.avc444YPlane.updatedAt = time.Now()
 	g.SetQueueDepthHint(0)
 }
 
@@ -1482,8 +1625,17 @@ func (g *GfxHandler) decodeAVC444LC2(stream2 *avc420Stream, destW, destH int) (d
 	// (decodeAVC444 / decodeAVC444WithI420) routes the output through
 	// blitAndEmitAVCRegions, which reads only within the dirty rectangles, so
 	// any uninitialized rows in the output buffer are never accessed.
+	//
+	// Use destW/destH (surface dimensions) for the shouldUseAVCRegions check,
+	// not w/h (decoded frame dimensions).  The region coordinates are in surface
+	// space, and the callers (WTS1/WTS2) also call shouldUseAVCRegions with
+	// surface dimensions.  Using different dimensions here could cause
+	// combineRegions to be set (skipping rows, leaving stale pool garbage) while
+	// the caller falls through to blitToSurface (reading all rows) — writing
+	// that garbage to the display.  Using destW/destH keeps the two decisions
+	// in sync and is more correct since the regions are in surface coordinate space.
 	var combineRegions []avcRect
-	if len(stream2.regions) > 0 && shouldUseAVCRegions(stream2.regions, w, h) {
+	if len(stream2.regions) > 0 && shouldUseAVCRegions(stream2.regions, destW, destH) {
 		combineRegions = stream2.regions
 	}
 	combined, _ := combineAVC444v2BGRA(

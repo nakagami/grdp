@@ -1473,7 +1473,28 @@ func (g *GfxHandler) onWireToSurface1Decode(data []byte, skipHeavy bool) {
 	case codecAVC444, codecAVC444v2:
 		destX := int(s.outputX) + int(left)
 		destY := int(s.outputY) + int(top)
-		if g.onI420 != nil {
+		if g.onNV12 != nil {
+			var ownedAVC bool
+			var nv12 *H264FrameNV12
+			decoded, nv12, avcRegions, ownedAVC = g.decodeAVC444WithNV12(bmpData, destX, destY, w, h)
+			owned = ownedAVC
+			if nv12 != nil {
+				if decoded != nil {
+					blitToSurface(s, int(left), int(top), w, h, decoded)
+					if owned {
+						releaseBitmapBuf(decoded)
+					}
+				} else {
+					// Display advanced without a shadow update; mark stale so a
+					// later full-surface frame fully repairs the shadow.
+					s.shadowStale = true
+				}
+				g.onNV12(destX, destY, w, h, nv12.Y, nv12.YStride, nv12.UV, nv12.UVStride)
+				return
+			}
+			// nv12 == nil: LC=2 chroma frame or decoder stall.
+			// decoded may contain combined BGRA; fall through to emit it.
+		} else if g.onI420 != nil {
 			var ownedAVC bool
 			var i420 *H264FrameI420
 			decoded, i420, avcRegions, ownedAVC = g.decodeAVC444WithI420(bmpData, destX, destY, w, h)
@@ -1490,6 +1511,7 @@ func (g *GfxHandler) onWireToSurface1Decode(data []byte, skipHeavy bool) {
 				g.onI420(destX, destY, w, h, i420.Y, i420.YStride, i420.U, i420.UStride, i420.V, i420.VStride)
 				return
 			}
+			// i420 == nil: LC=2 or decoder unavailable; decoded may contain BGRA.
 		} else {
 			var ownedAVC bool
 			decoded, avcRegions, ownedAVC = g.decodeAVC444(bmpData, destX, destY, w, h)
