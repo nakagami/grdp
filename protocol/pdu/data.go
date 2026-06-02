@@ -566,13 +566,36 @@ func NewDataPDU(data DataPDUData, shareId uint32) *DataPDU {
 	}
 }
 
-func readDataPDU(r io.Reader) (*DataPDU, error) {
+func readDataPDU(r io.Reader, mppc *core.MppcDecompressor) (*DataPDU, error) {
 	header := &ShareDataHeader{}
 	err := struc.Unpack(r, header)
 	if err != nil {
 		slog.Error("readDataPDU", "err", err)
 		return nil, err
 	}
+
+	// Decompress the payload when the server has compressed it.
+	if header.CompressedType != 0 && mppc != nil {
+		if header.CompressedType&RDP_MPPC_COMPRESSED != 0 {
+			compressed, err := core.ReadBytes(int(header.CompressedLength), r)
+			if err != nil {
+				slog.Error("readDataPDU: reading compressed payload", "err", err)
+				return nil, err
+			}
+			decompressed, err := mppc.Decompress(header.CompressedType, compressed)
+			if err != nil {
+				slog.Error("readDataPDU: MPPC decompression failed", "err", err)
+				return nil, err
+			}
+			r = bytes.NewReader(decompressed)
+		} else {
+			// CompressedType set but not COMPRESSED: update history only.
+			plain, _ := core.ReadBytes(int(header.CompressedLength), r)
+			_, _ = mppc.Decompress(header.CompressedType, plain)
+			r = bytes.NewReader(plain)
+		}
+	}
+
 	var d DataPDUData
 	slog.Debug("readDataPDU", "PDUTYPE2", header.PDUType2)
 	switch header.PDUType2 {
@@ -1724,7 +1747,7 @@ func NewPDU(userId uint16, message PDUMessage) *PDU {
 	return pdu
 }
 
-func readPDU(r io.Reader) (*PDU, error) {
+func readPDU(r io.Reader, mppc *core.MppcDecompressor) (*PDU, error) {
 	pdu := &PDU{}
 	var err error
 	header := &ShareControlHeader{}
@@ -1742,7 +1765,7 @@ func readPDU(r io.Reader) (*PDU, error) {
 		d, err = readDemandActivePDU(r)
 	case PDUTYPE_DATAPDU:
 		slog.Debug("readPDU:PDUTYPE_DATAPDU")
-		d, err = readDataPDU(r)
+		d, err = readDataPDU(r, mppc)
 	case PDUTYPE_CONFIRMACTIVEPDU:
 		slog.Debug("readPDU:PDUTYPE_CONFIRMACTIVEPDU")
 		d, err = readConfirmActivePDU(r)

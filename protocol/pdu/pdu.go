@@ -34,6 +34,7 @@ type PDULayer struct {
 	// using the much shorter fast-path framing (MS-RDPBCGR §2.2.8.1.2).
 	serverFastPathInput bool
 	demandActivePDU     *DemandActivePDU
+	mppc                *core.MppcDecompressor
 }
 
 func NewPDULayer(t core.Transport) *PDULayer {
@@ -126,6 +127,7 @@ func NewPDULayer(t core.Transport) *PDULayer {
 			},
 			CAPSSETTYPE_FRAME_ACKNOWLEDGE: &FrameAcknowledgeCapability{2},
 		},
+		mppc: core.NewMppcDecompressor(),
 	}
 
 	t.On("close", func() {
@@ -177,7 +179,7 @@ func (c *Client) recvDemandActivePDU(s []byte) {
 	r := readerPool.Get().(*bytes.Reader)
 	r.Reset(s)
 	defer readerPool.Put(r)
-	pdu, err := readPDU(r)
+	pdu, err := readPDU(r, c.mppc)
 	if err != nil {
 		slog.Error("recvDemandActivePDU", "err", err)
 		return
@@ -222,6 +224,7 @@ func (c *Client) sendConfirmActivePDU() {
 	generalCapa := c.clientCapabilities[CAPSTYPE_GENERAL].(*GeneralCapability)
 	generalCapa.OSMajorType = OSMAJORTYPE_WINDOWS
 	generalCapa.OSMinorType = OSMINORTYPE_WINDOWS_NT
+	generalCapa.GeneralCompressionTypes = 0x0002 // PACKET_COMPR_TYPE_64K: advertise MPPC-64K support
 	generalCapa.ExtraFlags = LONG_CREDENTIALS_SUPPORTED | NO_BITMAP_COMPRESSION_HDR |
 		FASTPATH_OUTPUT_SUPPORTED | AUTORECONNECT_SUPPORTED
 	generalCapa.RefreshRectSupport = 1
@@ -301,7 +304,7 @@ func (c *Client) recvServerSynchronizePDU(s []byte) {
 	r := readerPool.Get().(*bytes.Reader)
 	r.Reset(s)
 	defer readerPool.Put(r)
-	pdu, err := readPDU(r)
+	pdu, err := readPDU(r, c.mppc)
 	if err != nil {
 		slog.Error("recvServerSynchronizePDU", "err", err)
 		return
@@ -324,7 +327,7 @@ func (c *Client) recvServerControlCooperatePDU(s []byte) {
 	r := readerPool.Get().(*bytes.Reader)
 	r.Reset(s)
 	defer readerPool.Put(r)
-	pdu, err := readPDU(r)
+	pdu, err := readPDU(r, c.mppc)
 	if err != nil {
 		slog.Error("recvServerControlCooperatePDU", "err", err)
 		return
@@ -351,7 +354,7 @@ func (c *Client) recvServerControlGrantedPDU(s []byte) {
 	r := readerPool.Get().(*bytes.Reader)
 	r.Reset(s)
 	defer readerPool.Put(r)
-	pdu, err := readPDU(r)
+	pdu, err := readPDU(r, c.mppc)
 	if err != nil {
 		slog.Error("recvServerControlGrantedPDU", "err", err)
 		return
@@ -378,7 +381,7 @@ func (c *Client) recvServerFontMapPDU(s []byte) {
 	r := readerPool.Get().(*bytes.Reader)
 	r.Reset(s)
 	defer readerPool.Put(r)
-	pdu, err := readPDU(r)
+	pdu, err := readPDU(r, c.mppc)
 	if err != nil {
 		slog.Error("recvServerFontMapPDU", "err", err)
 		return
@@ -410,7 +413,7 @@ func (c *Client) recvPDU(s []byte) {
 	r.Reset(s)
 	defer readerPool.Put(r)
 	if r.Len() > 0 {
-		p, err := readPDU(r)
+		p, err := readPDU(r, c.mppc)
 		if err != nil {
 			slog.Error("recvPDU", "err", err)
 			return
@@ -469,46 +472,52 @@ func (c *Client) RecvFastPath(secFlag byte, s []byte) {
 		var compressionFlags uint8 = 0
 		if compression == FASTPATH_OUTPUT_COMPRESSION_USED {
 			compressionFlags, err = core.ReadUInt8(r)
+			if err != nil {
+				return
+			}
 		}
 
 		size, err := core.ReadUint16LE(r)
-
 		if err != nil {
 			return
 		}
+
+		// Read exactly `size` bytes for this update's payload.
+		payload, err := core.ReadBytes(int(size), r)
+		if err != nil {
+			return
+		}
+
 		slog.Debug("RecvFastPath", "Code", FastPathUpdateType(updateCode),
 			"compressionFlags", compressionFlags,
 			"fragmentation", fragmentation,
-			"size", size, "len", r.Len())
-		if compressionFlags&RDP_MPPC_COMPRESSED != 0 {
-			slog.Debug("RDP_MPPC_COMPRESSED")
-		}
+			"size", size)
+
+		// Handle fragmentation: reassemble fragments first, then decompress.
 		if fragmentation != FASTPATH_FRAGMENT_SINGLE {
 			if fragmentation == FASTPATH_FRAGMENT_FIRST {
 				c.buff.Reset()
 			}
-			b, _ := core.ReadBytes(r.Len(), r)
-			c.buff.Write(b)
+			c.buff.Write(payload)
 			if fragmentation != FASTPATH_FRAGMENT_LAST {
-				return
+				continue
 			}
-			r.Reset(c.buff.Bytes())
+			payload = c.buff.Bytes()
+		}
+
+		// Decompress if the server marked this update as compressed.
+		if compressionFlags != 0 && c.mppc != nil {
+			decompressed, err := c.mppc.Decompress(compressionFlags, payload)
+			if err != nil {
+				slog.Warn("RecvFastPath: MPPC decompression failed", "err", err)
+				continue
+			}
+			payload = decompressed
 		}
 
 		// Surface Commands: parse directly (needs to know data size)
 		if updateCode == FASTPATH_UPDATETYPE_SURFCMDS {
-			var readLen int
-			if fragmentation != FASTPATH_FRAGMENT_SINGLE {
-				readLen = r.Len() // assembled: all data is this update
-			} else {
-				readLen = int(size) // single: read exactly our portion
-			}
-			surfData, err := core.ReadBytes(readLen, r)
-			if err != nil {
-				slog.Warn("RecvFastPath: failed to read SURFCMDS", "err", err)
-				continue
-			}
-			result := ParseSurfaceCommands(surfData)
+			result := ParseSurfaceCommands(payload)
 			if len(result.Rects) > 0 {
 				c.Emit("bitmap", result.Rects)
 			}
@@ -518,10 +527,11 @@ func (c *Client) RecvFastPath(secFlag byte, s []byte) {
 			continue
 		}
 
-		p, err := readFastPathUpdatePDU(r, updateCode)
+		pr := bytes.NewReader(payload)
+		p, err := readFastPathUpdatePDU(pr, updateCode)
 		if err != nil {
 			slog.Warn("readFastPathUpdatePDU:", "Code", FastPathUpdateType(updateCode), "err", err)
-			return
+			continue
 		}
 
 		if updateCode == FASTPATH_UPDATETYPE_BITMAP {
