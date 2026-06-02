@@ -899,6 +899,9 @@ func (g *RdpClient) OnH264Raw(fn func(destX, destY, w, h int, isKey bool, data [
 // if they need to be retained beyond the callback's return.
 func (g *RdpClient) OnH264I420(fn func(destX, destY, w, h int, y []byte, yStride int, u []byte, uStride int, v []byte, vStride int)) *RdpClient {
 	g.onH264I420Fn = fn
+	if g.gfxHandler != nil {
+		g.gfxHandler.SetI420Callback(fn)
+	}
 	return g
 }
 
@@ -913,6 +916,9 @@ func (g *RdpClient) OnH264I420(fn func(destX, destY, w, h int, y []byte, yStride
 // if they need to be retained beyond the callback's return.
 func (g *RdpClient) OnH264NV12(fn func(destX, destY, w, h int, y []byte, yStride int, uv []byte, uvStride int)) *RdpClient {
 	g.onH264NV12Fn = fn
+	if g.gfxHandler != nil {
+		g.gfxHandler.SetNV12Callback(fn)
+	}
 	return g
 }
 
