@@ -51,7 +51,7 @@ type rfxProgTileWork struct {
 }
 
 type rfxProgressiveDecoder struct {
-	mu        sync.Mutex
+	mu        sync.RWMutex
 	tileCache map[uint32]*rfxTileCoeffs // key: yIdx<<16 | xIdx
 	rectsBuf  []rfxRect
 	quantsBuf []rfxQuant
@@ -430,9 +430,9 @@ func (d *rfxProgressiveDecoder) decodeTileUpgrade(data []byte, quants []rfxQuant
 	qCr := rfxGetQuant(quants, int(quantIdxCr))
 
 	tileKey := uint32(yIdx)<<16 | uint32(xIdx)
-	d.mu.Lock()
+	d.mu.RLock()
 	cached := d.tileCache[tileKey]
-	d.mu.Unlock()
+	d.mu.RUnlock()
 
 	var prevY, prevCb, prevCr *coeffArr
 	if cached != nil {
@@ -654,33 +654,43 @@ func rfxIDWT2DLevel(buf, tmp []int16, n int) {
 	hh := buf[2*nn : 3*nn]
 	ll := buf[3*nn : 4*nn]
 
-	// Step 1: Horizontal IDWT on each row
+	// Step 1: Horizontal IDWT on each row (fused even+odd passes).
+	// Instead of two separate loops — even pass writing to tmp, then odd pass
+	// re-reading those values — we keep the last even value in a register and
+	// compute the preceding odd value in the same iteration.  This eliminates
+	// 2*(n-1) reads of tmp per row (one even[col-1] and one even[col] per odd
+	// position), replacing them with register references.
+	// Valid sizes in practice: n = 8, 16, 32.
 	for row := range n {
 		rowOff := row * n
 		lDstOff := row * size
 		hDstOff := (row + n) * size
 
-		tmp[lDstOff] = ll[rowOff] - int16((int32(hl[rowOff])+int32(hl[rowOff])+1)>>1)
-		tmp[hDstOff] = lh[rowOff] - int16((int32(hh[rowOff])+int32(hh[rowOff])+1)>>1)
+		// col=0: even boundary (no left neighbour, hl[-1] = hl[0]).
+		prevEvenL := ll[rowOff] - int16((int32(hl[rowOff])*2+1)>>1)
+		prevEvenH := lh[rowOff] - int16((int32(hh[rowOff])*2+1)>>1)
+		tmp[lDstOff] = prevEvenL
+		tmp[hDstOff] = prevEvenH
 
+		// col=1..n-1: compute even[col], then immediately compute odd[col-1]
+		// using prevEven (=even[col-1], still in register) and the just-computed
+		// even[col] — no re-read of tmp required.
 		for col := 1; col < n; col++ {
 			x := col << 1
-			tmp[lDstOff+x] = ll[rowOff+col] - int16((int32(hl[rowOff+col-1])+int32(hl[rowOff+col])+1)>>1)
-			tmp[hDstOff+x] = lh[rowOff+col] - int16((int32(hh[rowOff+col-1])+int32(hh[rowOff+col])+1)>>1)
+			evenL := ll[rowOff+col] - int16((int32(hl[rowOff+col-1])+int32(hl[rowOff+col])+1)>>1)
+			evenH := lh[rowOff+col] - int16((int32(hh[rowOff+col-1])+int32(hh[rowOff+col])+1)>>1)
+			tmp[lDstOff+x-1] = int16((int32(hl[rowOff+col-1])<<1) + ((int32(prevEvenL)+int32(evenL))>>1))
+			tmp[hDstOff+x-1] = int16((int32(hh[rowOff+col-1])<<1) + ((int32(prevEvenH)+int32(evenH))>>1))
+			tmp[lDstOff+x] = evenL
+			tmp[hDstOff+x] = evenH
+			prevEvenL = evenL
+			prevEvenH = evenH
 		}
 
-		for col := 0; col < n-1; col++ {
-			x := col << 1
-			ld := (int32(hl[rowOff+col]) << 1) + ((int32(tmp[lDstOff+x]) + int32(tmp[lDstOff+x+2])) >> 1)
-			hd := (int32(hh[rowOff+col]) << 1) + ((int32(tmp[hDstOff+x]) + int32(tmp[hDstOff+x+2])) >> 1)
-			tmp[lDstOff+x+1] = int16(ld)
-			tmp[hDstOff+x+1] = int16(hd)
-		}
+		// last odd[n-1]: right boundary, even[n] = even[n-1].
 		x := (n - 1) << 1
-		ld := (int32(hl[rowOff+n-1]) << 1) + int32(tmp[lDstOff+x])
-		hd := (int32(hh[rowOff+n-1]) << 1) + int32(tmp[hDstOff+x])
-		tmp[lDstOff+x+1] = int16(ld)
-		tmp[hDstOff+x+1] = int16(hd)
+		tmp[lDstOff+x+1] = int16((int32(hl[rowOff+n-1])<<1) + int32(prevEvenL))
+		tmp[hDstOff+x+1] = int16((int32(hh[rowOff+n-1])<<1) + int32(prevEvenH))
 	}
 
 	// Step 2: Vertical IDWT on each column.
