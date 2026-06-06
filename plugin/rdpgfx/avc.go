@@ -314,6 +314,7 @@ func (g *GfxHandler) decodeAVC420(data []byte, destX, destY, destW, destH int) (
 	}
 	if frame.Dropped {
 		slog.Debug("RDPGFX: AVC420 frame intentionally dropped (zero-fill)")
+		g.maybeRequestKeyframe()
 		return nil, nil, false
 	}
 	if slog.Default().Enabled(nil, slog.LevelDebug) {
@@ -446,6 +447,12 @@ func (g *GfxHandler) decodeAVC444(data []byte, destX, destY, destW, destH int) (
 	}
 	if frame.Dropped {
 		slog.Debug("RDPGFX: AVC444 frame intentionally dropped (zero-fill)")
+		g.maybeRequestKeyframe()
+		// Touch Y cache timestamp so LC=2 can still combine with last valid luma
+		// while the server delivers a recovery IDR.
+		if g.avc444YPlane.w > 0 && !g.avc444YPlane.updatedAt.IsZero() {
+			g.avc444YPlane.updatedAt = time.Now()
+		}
 		return nil, nil, false
 	}
 	if !g.lc0SampleLogged && isIDR {
@@ -537,6 +544,7 @@ func (g *GfxHandler) decodeAVC420WithI420(data []byte, destX, destY, destW, dest
 	}
 	if frame != nil && frame.Dropped {
 		slog.Debug("RDPGFX: AVC420 (WithI420) frame intentionally dropped (zero-fill)")
+		g.maybeRequestKeyframe()
 		return
 	}
 	g.noteSuccessfulDecode()
@@ -606,6 +614,7 @@ func (g *GfxHandler) decodeAVC420WithNV12(data []byte, destX, destY, destW, dest
 	}
 	if frame != nil && frame.Dropped {
 		slog.Debug("RDPGFX: AVC420 (WithNV12) frame intentionally dropped (zero-fill)")
+		g.maybeRequestKeyframe()
 		return
 	}
 	g.noteSuccessfulDecode()
@@ -691,6 +700,10 @@ func (g *GfxHandler) decodeAVC444WithI420(data []byte, destX, destY, destW, dest
 	}
 	if frame != nil && frame.Dropped {
 		slog.Debug("RDPGFX: AVC444 (WithI420) frame intentionally dropped (zero-fill)")
+		g.maybeRequestKeyframe()
+		if g.avc444YPlane.w > 0 && !g.avc444YPlane.updatedAt.IsZero() {
+			g.avc444YPlane.updatedAt = time.Now()
+		}
 		return
 	}
 	g.noteSuccessfulDecode()
@@ -767,6 +780,22 @@ func (g *GfxHandler) decodeAVC444WithNV12(data []byte, destX, destY, destW, dest
 			return
 		}
 	}
+	// When the NV12 decoder returned a BGRA frame but no NV12 planes (e.g. the
+	// software decoder produced YUV420P instead of NV12), recover I420 from the
+	// decoder's side channel for Y cache update so LC=2 frames are not stalled.
+	if hasNV12 && nv12 == nil && frame != nil && g.h264dec2 != nil {
+		type i420LastDecoder interface {
+			LastI420() *H264FrameI420
+		}
+		if p, ok := g.h264dec.(i420LastDecoder); ok {
+			if i420out := p.LastI420(); i420out != nil {
+				g.updateAVC444YCache(i420out)
+				if isIDR {
+					g.copyAVC444YToIDRCache()
+				}
+			}
+		}
+	}
 	// Prime aux decoder before nil/dropped checks so stream2 IDR data is never lost.
 	if lc == 0 && stream2 != nil && len(stream2.h264Data) > 0 {
 		g.primeAuxDecoder(stream2.h264Data)
@@ -779,6 +808,10 @@ func (g *GfxHandler) decodeAVC444WithNV12(data []byte, destX, destY, destW, dest
 	}
 	if frame != nil && frame.Dropped {
 		slog.Debug("RDPGFX: AVC444 (WithNV12) frame intentionally dropped (zero-fill)")
+		g.maybeRequestKeyframe()
+		if g.avc444YPlane.w > 0 && !g.avc444YPlane.updatedAt.IsZero() {
+			g.avc444YPlane.updatedAt = time.Now()
+		}
 		return
 	}
 	g.noteSuccessfulDecode()
