@@ -882,6 +882,18 @@ func (g *GfxHandler) updateAVC444YCache(i420 *H264FrameI420) {
 // frame produced by the hardware decoder (VideoToolbox on macOS).  The NV12
 // interleaved UV plane is de-interleaved into separate U/V planes so that the
 // cache layout matches what combineAVC444v2BGRA expects.
+//
+// fullRange is forced to false regardless of nv12.FullRange.  VideoToolbox
+// expands the H.264 limited-range chroma to full range when it outputs
+// kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, but the SDL2 Metal renderer
+// applies limited-range BT.709 coefficients to the NV12 texture (SDL2 auto-
+// selects BT.709 for HD resolutions).  The LC=2 auxiliary-chroma stream is
+// decoded by the SW decoder and keeps limited-range values.  By always using
+// fullRange=false here, combineAVC444v2BGRA applies the same limited-range
+// BT.709 formula that SDL2 uses for the NV12 texture, eliminating the colour
+// shift that was visible when the display alternated between LC=0 NV12 frames
+// (SDL2 limited BT.709) and LC=2 BGRA overlay frames (previously BT.709 full-
+// range).
 func (g *GfxHandler) updateAVC444YCacheFromNV12(nv12 *H264FrameNV12) {
 	w, h := nv12.Width, nv12.Height
 	uvStride := (w + 1) / 2
@@ -929,7 +941,9 @@ func (g *GfxHandler) updateAVC444YCacheFromNV12(nv12 *H264FrameNV12) {
 	g.avc444YPlane.uvStride = uvStride
 	g.avc444YPlane.w = w
 	g.avc444YPlane.h = h
-	g.avc444YPlane.fullRange = nv12.FullRange
+	// Force limited-range so combineAVC444v2BGRA uses the same BT.709 limited-
+	// range coefficients as the SDL2 Metal renderer (see comment above).
+	g.avc444YPlane.fullRange = false
 	g.avc444YPlane.updatedAt = time.Now()
 	g.SetQueueDepthHint(0)
 }
