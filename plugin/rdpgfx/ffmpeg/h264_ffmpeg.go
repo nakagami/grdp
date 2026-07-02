@@ -1257,7 +1257,7 @@ const avcFreezeThreshold = 6 * time.Second
 // avcHWReadyFreezeThreshold is the point at which a stalled HW decoder stops
 // accepting new packets.  VideoToolbox can legitimately pause for several
 // seconds when flushing its internal reference pipeline at an IDR/GOP
-// boundary; 7 s is chosen because the CGo call (avcodec_send_packet) itself
+// boundary; 5 s is chosen because the CGo call (avcodec_send_packet) itself
 // permanently blocks after ~5.75 s of stall on macOS VideoToolbox.  The
 // pre-flight guard in Decode() bails out *before* the CGo call to prevent the
 // decodeLoop goroutine from hanging inside CGo.
@@ -1268,7 +1268,7 @@ const avcFreezeThreshold = 6 * time.Second
 // VideoToolbox produces a frame during that window the stall clock is reset
 // and normal decoding resumes; only if the window is exhausted is the decoder
 // marked broken.
-const avcHWReadyFreezeThreshold = 7 * time.Second
+const avcHWReadyFreezeThreshold = 5 * time.Second
 
 // avcHWEarlyFreezeThreshold is a shorter stall threshold applied during the
 // first avcHWEarlyFrameLimit packets sent to the HW decoder after each
@@ -1295,10 +1295,10 @@ const avcHWEarlyFrameLimit = 50
 // a stall is detected (either from avcHWReadyFreezeThreshold or from the
 // early null-frame count detector).  After this window, if VT has not
 // produced a real frame, the decoder is declared broken and a soft reset
-// is triggered.  500 ms is sufficient: any frame VT had buffered will have
-// surfaced well within 500 ms, and YouTube / gnome-remote-desktop delivers a
+// is triggered.  300 ms is sufficient: any frame VT had buffered will have
+// surfaced well within 300 ms, and YouTube / gnome-remote-desktop delivers a
 // fresh IDR within ~2 s of the soft reset anyway.
-const avcHWRecoveryWindow = 500 * time.Millisecond
+const avcHWRecoveryWindow = 300 * time.Millisecond
 
 // avcHWNullFrameStallLimit is the number of consecutive null (blank) frames
 // the HW decoder may produce during the early session window (hwSentCount <
@@ -1321,12 +1321,11 @@ const avcHWEarlyStallMinElapsed = 2 * time.Second
 // avcHWMidSessionNullFrameLimit is the null-frame count threshold used for
 // mid-session stall detection (hwSentCount >= avcHWEarlyFrameLimit).
 // Normal GOP / mid-session IDR boundaries produce at most ~25 null frames
-// (~1 s at 30 fps); a genuine VideoToolbox stall produces hundreds.  30
-// frames ≈ 1 s at 30 fps — safely above normal GOP noise (25 frames) while
-// detecting genuine stalls ~1.5 s earlier than the previous 75-frame
-// threshold.  Observed logs show zero mid-session null frames outside of
-// the fatal VT stall, so the 3× safety margin is not needed in practice.
-const avcHWMidSessionNullFrameLimit = 30
+// (~1 s at 30 fps); a genuine VideoToolbox stall produces hundreds.  20
+// frames ≈ 0.7 s at 30 fps — still above normal GOP noise while detecting
+// genuine stalls earlier.  Observed logs show zero mid-session null frames
+// outside of the fatal VT stall, so the safety margin is not needed in practice.
+const avcHWMidSessionNullFrameLimit = 20
 
 // keyframeWaitLimit is the maximum number of non-IDR packets we drop while
 // waiting for a keyframe after a decoder reset or flush.  gnome-remote-desktop

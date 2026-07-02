@@ -314,6 +314,7 @@ func (g *GfxHandler) decodeAVC420(data []byte, destX, destY, destW, destH int) (
 	}
 	if frame.Dropped {
 		slog.Debug("RDPGFX: AVC420 frame intentionally dropped (zero-fill)")
+		g.trackSWFallbackDroppedFrame()
 		g.maybeRequestKeyframe()
 		return nil, nil, false
 	}
@@ -447,6 +448,7 @@ func (g *GfxHandler) decodeAVC444(data []byte, destX, destY, destW, destH int) (
 	}
 	if frame.Dropped {
 		slog.Debug("RDPGFX: AVC444 frame intentionally dropped (zero-fill)")
+		g.trackSWFallbackDroppedFrame()
 		g.maybeRequestKeyframe()
 		// Touch Y cache timestamp so LC=2 can still combine with last valid luma
 		// while the server delivers a recovery IDR.
@@ -544,6 +546,7 @@ func (g *GfxHandler) decodeAVC420WithI420(data []byte, destX, destY, destW, dest
 	}
 	if frame != nil && frame.Dropped {
 		slog.Debug("RDPGFX: AVC420 (WithI420) frame intentionally dropped (zero-fill)")
+		g.trackSWFallbackDroppedFrame()
 		g.maybeRequestKeyframe()
 		return
 	}
@@ -614,6 +617,7 @@ func (g *GfxHandler) decodeAVC420WithNV12(data []byte, destX, destY, destW, dest
 	}
 	if frame != nil && frame.Dropped {
 		slog.Debug("RDPGFX: AVC420 (WithNV12) frame intentionally dropped (zero-fill)")
+		g.trackSWFallbackDroppedFrame()
 		g.maybeRequestKeyframe()
 		return
 	}
@@ -700,6 +704,7 @@ func (g *GfxHandler) decodeAVC444WithI420(data []byte, destX, destY, destW, dest
 	}
 	if frame != nil && frame.Dropped {
 		slog.Debug("RDPGFX: AVC444 (WithI420) frame intentionally dropped (zero-fill)")
+		g.trackSWFallbackDroppedFrame()
 		g.maybeRequestKeyframe()
 		if g.avc444YPlane.w > 0 && !g.avc444YPlane.updatedAt.IsZero() {
 			g.avc444YPlane.updatedAt = time.Now()
@@ -808,6 +813,7 @@ func (g *GfxHandler) decodeAVC444WithNV12(data []byte, destX, destY, destW, dest
 	}
 	if frame != nil && frame.Dropped {
 		slog.Debug("RDPGFX: AVC444 (WithNV12) frame intentionally dropped (zero-fill)")
+		g.trackSWFallbackDroppedFrame()
 		g.maybeRequestKeyframe()
 		if g.avc444YPlane.w > 0 && !g.avc444YPlane.updatedAt.IsZero() {
 			g.avc444YPlane.updatedAt = time.Now()
@@ -1971,6 +1977,8 @@ func (g *GfxHandler) maybeNotifyDecoderBroken() {
 				"idrAge", idrAge.Round(time.Millisecond),
 				"idrFrameAge", idrFrameAge,
 			)
+			g.swFallbackPrimed = true
+			g.swFallbackDroppedCount = 0
 			if _, err := g.h264dec.Decode(g.lastStream1IDR); err != nil {
 				slog.Debug("H.264: cached IDR prime failed, watchdog will wait for natural IDR",
 					"err", err)
@@ -2000,6 +2008,33 @@ func (g *GfxHandler) maybeNotifyDecoderBroken() {
 	g.decoderBrokenNotified = true
 	if g.onDecoderBroken != nil {
 		go g.onDecoderBroken()
+	}
+}
+
+// swFallbackDropLimit is the maximum number of consecutive dropped frames
+// accepted after priming the SW fallback decoder with a cached IDR.  If the
+// cached IDR is too stale, subsequent P-frames decode to zero-UV frames that
+// are intentionally dropped; after this many drops we give up and reconnect.
+const swFallbackDropLimit = 5
+
+// trackSWFallbackDroppedFrame counts a dropped frame after a SW fallback IDR
+// prime.  If too many consecutive frames are dropped it marks the decoder
+// broken so the application reconnects instead of showing a frozen/green
+// screen.
+func (g *GfxHandler) trackSWFallbackDroppedFrame() {
+	if !g.usingSWFallback || !g.swFallbackPrimed {
+		return
+	}
+	g.swFallbackDroppedCount++
+	if g.swFallbackDroppedCount >= swFallbackDropLimit {
+		slog.Warn("H.264: SW fallback produced too many dropped frames after stale IDR prime, escalating to reconnect",
+			"dropped", g.swFallbackDroppedCount, "limit", swFallbackDropLimit)
+		g.swFallbackPrimed = false
+		g.swFallbackDroppedCount = 0
+		g.decoderBrokenNotified = true
+		if g.onDecoderBroken != nil {
+			go g.onDecoderBroken()
+		}
 	}
 }
 

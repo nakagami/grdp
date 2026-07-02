@@ -287,6 +287,15 @@ type GfxHandler struct {
 	// flag is true, avoiding repeated VideoToolbox stalls that would
 	// otherwise trigger a full RDP reconnect.
 	usingSWFallback bool
+	// swFallbackPrimed is set after a SW fallback decoder has been primed
+	// with the cached stream1 IDR.  While true, consecutive dropped frames
+	// are counted so that a stale IDR prime can be detected and escalated
+	// to a reconnect instead of producing endless zero-UV frames.
+	swFallbackPrimed bool
+	// swFallbackDroppedCount counts dropped frames since the SW fallback
+	// decoder was primed.  If it exceeds swFallbackDropLimit the decoder is
+	// declared broken and onDecoderBroken is fired.
+	swFallbackDroppedCount int
 	// lc2EverDecoded is set to true after the first successful AVC444 LC=2
 	// chroma-upgrade decode.  maybeRenegotiateCapabilities uses this to
 	// distinguish "LC=2 was working and then broke" (reconnect needed) from
@@ -627,6 +636,8 @@ func (g *GfxHandler) maybeRenegotiateCapabilities() {
 func (g *GfxHandler) noteSuccessfulDecode() {
 	g.lastDecodedFrame.Store(time.Now().UnixNano())
 	g.noIDRSoftResetCount = 0
+	g.swFallbackPrimed = false
+	g.swFallbackDroppedCount = 0
 	g.stopInputWatchdog()
 }
 
@@ -1241,6 +1252,8 @@ func (g *GfxHandler) onResetGraphics(data []byte) {
 	g.lastStream1IDR = g.lastStream1IDR[:0]
 	g.lastStream1IDRTime = time.Time{}
 	g.lastStream1IDRFrame = 0
+	g.swFallbackPrimed = false
+	g.swFallbackDroppedCount = 0
 	g.lastDecodedFrame.Store(0)
 	g.stopInputWatchdog()
 	if g.h264dec != nil {
