@@ -2015,7 +2015,7 @@ func (g *GfxHandler) maybeNotifyDecoderBroken() {
 // accepted after priming the SW fallback decoder with a cached IDR.  If the
 // cached IDR is too stale, subsequent P-frames decode to zero-UV frames that
 // are intentionally dropped; after this many drops we give up and reconnect.
-const swFallbackDropLimit = 5
+const swFallbackDropLimit = 3
 
 // trackSWFallbackDroppedFrame counts a dropped frame after a SW fallback IDR
 // prime.  If too many consecutive frames are dropped it marks the decoder

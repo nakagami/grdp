@@ -1320,12 +1320,14 @@ const avcHWEarlyStallMinElapsed = 2 * time.Second
 
 // avcHWMidSessionNullFrameLimit is the null-frame count threshold used for
 // mid-session stall detection (hwSentCount >= avcHWEarlyFrameLimit).
-// Normal GOP / mid-session IDR boundaries produce at most ~25 null frames
-// (~1 s at 30 fps); a genuine VideoToolbox stall produces hundreds.  20
-// frames ≈ 0.7 s at 30 fps — still above normal GOP noise while detecting
-// genuine stalls earlier.  Observed logs show zero mid-session null frames
-// outside of the fatal VT stall, so the safety margin is not needed in practice.
-const avcHWMidSessionNullFrameLimit = 20
+// Normal GOP / mid-session IDR boundaries can produce up to ~25 null frames
+// (~1 s at 30 fps); a genuine VideoToolbox stall produces hundreds.  15
+// frames ≈ 0.5 s at 30 fps — this is more aggressive than the previous 20
+// and may occasionally trigger a SW fallback at a noisy GOP boundary, but
+// it recovers from genuine VT stalls noticeably faster.  Observed logs show
+// zero mid-session null frames outside of the fatal VT stall, so the trade-off
+// is acceptable for the target use case.
+const avcHWMidSessionNullFrameLimit = 15
 
 // keyframeWaitLimit is the maximum number of non-IDR packets we drop while
 // waiting for a keyframe after a decoder reset or flush.  gnome-remote-desktop
