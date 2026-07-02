@@ -1009,7 +1009,12 @@ func (g *GfxHandler) maybeCacheStream1IDR(h264Data []byte) {
 	if g.usingSWFallback {
 		// A natural IDR from the server arrived while in SW fallback mode.
 		// From this frame onwards the SW decoder has a fresh reference point and
-		// error concealment (block noise) should stop.
+		// error concealment (block noise) should stop.  This is the genuine
+		// resync point after a stale-IDR prime, so disarm the stale-prime
+		// corruption tracking: the primed frames were only suspect until a real
+		// IDR healed the picture.
+		g.swFallbackPrimed = false
+		g.swFallbackDroppedCount = 0
 		slog.Debug("H.264: natural IDR received during SW fallback — block noise should stop",
 			"idrLen", len(h264Data),
 			"framesDecoded", g.lastStream1IDRFrame)
@@ -1979,6 +1984,7 @@ func (g *GfxHandler) maybeNotifyDecoderBroken() {
 			)
 			g.swFallbackPrimed = true
 			g.swFallbackDroppedCount = 0
+			g.swFallbackFirstDropTime = time.Time{}
 			if _, err := g.h264dec.Decode(g.lastStream1IDR); err != nil {
 				slog.Debug("H.264: cached IDR prime failed, watchdog will wait for natural IDR",
 					"err", err)
@@ -2011,26 +2017,43 @@ func (g *GfxHandler) maybeNotifyDecoderBroken() {
 	}
 }
 
-// swFallbackDropLimit is the maximum number of consecutive dropped frames
-// accepted after priming the SW fallback decoder with a cached IDR.  If the
-// cached IDR is too stale, subsequent P-frames decode to zero-UV frames that
-// are intentionally dropped; after this many drops we give up and reconnect.
+// swFallbackDropLimit is the minimum number of consecutive dropped frames,
+// and swFallbackResyncTimeout the minimum elapsed time, that must accumulate
+// after priming the SW fallback decoder with a stale cached IDR before we give
+// up and reconnect.  Both conditions must hold: a large frame count alone (a
+// fast stall burst) should not reconnect before the ForceRefresh resync IDR has
+// had a realistic chance to arrive, and a long idle gap alone should not
+// reconnect if only one or two frames were bad.  While corruption persists the
+// frames are dropped (screen holds the last good frame) rather than shown, and
+// maybeRequestKeyframe keeps asking the server for a fresh IDR; only when the
+// server fails to heal within the timeout do we fall back to a full reconnect.
 const swFallbackDropLimit = 3
+const swFallbackResyncTimeout = 2 * time.Second
 
 // trackSWFallbackDroppedFrame counts a dropped frame after a SW fallback IDR
-// prime.  If too many consecutive frames are dropped it marks the decoder
-// broken so the application reconnects instead of showing a frozen/green
-// screen.
+// prime.  When corruption from a stale prime persists past swFallbackDropLimit
+// consecutive drops AND swFallbackResyncTimeout — i.e. the ForceRefresh resync
+// IDR did not arrive in time — it marks the decoder broken so the application
+// reconnects instead of showing a frozen/green screen.  A genuine fresh IDR
+// (maybeCacheStream1IDR) or any clean decode (noteSuccessfulDecode) clears the
+// run before it reaches the escalation threshold.
 func (g *GfxHandler) trackSWFallbackDroppedFrame() {
 	if !g.usingSWFallback || !g.swFallbackPrimed {
 		return
 	}
+	if g.swFallbackDroppedCount == 0 {
+		g.swFallbackFirstDropTime = time.Now()
+	}
 	g.swFallbackDroppedCount++
-	if g.swFallbackDroppedCount >= swFallbackDropLimit {
-		slog.Warn("H.264: SW fallback produced too many dropped frames after stale IDR prime, escalating to reconnect",
-			"dropped", g.swFallbackDroppedCount, "limit", swFallbackDropLimit)
+	if g.swFallbackDroppedCount >= swFallbackDropLimit &&
+		!g.swFallbackFirstDropTime.IsZero() &&
+		time.Since(g.swFallbackFirstDropTime) >= swFallbackResyncTimeout {
+		slog.Warn("H.264: SW fallback stale IDR prime did not resync in time, escalating to reconnect",
+			"dropped", g.swFallbackDroppedCount,
+			"persistedFor", time.Since(g.swFallbackFirstDropTime).Round(time.Millisecond))
 		g.swFallbackPrimed = false
 		g.swFallbackDroppedCount = 0
+		g.swFallbackFirstDropTime = time.Time{}
 		g.decoderBrokenNotified = true
 		if g.onDecoderBroken != nil {
 			go g.onDecoderBroken()

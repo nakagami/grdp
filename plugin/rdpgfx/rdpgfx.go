@@ -288,14 +288,23 @@ type GfxHandler struct {
 	// otherwise trigger a full RDP reconnect.
 	usingSWFallback bool
 	// swFallbackPrimed is set after a SW fallback decoder has been primed
-	// with the cached stream1 IDR.  While true, consecutive dropped frames
-	// are counted so that a stale IDR prime can be detected and escalated
-	// to a reconnect instead of producing endless zero-UV frames.
+	// with the cached (stale) stream1 IDR.  It stays armed for the whole SW
+	// fallback window — until a genuine fresh IDR resyncs the decoder
+	// (maybeCacheStream1IDR) or RESET_GRAPHICS — so that consecutive dropped
+	// frames caused by the stale prime can be detected and escalated to a
+	// reconnect instead of producing endless green/zero-UV frames.  It is NOT
+	// cleared by a single successful decode: stale-prime corruption only
+	// appears once the following P-frames diverge from the missing reference.
 	swFallbackPrimed bool
 	// swFallbackDroppedCount counts dropped frames since the SW fallback
 	// decoder was primed.  If it exceeds swFallbackDropLimit the decoder is
 	// declared broken and onDecoderBroken is fired.
 	swFallbackDroppedCount int
+	// swFallbackFirstDropTime records when the current run of consecutive
+	// stale-prime drops started.  It bounds how long corruption may persist
+	// before escalating to a reconnect, giving the ForceRefresh resync IDR a
+	// chance to heal the picture first.  Reset whenever a clean frame decodes.
+	swFallbackFirstDropTime time.Time
 	// lc2EverDecoded is set to true after the first successful AVC444 LC=2
 	// chroma-upgrade decode.  maybeRenegotiateCapabilities uses this to
 	// distinguish "LC=2 was working and then broke" (reconnect needed) from
@@ -636,8 +645,17 @@ func (g *GfxHandler) maybeRenegotiateCapabilities() {
 func (g *GfxHandler) noteSuccessfulDecode() {
 	g.lastDecodedFrame.Store(time.Now().UnixNano())
 	g.noIDRSoftResetCount = 0
-	g.swFallbackPrimed = false
+	// A single clean decode resets the *consecutive* drop counter, but does NOT
+	// disarm swFallbackPrimed.  After a HW stall the SW decoder is primed with a
+	// stale cached IDR; the corruption it causes only manifests as the following
+	// P-frames diverge from the (missing) reference, so the very first frame can
+	// decode cleanly and then the picture rots into green/zero-chroma output.
+	// Clearing swFallbackPrimed here would permanently disable
+	// trackSWFallbackDroppedFrame's escalation and let that corruption persist.
+	// swFallbackPrimed is instead cleared only on a genuine fresh IDR resync
+	// (maybeCacheStream1IDR) or on RESET_GRAPHICS.
 	g.swFallbackDroppedCount = 0
+	g.swFallbackFirstDropTime = time.Time{}
 	g.stopInputWatchdog()
 }
 
@@ -1254,6 +1272,7 @@ func (g *GfxHandler) onResetGraphics(data []byte) {
 	g.lastStream1IDRFrame = 0
 	g.swFallbackPrimed = false
 	g.swFallbackDroppedCount = 0
+	g.swFallbackFirstDropTime = time.Time{}
 	g.lastDecodedFrame.Store(0)
 	g.stopInputWatchdog()
 	if g.h264dec != nil {
