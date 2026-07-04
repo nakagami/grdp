@@ -1025,17 +1025,52 @@ func (g *GfxHandler) maybeCacheStream1IDR(h264Data []byte) {
 	}
 }
 
-// isAuxChromaBlank returns true when i420aux.Y appears to be all-zero or
-// near-zero.  In AVC444v2 the Y plane of the auxiliary stream carries Cb (left
-// half) and Cr (right half) rather than luma, so near-zero means Cb≈0, Cr≈0
-// — the uninitialised state that Windows Server delivers in the stream2 IDR
-// and retains for static desktop regions until content changes.  Combining
-// zero chroma with any luma produces a bright green frame; detecting this
-// condition early lets decodeAVC444LC2 skip the combine and wait for real data.
-//
-// The check samples 6 positions spread across each half of the Y plane and
-// requires that a MAJORITY (more than half) of the sampled positions are in
-// the valid chroma range [loThreshold, hiThreshold).
+// isPlaneRegionBlank samples a 3×3 grid inside a rectangular region of a
+// single plane and returns true when a majority of the samples are either
+// near-zero (< loThreshold) or near-saturated (>= hiThreshold).  It is used
+// to detect the uninitialised/corrupt chroma states that produce green or
+// pink overlays in AVC444v2 reconstruction.
+func isPlaneRegionBlank(data []byte, stride, x0, y0, w, h int) bool {
+	if len(data) == 0 || w <= 0 || h <= 0 {
+		return false
+	}
+	const (
+		loThreshold = 20  // below this: near-zero (uninitialised chroma)
+		hiThreshold = 235 // at or above this: near-saturation (DPB corruption)
+	)
+	nearZero, nearSat, total := 0, 0, 0
+	for i := range 3 {
+		row := y0 + (i+1)*h/4
+		if row < y0 || row >= y0+h {
+			continue
+		}
+		for j := range 3 {
+			col := x0 + (j+1)*w/4
+			if col < x0 || col >= x0+w {
+				continue
+			}
+			total++
+			v := data[row*stride+col]
+			if v < loThreshold {
+				nearZero++
+			} else if v >= hiThreshold {
+				nearSat++
+			}
+		}
+	}
+	if total == 0 {
+		return false
+	}
+	return nearZero*2 > total || nearSat*2 > total
+}
+
+// isAuxChromaBlank returns true when any of the chroma-carrying planes in the
+// stream2 auxiliary frame looks uninitialised or corrupt.  In AVC444v2 the Y
+// plane carries Cb (left half) and Cr (right half) for odd columns, while the
+// U and V planes carry the remaining chroma positions for even columns on odd
+// rows.  Near-zero values in any of these planes produce a bright green frame;
+// near-saturated values produce a pink/magenta overlay.  Detecting this early
+// lets decodeAVC444LC2 skip the combine and wait for real data.
 //
 // Two failure modes are detected:
 //   - Near-zero (< 20): codec not yet initialised; Windows Server initialises
@@ -1044,38 +1079,68 @@ func (g *GfxHandler) maybeCacheStream1IDR(h264Data []byte) {
 //     from triggering a combine that produces bright green blocks.
 //   - Near-saturation (≥ 235): indicates DPB mismatch or corruption in the aux
 //     decoder (h264dec2); a P-frame decoded against the wrong reference can
-//     produce near-maximal Y values in stream2, which encode Cb≈255/Cr≈255 and
-//     result in a pink/magenta overlay when combined with any luma.
+//     produce near-maximal values, which encode Cb≈255/Cr≈255 and result in a
+//     pink/magenta overlay when combined with any luma.
 func isAuxChromaBlank(f *H264FrameI420) bool {
-	if f == nil || f.Width < 16 || f.Height < 4 || len(f.Y) == 0 {
+	if f == nil || f.Width < 16 || f.Height < 4 || len(f.Y) == 0 || len(f.U) == 0 || len(f.V) == 0 {
 		return false
 	}
-	w, h, stride := f.Width, f.Height, f.YStride
+	w, h := f.Width, f.Height
 	halfW := w / 2
+	uvW := halfW / 2
+	uvH := (h + 1) / 2
+	// Y plane left half: Cb for odd columns.
+	if isPlaneRegionBlank(f.Y, f.YStride, 0, 0, halfW, h) {
+		return true
+	}
+	// Y plane right half: Cr for odd columns.
+	if isPlaneRegionBlank(f.Y, f.YStride, halfW, 0, halfW, h) {
+		return true
+	}
+	// U plane: Cb/Cr for even columns on odd rows.
+	if isPlaneRegionBlank(f.U, f.UStride, 0, 0, uvW, uvH) {
+		return true
+	}
+	// V plane: Cb/Cr for even columns on odd rows.
+	if isPlaneRegionBlank(f.V, f.VStride, 0, 0, uvW, uvH) {
+		return true
+	}
+	return false
+}
+
+// isAVC444YPlaneChromaBlank returns true when the cached stream1 chroma (U/V)
+// looks corrupt.  Green monochrome requires both Cb and Cr to collapse to
+// near-zero, so the grid check requires both U and V at a sample point to be
+// low.  Near-saturation in both planes produces a pink/magenta overlay.
+//
+// The threshold (24) matches the low-chroma guard in the ffmpeg decoder plugin
+// so a frame that poisoned the cache would also have been dropped there.
+func isAVC444YPlaneChromaBlank(yp *avc444YPlane) bool {
+	if yp == nil || yp.w < 16 || yp.h < 4 || len(yp.u) == 0 || len(yp.v) == 0 {
+		return false
+	}
+	uvH := (yp.h + 1) / 2
 	const (
-		loThreshold = 20  // below this: near-zero (uninitialised chroma)
-		hiThreshold = 235 // at or above this: near-saturation (DPB corruption)
+		loThreshold = 24  // below this: near-zero (green monochrome)
+		hiThreshold = 235 // at or above this: near-saturation (pink overlay)
 	)
 	nearZero, nearSat, total := 0, 0, 0
-	for i := range 6 {
-		row := (i + 1) * h / 7
-		col := (i + 1) * halfW / 7
-		if row >= h || col >= halfW {
+	for i := range 3 {
+		row := (i + 1) * uvH / 4
+		if row >= uvH {
 			continue
 		}
-		total++
-		v := f.Y[row*stride+col]
-		if v < loThreshold {
-			nearZero++
-		} else if v >= hiThreshold {
-			nearSat++
-		}
-		if halfW+col < w {
+		for j := range 3 {
+			col := (j + 1) * yp.uvStride / 4
+			if col >= yp.uvStride {
+				continue
+			}
 			total++
-			v2 := f.Y[row*stride+halfW+col]
-			if v2 < loThreshold {
+			u := yp.u[row*yp.uvStride+col]
+			v := yp.v[row*yp.uvStride+col]
+			if u < loThreshold && v < loThreshold {
 				nearZero++
-			} else if v2 >= hiThreshold {
+			} else if u >= hiThreshold && v >= hiThreshold {
 				nearSat++
 			}
 		}
@@ -1083,7 +1148,6 @@ func isAuxChromaBlank(f *H264FrameI420) bool {
 	if total == 0 {
 		return false
 	}
-	// Blank if majority of samples are near-zero (uninitialised) or near-saturated (corrupted).
 	return nearZero*2 > total || nearSat*2 > total
 }
 
@@ -1675,6 +1739,16 @@ func (g *GfxHandler) decodeAVC444LC2(stream2 *avc420Stream, destW, destH int) (d
 	if i420aux.Width < w || i420aux.Height < h {
 		slog.Debug("RDPGFX: AVC444 LC=2 aux frame too small",
 			"auxW", i420aux.Width, "auxH", i420aux.Height, "lumaW", w, "lumaH", h)
+		return
+	}
+	// Guard against corrupt cached stream1 chroma.  A frame that slipped past
+	// the decoder's low-chroma guard can poison the U/V cache; combining that
+	// with any stream2 chroma produces green/pink artefacts on the even-column,
+	// even-row pixels.  Skip the combine and ask for a fresh IDR.
+	if isAVC444YPlaneChromaBlank(yp) {
+		slog.Debug("RDPGFX: AVC444 LC=2 skipped (cached stream1 chroma blank/corrupt)")
+		g.primeH264dec2KeepDPB(stream2.h264Data)
+		g.maybeRequestKeyframe()
 		return
 	}
 	// Pass dirty regions to combineAVC444v2BGRA so it can skip unchanged rows
