@@ -1305,6 +1305,14 @@ func parallelConvertRows(h int, fn func(s, e C.int)) {
 var avLogOnce sync.Once
 
 // avcFreezeThreshold is the duration of no decoded output from the HW decoder
+// lowChromaThreshold is the UV value below which a chroma sample is considered
+// abnormally low.  Valid YUV content centres chroma near 128; corruption from
+// stale IDR priming or uninitialised buffers collapses chroma toward 0.  The
+// observed SW-fallback corruption produces U≈60, V≈42, so 72 catches those
+// green-monochrome frames while staying well below the U≈101–122, V≈88–122
+// range seen in healthy desktop content.
+const lowChromaThreshold = 72
+
 // after which it is marked broken.  The application-level watchdog then
 // reconnects the RDP session.  VideoToolbox (macOS) can stall for 2-3 seconds
 // while processing a new IDR/SPS frame; 6 seconds gives it enough headroom to
@@ -2508,7 +2516,7 @@ func (d *ffmpegDecoder) convertFrame(regionHint []C.uint16_t, nRegions C.int) (*
 		// (and rare HW corruption) can produce green-monochrome frames later in
 		// the session.  Sample a 3x3 grid and drop frames whose chroma has
 		// collapsed to ~0 across most of the frame.
-		if C.grdp_is_low_chroma_nv12(srcFrame, 24, 6) != 0 {
+		if C.grdp_is_low_chroma_nv12(srcFrame, lowChromaThreshold, 6) != 0 {
 			slog.Debug("H.264: dropping low-chroma NV12 frame (green-monochrome corruption)")
 			if usedMapFrame {
 				C.av_frame_unref(d.mapFrame)
@@ -2578,7 +2586,7 @@ func (d *ffmpegDecoder) convertFrame(regionHint []C.uint16_t, nRegions C.int) (*
 			// NV12 fast path above.  This protects the SDL2 IYUV texture and the
 			// AVC444 Y cache from green-monochrome corruption.
 			if srcFmt == C.AV_PIX_FMT_NV12 {
-				if C.grdp_is_low_chroma_nv12(srcFrame, 24, 6) != 0 {
+				if C.grdp_is_low_chroma_nv12(srcFrame, lowChromaThreshold, 6) != 0 {
 					slog.Debug("H.264: dropping low-chroma NV12 frame in I420 path (green-monochrome corruption)")
 					if usedMapFrame {
 						C.av_frame_unref(d.mapFrame)
@@ -2588,7 +2596,7 @@ func (d *ffmpegDecoder) convertFrame(regionHint []C.uint16_t, nRegions C.int) (*
 					return &rdpgfx.H264Frame{Dropped: true, Width: int(w), Height: int(h)}, transferNs, nil
 				}
 			} else if srcFmt == C.AV_PIX_FMT_YUV420P || srcFmt == C.AV_PIX_FMT_YUVJ420P {
-				if C.grdp_is_low_chroma_yuv420p(srcFrame, 24, 6) != 0 {
+				if C.grdp_is_low_chroma_yuv420p(srcFrame, lowChromaThreshold, 6) != 0 {
 					slog.Debug("H.264: dropping low-chroma YUV420P frame in I420 path (green-monochrome corruption)")
 					if usedMapFrame {
 						C.av_frame_unref(d.mapFrame)
@@ -2685,11 +2693,11 @@ func (d *ffmpegDecoder) convertFrame(regionHint []C.uint16_t, nRegions C.int) (*
 		// content, even dark scenes, keeps chroma centred near 128; both planes
 		// collapsing to ~0 is a reliable sign of decoder corruption and renders
 		// as a full-screen green frame (BT.601 of Cb≈0,Cr≈0 → BGRA(0,~135,0)).
-		// Drop when U<24 && V<24 regardless of luma: a moderate-luma corrupt
-		// frame (e.g. Y=40, U=10, V=0) would otherwise slip past the exact-zero
-		// check above and paint the screen green during a VideoToolbox stall +
-		// SW fallback.  The additional U<8 && V<8 && Y<32 gate catches slightly
-		// higher (but still abnormal) chroma in dark scenes.
+		// Drop when U and V are both abnormally low regardless of luma: corrupt
+		// SW-fallback frames have been observed at Y≈40, U≈60, V≈42, which is
+		// well below the healthy desktop-content range (U≈101–122, V≈88–122)
+		// but above the old threshold of 24.  lowChromaThreshold (72) catches
+		// these green-monochrome frames without affecting valid content.
 		//
 		// Warm-up black check (gated by swNeedsZeroCheck): Y=0, U≈128, V≈128
 		// with all luma near zero is libavcodec's initial black output before
@@ -2700,7 +2708,7 @@ func (d *ffmpegDecoder) convertFrame(regionHint []C.uint16_t, nRegions C.int) (*
 					"Y", int(sy))
 				return &rdpgfx.H264Frame{Dropped: true, Width: int(w), Height: int(h)}, transferNs, nil
 			}
-			if (su < 24 && sv < 24) || (su < 8 && sv < 8 && sy < 32) {
+			if su < lowChromaThreshold && sv < lowChromaThreshold {
 				slog.Debug("H.264: dropping near-zero-UV SW frame (stale IDR prime?)",
 					"Y", int(sy), "U", int(su), "V", int(sv))
 				return &rdpgfx.H264Frame{Dropped: true, Width: int(w), Height: int(h)}, transferNs, nil
@@ -2710,7 +2718,7 @@ func (d *ffmpegDecoder) convertFrame(regionHint []C.uint16_t, nRegions C.int) (*
 			// chroma.  Sample a 3x3 grid and drop if most samples are abnormally
 			// low — this catches the green-monochrome frames produced by stale
 			// IDR priming in the SW fallback decoder.
-			if C.grdp_is_low_chroma_yuv420p(srcFrame, 24, 6) != 0 {
+			if C.grdp_is_low_chroma_yuv420p(srcFrame, lowChromaThreshold, 6) != 0 {
 				slog.Debug("H.264: dropping low-chroma YUV420P frame in BGRA path (green-monochrome corruption)")
 				return &rdpgfx.H264Frame{Dropped: true, Width: int(w), Height: int(h)}, transferNs, nil
 			}
@@ -2803,7 +2811,7 @@ func (d *ffmpegDecoder) convertFrame(regionHint []C.uint16_t, nRegions C.int) (*
 		// zero-UV check above is only armed around init/flush/IDR; stale IDR
 		// priming and other decoder corruption can produce green-monochrome
 		// frames later in the session.
-		if C.grdp_is_low_chroma_nv12(srcFrame, 24, 6) != 0 {
+		if C.grdp_is_low_chroma_nv12(srcFrame, lowChromaThreshold, 6) != 0 {
 			slog.Debug("H.264: dropping low-chroma NV12 frame in BGRA path (green-monochrome corruption)")
 			if usedMapFrame {
 				C.av_frame_unref(d.mapFrame)

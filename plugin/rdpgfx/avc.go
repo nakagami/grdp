@@ -1035,8 +1035,8 @@ func isPlaneRegionBlank(data []byte, stride, x0, y0, w, h int) bool {
 		return false
 	}
 	const (
-		loThreshold = 20  // below this: near-zero (uninitialised chroma)
-		hiThreshold = 235 // at or above this: near-saturation (DPB corruption)
+		loThreshold = 72  // below this: abnormally low (green monochrome)
+		hiThreshold = 235 // at or above this: near-saturation (pink overlay)
 	)
 	nearZero, nearSat, total := 0, 0, 0
 	for i := range 3 {
@@ -1113,7 +1113,7 @@ func isAuxChromaBlank(f *H264FrameI420) bool {
 // near-zero, so the grid check requires both U and V at a sample point to be
 // low.  Near-saturation in both planes produces a pink/magenta overlay.
 //
-// The threshold (24) matches the low-chroma guard in the ffmpeg decoder plugin
+// The threshold (72) matches the low-chroma guard in the ffmpeg decoder plugin
 // so a frame that poisoned the cache would also have been dropped there.
 func isAVC444YPlaneChromaBlank(yp *avc444YPlane) bool {
 	if yp == nil || yp.w < 16 || yp.h < 4 || len(yp.u) == 0 || len(yp.v) == 0 {
@@ -1121,7 +1121,7 @@ func isAVC444YPlaneChromaBlank(yp *avc444YPlane) bool {
 	}
 	uvH := (yp.h + 1) / 2
 	const (
-		loThreshold = 24  // below this: near-zero (green monochrome)
+		loThreshold = 72  // below this: near-zero (green monochrome)
 		hiThreshold = 235 // at or above this: near-saturation (pink overlay)
 	)
 	nearZero, nearSat, total := 0, 0, 0
