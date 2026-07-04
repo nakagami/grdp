@@ -58,6 +58,10 @@ package ffmpeg
 #cgo noescape grdp_sample_nv12_at
 #cgo nocallback grdp_sample_nv12_at
 #cgo nocallback grdp_is_warmup_nv12
+#cgo noescape grdp_is_low_chroma_nv12
+#cgo nocallback grdp_is_low_chroma_nv12
+#cgo noescape grdp_is_low_chroma_yuv420p
+#cgo nocallback grdp_is_low_chroma_yuv420p
 #include <libavcodec/avcodec.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/hwcontext.h>
@@ -875,6 +879,62 @@ static int grdp_is_warmup_nv12(const AVFrame *f, int threshold) {
             if (yp[ys[i] * stride + xs[j]] > (uint8_t)threshold)
                 return 0;
     return 1;
+}
+
+// grdp_is_low_chroma_nv12 returns 1 if at least minLow of the sampled UV pairs
+// in an NV12 frame are abnormally low (both U and V below threshold).  Valid
+// YUV content always has chroma centered near 128; corruption from stale IDR
+// priming or uninitialised buffers collapses chroma to ~0, which renders as a
+// green-monochrome frame.  A 3x3 grid spread across the frame catches corruption
+// that only affects the centre pixel.
+static int grdp_is_low_chroma_nv12(const AVFrame *f, int threshold, int minLow) {
+    const uint8_t *uvp = f->data[1];
+    int stride = f->linesize[1];
+    int w = f->width, h = f->height;
+    if (!uvp || w <= 0 || h <= 0) return 0;
+    int ph = (h + 1) / 2;
+    int pw = (w + 1) / 2;
+    if (pw <= 0 || ph <= 0) return 0;
+    int xs[3] = { pw / 4, pw / 2, 3 * pw / 4 };
+    int ys[3] = { ph / 4, ph / 2, 3 * ph / 4 };
+    int low = 0;
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 3; j++) {
+            int x = xs[j] * 2; // NV12: interleaved U at even byte, V at odd byte
+            int y = ys[i];
+            int u = (int)uvp[y * stride + x];
+            int v = (int)uvp[y * stride + x + 1];
+            if (u < threshold && v < threshold) low++;
+        }
+    }
+    return low >= minLow ? 1 : 0;
+}
+
+// grdp_is_low_chroma_yuv420p is the planar YUV420P equivalent of
+// grdp_is_low_chroma_nv12.
+static int grdp_is_low_chroma_yuv420p(const AVFrame *f, int threshold, int minLow) {
+    const uint8_t *up = f->data[1];
+    const uint8_t *vp = f->data[2];
+    int uStride = f->linesize[1];
+    int vStride = f->linesize[2];
+    int w = f->width, h = f->height;
+    if (!up || !vp || w <= 0 || h <= 0) return 0;
+    int ph = (h + 1) / 2;
+    int pw = (w + 1) / 2;
+    if (pw <= 0 || ph <= 0) return 0;
+    int xs[3] = { pw / 4, pw / 2, 3 * pw / 4 };
+    int ys[3] = { ph / 4, ph / 2, 3 * ph / 4 };
+    int low = 0;
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 3; j++) {
+            int x = xs[j];
+            int y = ys[i];
+            int u = (int)up[y * uStride + x];
+            int v = (int)vp[y * vStride + x];
+            if (u < threshold && v < threshold) low++;
+        }
+    }
+    return low >= minLow ? 1 : 0;
 }
 
 static void grdp_sws_set_src_range(struct SwsContext *sws, int full_range) {
@@ -2443,6 +2503,20 @@ func (d *ffmpegDecoder) convertFrame(regionHint []C.uint16_t, nRegions C.int) (*
 			}
 			d.hwNeedsZeroCheck = false
 		}
+		// Permanent guard: the single-pixel check above only runs while
+		// hwNeedsZeroCheck is armed, but stale IDR priming in the SW fallback
+		// (and rare HW corruption) can produce green-monochrome frames later in
+		// the session.  Sample a 3x3 grid and drop frames whose chroma has
+		// collapsed to ~0 across most of the frame.
+		if C.grdp_is_low_chroma_nv12(srcFrame, 24, 6) != 0 {
+			slog.Debug("H.264: dropping low-chroma NV12 frame (green-monochrome corruption)")
+			if usedMapFrame {
+				C.av_frame_unref(d.mapFrame)
+			} else if srcFrame == d.swFrame {
+				C.av_frame_unref(d.swFrame)
+			}
+			return &rdpgfx.H264Frame{Dropped: true, Width: int(w), Height: int(h)}, transferNs, nil
+		}
 		d.extractNV12fromSrc(srcFrame)
 		if usedMapFrame {
 			C.av_frame_unref(d.mapFrame)
@@ -2499,6 +2573,30 @@ func (d *ffmpegDecoder) convertFrame(regionHint []C.uint16_t, nRegions C.int) (*
 					return &rdpgfx.H264Frame{Dropped: true, Width: int(w), Height: int(h)}, transferNs, nil
 				}
 				d.hwNeedsZeroCheck = false
+			}
+			// Permanent low-chroma guard for the I420 fast path, matching the
+			// NV12 fast path above.  This protects the SDL2 IYUV texture and the
+			// AVC444 Y cache from green-monochrome corruption.
+			if srcFmt == C.AV_PIX_FMT_NV12 {
+				if C.grdp_is_low_chroma_nv12(srcFrame, 24, 6) != 0 {
+					slog.Debug("H.264: dropping low-chroma NV12 frame in I420 path (green-monochrome corruption)")
+					if usedMapFrame {
+						C.av_frame_unref(d.mapFrame)
+					} else if srcFrame == d.swFrame {
+						C.av_frame_unref(d.swFrame)
+					}
+					return &rdpgfx.H264Frame{Dropped: true, Width: int(w), Height: int(h)}, transferNs, nil
+				}
+			} else if srcFmt == C.AV_PIX_FMT_YUV420P || srcFmt == C.AV_PIX_FMT_YUVJ420P {
+				if C.grdp_is_low_chroma_yuv420p(srcFrame, 24, 6) != 0 {
+					slog.Debug("H.264: dropping low-chroma YUV420P frame in I420 path (green-monochrome corruption)")
+					if usedMapFrame {
+						C.av_frame_unref(d.mapFrame)
+					} else if srcFrame == d.swFrame {
+						C.av_frame_unref(d.swFrame)
+					}
+					return &rdpgfx.H264Frame{Dropped: true, Width: int(w), Height: int(h)}, transferNs, nil
+				}
 			}
 			d.extractI420fromSrc(srcFrame)
 			if usedMapFrame {
@@ -2587,10 +2685,10 @@ func (d *ffmpegDecoder) convertFrame(regionHint []C.uint16_t, nRegions C.int) (*
 		// content, even dark scenes, keeps chroma centred near 128; both planes
 		// collapsing to ~0 is a reliable sign of decoder corruption and renders
 		// as a full-screen green frame (BT.601 of Cb≈0,Cr≈0 → BGRA(0,~135,0)).
-		// Drop when U<4 && V<4 regardless of luma: a moderate-luma corrupt frame
-		// (e.g. Y=75, U=0, V=2) would otherwise slip past the exact-zero check
-		// above and paint the screen green during a VideoToolbox stall + SW
-		// fallback.  The additional U<8 && V<8 && Y<32 gate catches slightly
+		// Drop when U<24 && V<24 regardless of luma: a moderate-luma corrupt
+		// frame (e.g. Y=40, U=10, V=0) would otherwise slip past the exact-zero
+		// check above and paint the screen green during a VideoToolbox stall +
+		// SW fallback.  The additional U<8 && V<8 && Y<32 gate catches slightly
 		// higher (but still abnormal) chroma in dark scenes.
 		//
 		// Warm-up black check (gated by swNeedsZeroCheck): Y=0, U≈128, V≈128
@@ -2602,9 +2700,18 @@ func (d *ffmpegDecoder) convertFrame(regionHint []C.uint16_t, nRegions C.int) (*
 					"Y", int(sy))
 				return &rdpgfx.H264Frame{Dropped: true, Width: int(w), Height: int(h)}, transferNs, nil
 			}
-			if (su < 4 && sv < 4) || (su < 8 && sv < 8 && sy < 32) {
+			if (su < 24 && sv < 24) || (su < 8 && sv < 8 && sy < 32) {
 				slog.Debug("H.264: dropping near-zero-UV SW frame (stale IDR prime?)",
 					"Y", int(sy), "U", int(su), "V", int(sv))
+				return &rdpgfx.H264Frame{Dropped: true, Width: int(w), Height: int(h)}, transferNs, nil
+			}
+			// The centre-pixel check above can miss corruption that leaves the
+			// centre valid while the rest of the frame collapses to near-zero
+			// chroma.  Sample a 3x3 grid and drop if most samples are abnormally
+			// low — this catches the green-monochrome frames produced by stale
+			// IDR priming in the SW fallback decoder.
+			if C.grdp_is_low_chroma_yuv420p(srcFrame, 24, 6) != 0 {
+				slog.Debug("H.264: dropping low-chroma YUV420P frame in BGRA path (green-monochrome corruption)")
 				return &rdpgfx.H264Frame{Dropped: true, Width: int(w), Height: int(h)}, transferNs, nil
 			}
 			if d.swNeedsZeroCheck {
@@ -2691,6 +2798,19 @@ func (d *ffmpegDecoder) convertFrame(regionHint []C.uint16_t, nRegions C.int) (*
 			}
 			// Valid frame seen — IOSurface is properly populated.
 			d.hwNeedsZeroCheck = false
+		}
+		// Permanent low-chroma guard for the BGRA NV12 path.  The single-pixel
+		// zero-UV check above is only armed around init/flush/IDR; stale IDR
+		// priming and other decoder corruption can produce green-monochrome
+		// frames later in the session.
+		if C.grdp_is_low_chroma_nv12(srcFrame, 24, 6) != 0 {
+			slog.Debug("H.264: dropping low-chroma NV12 frame in BGRA path (green-monochrome corruption)")
+			if usedMapFrame {
+				C.av_frame_unref(d.mapFrame)
+			} else if srcFrame == d.swFrame {
+				C.av_frame_unref(d.swFrame)
+			}
+			return &rdpgfx.H264Frame{Dropped: true, Width: int(w), Height: int(h)}, transferNs, nil
 		}
 		if haveRegions {
 			C.grdp_nv12_to_bgra_regions(srcFrame,
