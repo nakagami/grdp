@@ -1397,6 +1397,30 @@ const avcHWEarlyStallMinElapsed = 2 * time.Second
 // is acceptable for the target use case.
 const avcHWMidSessionNullFrameLimit = 15
 
+// avcHWConsecDroppedFrameLimit is the number of consecutive HW-decoded
+// frames that may be classified as warm-up/zero-fill/low-chroma junk (see
+// the hwNeedsZeroCheck and low-chroma guards in convertFrame) before the
+// decoder is declared broken, even though avcodec_receive_frame keeps
+// returning frames (so hwConsecNullFrames / lastSuccessTime never reflect a
+// stall).  Under normal operation hwNeedsZeroCheck disarms itself after the
+// first non-dropped frame, so this streak should only ever be a handful of
+// frames long; a genuine VideoToolbox malfunction can instead keep emitting
+// black/zero content indefinitely, leaving the on-screen video frozen on a
+// black frame while the existing stall detectors — which only watch for the
+// *absence* of frames — stay quiet.  150 frames is ~5 s at 30 fps.
+const avcHWConsecDroppedFrameLimit = 150
+
+// avcHWDroppedFrameStallThreshold is the elapsed-time companion to
+// avcHWConsecDroppedFrameLimit: even at a low or irregular frame rate, a
+// dropped-frame streak lasting this long is not a normal warm-up burst.
+const avcHWDroppedFrameStallThreshold = 5 * time.Second
+
+// avcHWConsecDroppedFrameMinCount is the minimum streak length required
+// before avcHWDroppedFrameStallThreshold is honoured, so a single slow
+// frame arriving 5 s after the previous one cannot trip the time-based leg
+// on its own.
+const avcHWConsecDroppedFrameMinCount = 10
+
 // keyframeWaitLimit is the maximum number of non-IDR packets we drop while
 // waiting for a keyframe after a decoder reset or flush.  gnome-remote-desktop
 // and similar servers send an IDR approximately every 15-25 seconds; using 900
@@ -1468,6 +1492,8 @@ type ffmpegDecoder struct {
 	stallProbeStart          time.Time       // wall-clock time we entered the stall recovery-probe window
 	stallTimer               *time.Timer     // fires after avcHWRecoveryWindow to mark broken independently of frame rate
 	hwConsecNullFrames       int             // consecutive HW null frames since last real frame; for early stall detection
+	hwConsecDroppedFrames    int             // consecutive HW frames classified as warm-up/zero-fill/low-chroma and dropped
+	hwFirstDroppedTime       time.Time       // wall-clock time the current dropped-frame streak began
 	kfWaitTimer              *time.Timer     // fires after kfWaitTimeoutVal to mark broken independently of frame rate
 	kfWaitTimeoutVal         time.Duration   // per-decoder IDR wait limit (varies by decoder type)
 	watchdogCh               chan<- struct{} // signals GfxHandler.decodeLoop to call maybeNotifyDecoderBroken
@@ -2238,6 +2264,8 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*rdpgfx.H264Frame, error) {
 			d.hwFirstSendTime = time.Time{} // restart stall clock after IDR
 			d.hwSentCount = 0
 			d.hwConsecNullFrames = 0
+			d.hwConsecDroppedFrames = 0
+			d.hwFirstDroppedTime = time.Time{}
 			d.hwNeedsZeroCheck = true // re-check for zero-filled IOSurface after flush
 			if !d.hwReady && prev {
 				// We gave up waiting for an IDR and tried a P-frame anyway, and
@@ -2299,6 +2327,33 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*rdpgfx.H264Frame, error) {
 		d.lastSuccessTime = time.Now()
 		d.hwConsecNullFrames = 0
 		if d.useHW {
+			// A dropped frame (warm-up/zero-fill/low-chroma junk — see
+			// convertFrame) still counts as "gotFrame" above, which keeps
+			// resetting the null-frame/lastSuccessTime stall detectors.  If
+			// VideoToolbox never produces anything but junk, those detectors
+			// would otherwise never fire and the app would freeze on a black
+			// frame forever.  Track dropped-frame streaks independently and
+			// escalate to broken/HWStall once the streak is clearly abnormal.
+			if result != nil && result.Dropped {
+				if d.hwConsecDroppedFrames == 0 {
+					d.hwFirstDroppedTime = time.Now()
+				}
+				d.hwConsecDroppedFrames++
+				droppedFor := time.Since(d.hwFirstDroppedTime)
+				if d.hwConsecDroppedFrames >= avcHWConsecDroppedFrameLimit ||
+					(d.hwConsecDroppedFrames >= avcHWConsecDroppedFrameMinCount &&
+						droppedFor >= avcHWDroppedFrameStallThreshold) {
+					slog.Warn("H.264: HW decoder producing only warm-up/junk frames, marking broken",
+						"consecDroppedFrames", d.hwConsecDroppedFrames,
+						"droppedFor", droppedFor.Round(time.Millisecond),
+						"hwSentCount", d.hwSentCount)
+					d.markBroken(rdpgfx.H264BrokenReasonHWStall)
+					return nil, nil
+				}
+			} else {
+				d.hwConsecDroppedFrames = 0
+				d.hwFirstDroppedTime = time.Time{}
+			}
 			if !d.hwReady {
 				slog.Debug("H.264: HW decoder produced first frame",
 					"hwSentCount", d.hwSentCount)
