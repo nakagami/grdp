@@ -79,10 +79,10 @@ type RdpClient struct {
 	sec             *sec.Client
 	pdu             *pdu.Client
 	channels        *plugin.Channels
-	eventReady     atomic.Bool
-	decompressPool sync.Pool // pools []uint8 buffers for bitmap decompression
-	flipLinePool   sync.Pool // pools line-sized []uint8 buffers for bitmap vertical flip
-	closed         atomic.Bool
+	eventReady      atomic.Bool
+	decompressPool  sync.Pool // pools []uint8 buffers for bitmap decompression
+	flipLinePool    sync.Pool // pools line-sized []uint8 buffers for bitmap vertical flip
+	closed          atomic.Bool
 
 	// credentials stored for reconnection
 	domain   string
