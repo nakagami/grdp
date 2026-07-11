@@ -1246,6 +1246,22 @@ func (g *RdpClient) SetQueueDepthHint(depth uint32) {
 	}
 }
 
+// RequestKeyframe asks the server to send a fresh full-screen IDR keyframe via
+// the SuppressOutput off→on toggle (SendForceRefresh).  It is the same request
+// the RDPGFX decoder issues internally when it stalls, exposed publicly so the
+// frontend's black-screen watchdog can recover an initial all-black session —
+// where the server sent its first IDR before the desktop finished painting
+// (decoded as a black warm-up frame and dropped) and then went idle — without
+// the cost of a full reconnect.  Safe to call from the render loop goroutine.
+func (g *RdpClient) RequestKeyframe() {
+	if g.closed.Load() {
+		return
+	}
+	if g.pdu != nil {
+		g.pdu.SendForceRefresh(uint16(g.width), uint16(g.height))
+	}
+}
+
 func (g *RdpClient) Reconnect(width, height int) error {
 	if g.closed.Load() {
 		return fmt.Errorf("client is closed")
