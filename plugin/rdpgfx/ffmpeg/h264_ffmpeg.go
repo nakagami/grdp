@@ -881,6 +881,24 @@ static int grdp_is_warmup_nv12(const AVFrame *f, int threshold) {
     return 1;
 }
 
+// grdp_debug_sample_y_grid fills out[0..8] with the same 3x3 luma samples
+// grdp_is_warmup_nv12 checks (25%/50%/75% of width and height), for
+// diagnostic logging only — it does not affect the warm-up decision itself.
+static void grdp_debug_sample_y_grid(const AVFrame *f, uint8_t *out) {
+    const uint8_t *yp = f->data[0];
+    int stride = f->linesize[0];
+    int w = f->width, h = f->height;
+    if (!yp || w <= 0 || h <= 0) {
+        for (int k = 0; k < 9; k++) out[k] = 0;
+        return;
+    }
+    int xs[3] = { w / 4, w / 2, 3 * w / 4 };
+    int ys[3] = { h / 4, h / 2, 3 * h / 4 };
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 3; j++)
+            out[i * 3 + j] = yp[ys[i] * stride + xs[j]];
+}
+
 // grdp_is_low_chroma_nv12 returns 1 if at least minLow of the sampled UV pairs
 // in an NV12 frame are abnormally low (both U and V below threshold).  Valid
 // YUV content always has chroma centered near 128; corruption from stale IDR
@@ -1567,6 +1585,13 @@ type ffmpegDecoder struct {
 	// when primed with a stale cached IDR.  Cleared after the first valid
 	// (non-zero-fill) YUV420P frame is seen.
 	swNeedsZeroCheck bool
+
+	// swConsecDroppedFrames/swFirstDroppedTime are diagnostic-only counters
+	// mirroring hwConsecDroppedFrames/hwFirstDroppedTime for the SW warm-up
+	// check above: they let the log line report how long the current
+	// black-frame streak has lasted, without changing drop behaviour.
+	swConsecDroppedFrames int
+	swFirstDroppedTime    time.Time
 }
 
 // extractI420fromSrc extracts I420 planar data from srcFrame into the ring
@@ -2553,8 +2578,36 @@ func (d *ffmpegDecoder) convertFrame(regionHint []C.uint16_t, nRegions C.int) (*
 			} else if sy == 0 && su >= 124 && su <= 132 && sv >= 124 && sv <= 132 &&
 				C.grdp_is_warmup_nv12(srcFrame, 4) != 0 {
 				drop = true
-				slog.Debug("H.264: dropping black warm-up HW frame in NV12 path",
-					"Y", int(sy), "U", int(su), "V", int(sv))
+				// Diagnostic-only fields: streak duration/count come from the
+				// caller's tracking (set on the previous drop, since this call
+				// happens before the caller increments the counters for THIS
+				// frame), and the 3x3 Y grid confirms whether the whole
+				// sampled area is really black or just the single centre
+				// pixel checked above.  Logged on every Nth drop (not every
+				// frame) to avoid flooding, since a real bug reproduction may
+				// run for many seconds at high frame rate.
+				streakElapsed := time.Duration(0)
+				if !d.hwFirstDroppedTime.IsZero() {
+					streakElapsed = time.Since(d.hwFirstDroppedTime)
+				}
+				if d.hwConsecDroppedFrames%10 == 0 {
+					var grid [9]C.uint8_t
+					C.grdp_debug_sample_y_grid(srcFrame, &grid[0])
+					ys := make([]int, 9)
+					for i, v := range grid {
+						ys[i] = int(v)
+					}
+					slog.Debug("H.264: dropping black warm-up HW frame in NV12 path",
+						"Y", int(sy), "U", int(su), "V", int(sv),
+						"streakCount", d.hwConsecDroppedFrames,
+						"streakElapsed", streakElapsed.Round(time.Millisecond),
+						"yGrid", ys)
+				} else {
+					slog.Debug("H.264: dropping black warm-up HW frame in NV12 path",
+						"Y", int(sy), "U", int(su), "V", int(sv),
+						"streakCount", d.hwConsecDroppedFrames,
+						"streakElapsed", streakElapsed.Round(time.Millisecond))
+				}
 			}
 			if drop {
 				if usedMapFrame {
@@ -2780,10 +2833,32 @@ func (d *ffmpegDecoder) convertFrame(regionHint []C.uint16_t, nRegions C.int) (*
 			if d.swNeedsZeroCheck {
 				if sy == 0 && su >= 124 && su <= 132 && sv >= 124 && sv <= 132 &&
 					C.grdp_is_warmup_nv12(srcFrame, 4) != 0 {
-					slog.Debug("H.264: dropping black warm-up SW frame",
-						"Y", int(sy), "U", int(su), "V", int(sv))
+					if d.swConsecDroppedFrames == 0 {
+						d.swFirstDroppedTime = time.Now()
+					}
+					d.swConsecDroppedFrames++
+					streakElapsed := time.Since(d.swFirstDroppedTime)
+					if d.swConsecDroppedFrames%10 == 1 {
+						var grid [9]C.uint8_t
+						C.grdp_debug_sample_y_grid(srcFrame, &grid[0])
+						ys := make([]int, 9)
+						for i, v := range grid {
+							ys[i] = int(v)
+						}
+						slog.Debug("H.264: dropping black warm-up SW frame",
+							"Y", int(sy), "U", int(su), "V", int(sv),
+							"streakCount", d.swConsecDroppedFrames,
+							"streakElapsed", streakElapsed.Round(time.Millisecond),
+							"yGrid", ys)
+					} else {
+						slog.Debug("H.264: dropping black warm-up SW frame",
+							"Y", int(sy), "U", int(su), "V", int(sv),
+							"streakCount", d.swConsecDroppedFrames,
+							"streakElapsed", streakElapsed.Round(time.Millisecond))
+					}
 					return &rdpgfx.H264Frame{Dropped: true, Width: int(w), Height: int(h)}, transferNs, nil
 				}
+				d.swConsecDroppedFrames = 0
 				d.swNeedsZeroCheck = false
 			}
 		}
