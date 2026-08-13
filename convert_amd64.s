@@ -63,11 +63,11 @@ loop555:
 	POR   X14, X6               // X6[i] = 0xFF00|B
 
 	// Interleave to produce 4 RGBA dwords each.
-	// PUNPCKLWD src,dst → dst=[dst_w0,src_w0,dst_w1,src_w1,...dst_w3,src_w3]
+	// PUNPCKLWL src,dst → dst=[dst_w0,src_w0,dst_w1,src_w1,...dst_w3,src_w3]
 	// Each dword becomes bytes [R,G,B,0xFF].
 	MOVO       X5, X7
-	PUNPCKLWD  X6, X5           // low 4 pixels  → X5
-	PUNPCKHWD  X6, X7           // high 4 pixels → X7
+	PUNPCKLWL  X6, X5           // low 4 pixels  → X5
+	PUNPCKHWL  X6, X7           // high 4 pixels → X7
 
 	MOVOU X5, (DI)
 	MOVOU X7, 16(DI)
@@ -120,8 +120,8 @@ loop565:
 	POR   X14, X6               // X6[i] = 0xFF00|B
 
 	MOVO       X5, X7
-	PUNPCKLWD  X6, X5
-	PUNPCKHWD  X6, X7
+	PUNPCKLWL  X6, X5
+	PUNPCKHWL  X6, X7
 
 	MOVOU X5, (DI)
 	MOVOU X7, 16(DI)
@@ -167,7 +167,7 @@ loop32:
 
 	// R = (src >> 16) & 0xFF  →  low byte of dest dword.
 	MOVO  X0, X2
-	PSRLD $16, X2
+	PSRLL $16, X2
 	PAND  X12, X2               // X2 = [R,0,0,0] per dword
 
 	// G stays at byte 1: src & 0x0000FF00.
@@ -177,7 +177,7 @@ loop32:
 	// B moves from byte 0 to byte 2: (src & 0xFF) << 16.
 	MOVO  X0, X4
 	PAND  X12, X4
-	PSLLD $16, X4               // X4 = [0,0,B,0] per dword
+	PSLLL $16, X4               // X4 = [0,0,B,0] per dword
 
 	POR   X3, X2
 	POR   X4, X2
@@ -188,7 +188,7 @@ loop32:
 	MOVOU 16(SI), X0
 
 	MOVO  X0, X2
-	PSRLD $16, X2
+	PSRLL $16, X2
 	PAND  X12, X2
 
 	MOVO  X0, X3
@@ -196,7 +196,7 @@ loop32:
 
 	MOVO  X0, X4
 	PAND  X12, X4
-	PSLLD $16, X4
+	PSLLL $16, X4
 
 	POR   X3, X2
 	POR   X4, X2
