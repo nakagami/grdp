@@ -82,11 +82,11 @@ loop_yco:
 	PUNPCKLBW X9, X6           // X6 = [R0,FF,R1,FF,...,R7,FF]
 
 	// Interleave BG and RA halfwords to produce BGRA dwords:
-	// PUNPCKLWD: low 4 words → [BG0,RA0,BG1,RA1,BG2,RA2,BG3,RA3]
+	// PUNPCKLWL: low 4 words → [BG0,RA0,BG1,RA1,BG2,RA2,BG3,RA3]
 	//           = bytes [B0,G0,R0,FF, B1,G1,R1,FF, B2,G2,R2,FF, B3,G3,R3,FF]
 	MOVO      X4, X11
-	PUNPCKLWD X6, X11          // X11 = low  4 BGRA pixels
-	PUNPCKHWD X6, X4           // X4  = high 4 BGRA pixels
+	PUNPCKLWL X6, X11          // X11 = low  4 BGRA pixels
+	PUNPCKHWL X6, X4           // X4  = high 4 BGRA pixels
 
 	MOVOU X11, (DI)
 	MOVOU X4,  16(DI)
