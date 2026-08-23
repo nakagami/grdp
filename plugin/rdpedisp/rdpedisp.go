@@ -15,6 +15,7 @@ package rdpedisp
 import (
 	"encoding/binary"
 	"log/slog"
+	"sync"
 )
 
 // ChannelName is the well-known DVC name for the Display Update channel.
@@ -55,48 +56,50 @@ type Monitor struct {
 // It implements the drdynvc.DvcChannelHandler interface and the optional
 // SetSendFunc / OnChannelCreated extension interfaces.
 type Handler struct {
-	send          func([]byte)
-	initialWidth  uint32
-	initialHeight uint32
+	mu              sync.Mutex
+	send            func([]byte)
+	capsReceived    bool
+	maxMonitors     uint32
+	pendingMonitors []Monitor
 }
 
 // NewHandler returns a new Handler.
 // width and height are the desired initial desktop dimensions; when both are
-// non-zero the handler sends a MONITOR_LAYOUT PDU as soon as the channel
-// opens, mirroring FreeRDP's /size behaviour and prompting GNOME Remote
-// Desktop (headless or screen-share) to resize to the requested resolution.
+// non-zero the handler queues an initial layout change that is sent as soon as
+// the server advertises its capabilities (MS-RDPEDISP CAPS PDU), prompting
+// servers such as GNOME Remote Desktop (headless) to resize.
 func NewHandler(width, height uint32) *Handler {
-	return &Handler{initialWidth: width, initialHeight: height}
-}
-
-// SetSendFunc is called by the DVC client to provide a write-back function.
-// Required by the drdynvc channel plumbing.
-func (h *Handler) SetSendFunc(f func([]byte)) {
-	h.send = f
-}
-
-// OnChannelCreated is called by the DVC client after the CREATE_RSP has been sent.
-// If an initial resolution was supplied to NewHandler, a MONITOR_LAYOUT PDU is
-// sent immediately, mirroring FreeRDP's behaviour of advertising the desired
-// desktop size as soon as the display channel opens.
-func (h *Handler) OnChannelCreated() {
-	slog.Debug("rdpedisp: channel created")
-	if h.initialWidth > 0 && h.initialHeight > 0 {
-		h.SendMonitorLayout([]Monitor{
+	h := &Handler{}
+	if width > 0 && height > 0 {
+		h.pendingMonitors = []Monitor{
 			{
 				Flags:              MonitorFlagPrimary,
 				Left:               0,
 				Top:                0,
-				Width:              h.initialWidth,
-				Height:             h.initialHeight,
+				Width:              width,
+				Height:             height,
 				PhysicalWidth:      0,
 				PhysicalHeight:     0,
 				Orientation:        0,
 				DesktopScaleFactor: 100,
 				DeviceScaleFactor:  100,
 			},
-		})
+		}
 	}
+	return h
+}
+
+// SetSendFunc is called by the DVC client to provide a write-back function.
+// Required by the drdynvc channel plumbing.
+func (h *Handler) SetSendFunc(f func([]byte)) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.send = f
+}
+
+// OnChannelCreated is called by the DVC client after the CREATE_RSP has been sent.
+func (h *Handler) OnChannelCreated() {
+	slog.Debug("rdpedisp: channel created")
 }
 
 // Process handles incoming data from the server (CAPS PDU, etc.).
@@ -110,6 +113,16 @@ func (h *Handler) Process(data []byte) {
 		if len(data) >= 20 {
 			maxMonitors := binary.LittleEndian.Uint32(data[8:12])
 			slog.Debug("rdpedisp: server CAPS", "maxMonitors", maxMonitors)
+			h.mu.Lock()
+			h.capsReceived = true
+			h.maxMonitors = maxMonitors
+			pending := h.pendingMonitors
+			h.pendingMonitors = nil
+			h.mu.Unlock()
+
+			if len(pending) > 0 {
+				h.SendMonitorLayout(pending)
+			}
 		}
 	default:
 		slog.Debug("rdpedisp: unknown PDU type", "type", pduType)
@@ -117,13 +130,25 @@ func (h *Handler) Process(data []byte) {
 }
 
 // SendMonitorLayout sends a DISPLAYCONTROL_MONITOR_LAYOUT_PDU to the server,
-// requesting the given monitor configuration.  Call this after the session is
-// established to resize or re-layout the remote desktop.
+// requesting the given monitor configuration.  Per MS-RDPEDISP 3.2.5.1, the
+// client MUST NOT send a layout PDU before receiving the server CAPS PDU; if
+// called before CAPS is received, the layout is queued and sent automatically
+// when CAPS arrives.
 //
 // The server will apply the new layout and—if using the RDPGFX pipeline—send
 // a ResetGraphics command that resets surface dimensions to match.
 func (h *Handler) SendMonitorLayout(monitors []Monitor) {
-	if h.send == nil {
+	h.mu.Lock()
+	if !h.capsReceived {
+		slog.Debug("rdpedisp: queuing MonitorLayout (waiting for server CAPS)", "numMonitors", len(monitors))
+		h.pendingMonitors = monitors
+		h.mu.Unlock()
+		return
+	}
+	send := h.send
+	h.mu.Unlock()
+
+	if send == nil {
 		slog.Warn("rdpedisp: SendMonitorLayout: channel not open")
 		return
 	}
@@ -157,5 +182,5 @@ func (h *Handler) SendMonitorLayout(monitors []Monitor) {
 	}
 
 	slog.Debug("rdpedisp: sending MonitorLayout", "numMonitors", numMonitors)
-	h.send(pdu)
+	send(pdu)
 }
