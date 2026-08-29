@@ -315,7 +315,7 @@ func (g *GfxHandler) decodeAVC420(data []byte, destX, destY, destW, destH int) (
 	if frame.Dropped {
 		slog.Debug("RDPGFX: AVC420 frame intentionally dropped (zero-fill)")
 		g.trackSWFallbackDroppedFrame()
-		g.maybeRequestKeyframe()
+		g.requestKeyframe()
 		return nil, nil, false
 	}
 	if slog.Default().Enabled(nil, slog.LevelDebug) {
@@ -449,7 +449,7 @@ func (g *GfxHandler) decodeAVC444(data []byte, destX, destY, destW, destH int) (
 	if frame.Dropped {
 		slog.Debug("RDPGFX: AVC444 frame intentionally dropped (zero-fill)")
 		g.trackSWFallbackDroppedFrame()
-		g.maybeRequestKeyframe()
+		g.requestKeyframe()
 		// Touch Y cache timestamp so LC=2 can still combine with last valid luma
 		// while the server delivers a recovery IDR.
 		if g.avc444YPlane.w > 0 && !g.avc444YPlane.updatedAt.IsZero() {
@@ -547,7 +547,7 @@ func (g *GfxHandler) decodeAVC420WithI420(data []byte, destX, destY, destW, dest
 	if frame != nil && frame.Dropped {
 		slog.Debug("RDPGFX: AVC420 (WithI420) frame intentionally dropped (zero-fill)")
 		g.trackSWFallbackDroppedFrame()
-		g.maybeRequestKeyframe()
+		g.requestKeyframe()
 		return
 	}
 	g.noteSuccessfulDecode()
@@ -618,7 +618,7 @@ func (g *GfxHandler) decodeAVC420WithNV12(data []byte, destX, destY, destW, dest
 	if frame != nil && frame.Dropped {
 		slog.Debug("RDPGFX: AVC420 (WithNV12) frame intentionally dropped (zero-fill)")
 		g.trackSWFallbackDroppedFrame()
-		g.maybeRequestKeyframe()
+		g.requestKeyframe()
 		return
 	}
 	g.noteSuccessfulDecode()
@@ -705,7 +705,7 @@ func (g *GfxHandler) decodeAVC444WithI420(data []byte, destX, destY, destW, dest
 	if frame != nil && frame.Dropped {
 		slog.Debug("RDPGFX: AVC444 (WithI420) frame intentionally dropped (zero-fill)")
 		g.trackSWFallbackDroppedFrame()
-		g.maybeRequestKeyframe()
+		g.requestKeyframe()
 		if g.avc444YPlane.w > 0 && !g.avc444YPlane.updatedAt.IsZero() {
 			g.avc444YPlane.updatedAt = time.Now()
 		}
@@ -814,7 +814,7 @@ func (g *GfxHandler) decodeAVC444WithNV12(data []byte, destX, destY, destW, dest
 	if frame != nil && frame.Dropped {
 		slog.Debug("RDPGFX: AVC444 (WithNV12) frame intentionally dropped (zero-fill)")
 		g.trackSWFallbackDroppedFrame()
-		g.maybeRequestKeyframe()
+		g.requestKeyframe()
 		if g.avc444YPlane.w > 0 && !g.avc444YPlane.updatedAt.IsZero() {
 			g.avc444YPlane.updatedAt = time.Now()
 		}
@@ -1889,6 +1889,26 @@ func (g *GfxHandler) decodeAVC444LC2(stream2 *avc420Stream, destW, destH int) (d
 // softResetLimit is the number of in-place decoder recreations attempted
 // before escalating to a full RDP reconnect.
 const softResetLimit = 5
+
+// requestKeyframe unconditionally sends a keyframe request to the server,
+// subject only to the 2-second rate-limiting interval. Used when a frame was
+// intentionally dropped (e.g. black warm-up frame or low-chroma corruption)
+// so the server resends the painted screen immediately rather than waiting
+// for a timeout.
+func (g *GfxHandler) requestKeyframe() {
+	if g.onKeyframeRequest == nil {
+		return
+	}
+	if g.h264dec == nil || g.h264dec.IsBroken() {
+		return
+	}
+	const keyframeRequestInterval = 2 * time.Second
+	if time.Since(g.lastKeyframeRequest) < keyframeRequestInterval {
+		return
+	}
+	g.lastKeyframeRequest = time.Now()
+	go g.onKeyframeRequest()
+}
 
 // maybeRequestKeyframe sends a keyframe request to the server when either
 // decoder needs a fresh IDR.  Requests are rate-limited to once per 2 seconds

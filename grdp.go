@@ -535,7 +535,7 @@ func (g *RdpClient) doLogin(routingToken []byte) error {
 	// a resolution change while connected (MS-RDPEDISP).  Pass the desired
 	// dimensions so the handler sends an initial MONITOR_LAYOUT PDU as soon
 	// as the channel opens, prompting the server to resize to g.width×g.height.
-	dispHandler := rdpedisp.NewHandler(uint32(g.width), uint32(g.height))
+	dispHandler := rdpedisp.NewHandler(0, 0)
 	g.dispHandler = dispHandler
 	dvcClient.RegisterHandler(rdpedisp.ChannelName, dispHandler)
 

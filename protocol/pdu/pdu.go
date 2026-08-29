@@ -2,6 +2,7 @@ package pdu
 
 import (
 	"bytes"
+	"fmt"
 	"log/slog"
 	"sync"
 
@@ -437,6 +438,10 @@ func (c *Client) recvPDU(s []byte) {
 					c.Emit("bitmap", p.(*BitmapUpdateDataPDU).Rectangles)
 				} else if up.UpdateType == FASTPATH_UPDATETYPE_ORDERS {
 					c.Emit("orders", p.(*FastPathOrdersPDU).OrderPdus)
+				}
+			} else if d.Header.PDUType2 == PDUTYPE2_SET_ERROR_INFO_PDU {
+				if errInfo, ok := d.Data.(*ErrorInfoDataPDU); ok {
+					slog.Warn("Received SetErrorInfoPDU from server", "errorInfo", fmt.Sprintf("0x%x (%d)", errInfo.ErrorInfo, errInfo.ErrorInfo))
 				}
 			} else if d.Header.PDUType2 == PDUTYPE2_POINTER {
 				pp := d.Data.(*PointerDataPDU)
