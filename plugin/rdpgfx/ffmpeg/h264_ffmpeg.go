@@ -1405,14 +1405,10 @@ const avcHWEarlyStallMinElapsed = 2 * time.Second
 
 // avcHWMidSessionNullFrameLimit is the null-frame count threshold used for
 // mid-session stall detection (hwSentCount >= avcHWEarlyFrameLimit).
-// Normal GOP / mid-session IDR boundaries can produce up to ~25 null frames
-// (~1 s at 30 fps); a genuine VideoToolbox stall produces hundreds.  15
-// frames ≈ 0.5 s at 30 fps — this is more aggressive than the previous 20
-// and may occasionally trigger a SW fallback at a noisy GOP boundary, but
-// it recovers from genuine VT stalls noticeably faster.  Observed logs show
-// zero mid-session null frames outside of the fatal VT stall, so the trade-off
-// is acceptable for the target use case.
-const avcHWMidSessionNullFrameLimit = 15
+// VideoToolbox can temporarily return null frames during scene changes, GOP
+// transitions, or high bitrate bursts. We set this to 90 frames (~3 s at 30 fps)
+// to avoid false-positive stall detections and SW fallback during video playback.
+const avcHWMidSessionNullFrameLimit = 90
 
 // avcHWConsecDroppedFrameLimit is the number of consecutive HW-decoded
 // frames that may be classified as warm-up/zero-fill/low-chroma junk (see
@@ -2447,15 +2443,16 @@ func (d *ffmpegDecoder) Decode(h264Data []byte) (*rdpgfx.H264Frame, error) {
 			// (which resolves on its own).  Suppress the count-based probe while
 			// hwNeedsZeroCheck is true; the 7-second safety valve below remains
 			// the backstop for genuine stalls that do not self-resolve.
+			// Only early-session warm-up uses count-based stall detection.
+			// Mid-session count-based detection caused false-positive stalls
+			// during normal video playback / GOP transitions; mid-session stalls
+			// are handled by the wall-clock time threshold (avcHWReadyFreezeThreshold) below.
 			earlyStall := d.hwSentCount < avcHWEarlyFrameLimit &&
 				d.hwConsecNullFrames >= avcHWNullFrameStallLimit &&
 				!d.hwFirstSendTime.IsZero() &&
 				time.Since(d.hwFirstSendTime) >= avcHWEarlyStallMinElapsed
-			midStall := d.hwSentCount >= avcHWEarlyFrameLimit &&
-				d.hwConsecNullFrames >= avcHWMidSessionNullFrameLimit &&
-				!d.hwNeedsZeroCheck // IDR-flush null frames: let VT recover naturally
-			if (earlyStall || midStall) && d.stallProbeStart.IsZero() {
-				slog.Debug("H.264: HW decoder stall detected (null frame count), entering probe",
+			if earlyStall && d.stallProbeStart.IsZero() {
+				slog.Debug("H.264: HW decoder stall detected (early null frame count), entering probe",
 					"consecNullFrames", d.hwConsecNullFrames,
 					"frozenFor", stalledFor.Round(time.Millisecond),
 					"hwSentCount", d.hwSentCount)

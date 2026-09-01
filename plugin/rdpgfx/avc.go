@@ -2032,63 +2032,11 @@ func (g *GfxHandler) maybeNotifyDecoderBroken() {
 	}
 	if g.softResetCount < softResetLimit {
 		g.softResetCount++
-		if reason == H264BrokenReasonHWStall && !g.usingSWFallback {
-			// Switch to software (FFmpeg) decoding when VideoToolbox stalls.
-			// Even if a proactive ForceRefresh was already sent, the server
-			// typically delivers the IDR within ~1-2 s; the SW decoder will
-			// pick it up and the session continues without a full reconnect.
-			slog.Debug("H.264: HW stall — falling back to software decoding",
-				"attempt", g.softResetCount, "limit", softResetLimit)
-			g.usingSWFallback = true
-		} else {
-			slog.Debug("H.264: soft decoder reset",
-				"attempt", g.softResetCount, "limit", softResetLimit,
-				"reason", reason.String())
-		}
+		slog.Debug("H.264: soft decoder reset",
+			"attempt", g.softResetCount, "limit", softResetLimit,
+			"reason", reason.String())
 		g.h264dec.Close()
-		if g.usingSWFallback {
-			g.h264dec = newH264DecoderSWWithWatchdog(g.watchdogCh)
-		} else {
-			g.h264dec = newH264DecoderWithWatchdog(g.watchdogCh)
-		}
-		// Prime the SW fallback decoder with the last cached stream1 IDR so it
-		// can decode subsequent P-frames immediately, without waiting for the
-		// server to send a fresh IDR via ForceRefresh.
-		//
-		// We always prime when an IDR is cached, regardless of its age.  A stale
-		// IDR is missing the reference frames decoded since then, so moving
-		// regions may show transient block noise until the next P-frames refresh
-		// them (or a fresh IDR fully heals the picture) — but for a mostly-static
-		// desktop the stale IDR is a close approximation and the artifacts are
-		// minor.  Crucially this avoids the alternative: AVC444 servers only send
-		// an IDR at session start, so the cached IDR is essentially always "stale"
-		// at stall time; gating priming on freshness meant the SW decoder waited
-		// for a fresh IDR that never arrives, the watchdog fired, and the whole
-		// RDP session reconnected.  Continuing with a primed SW decoder is far
-		// less disruptive than a reconnect.  maybeRequestKeyframe() below still
-		// asks the server for a fresh IDR to clean up any residual artifacts.
-		idrAge := time.Since(g.lastStream1IDRTime)
-		idrFrameAge := g.framesDecoded.Load() - g.lastStream1IDRFrame
-		if g.usingSWFallback && len(g.lastStream1IDR) > 0 &&
-			!g.lastStream1IDRTime.IsZero() {
-			slog.Debug("H.264: priming SW fallback with cached stream1 IDR to avoid IDR wait",
-				"idrLen", len(g.lastStream1IDR),
-				"idrAge", idrAge.Round(time.Millisecond),
-				"idrFrameAge", idrFrameAge,
-			)
-			g.swFallbackPrimed = true
-			g.swFallbackDroppedCount = 0
-			g.swFallbackFirstDropTime = time.Time{}
-			if _, err := g.h264dec.Decode(g.lastStream1IDR); err != nil {
-				slog.Debug("H.264: cached IDR prime failed, watchdog will wait for natural IDR",
-					"err", err)
-			}
-		} else if g.usingSWFallback {
-			slog.Debug("H.264: no cached stream1 IDR to prime SW fallback — watchdog will wait for a natural IDR",
-				"idrAge", idrAge.Round(time.Millisecond),
-				"idrFrameAge", idrFrameAge,
-			)
-		}
+		g.h264dec = newH264DecoderWithWatchdog(g.watchdogCh)
 		// Keep h264dec2 if healthy; tear it down if already broken so
 		// primeAuxDecoder can recreate it when the next stream2 IDR arrives,
 		// rather than spinning up a new VT session only to have it break again.
