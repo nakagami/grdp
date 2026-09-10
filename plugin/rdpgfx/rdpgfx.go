@@ -63,6 +63,7 @@ const (
 	codecUncompressed uint16 = 0x0000
 	codecCaVideo      uint16 = 0x0003 // RDPGFX_CODECID_CAVIDEO (RemoteFX tiles)
 	codecPlanar       uint16 = 0x0004
+	codecClearCodec   uint16 = 0x0008
 	codecProgressive  uint16 = 0x0009
 	codecAVC420       uint16 = 0x000B
 	codecAVC444       uint16 = 0x000E
@@ -173,13 +174,13 @@ type surface struct {
 }
 
 type vBarEntry struct {
-	pixels []byte // BGR data, 3 bytes per pixel
-	count  int
+	pixels []uint32
 }
 
 type clearCodecCtx struct {
 	vBarStorage      []vBarEntry
 	shortVBarStorage []vBarEntry
+	glyphStorage     map[uint16][]byte
 	vBarCursor       int
 	shortVBarCursor  int
 }
@@ -188,7 +189,15 @@ func newClearCodecCtx() *clearCodecCtx {
 	return &clearCodecCtx{
 		vBarStorage:      make([]vBarEntry, 32768),
 		shortVBarStorage: make([]vBarEntry, 16384),
+		glyphStorage:     make(map[uint16][]byte),
 	}
+}
+
+func (ctx *clearCodecCtx) Reset() {
+	ctx.vBarStorage = make([]vBarEntry, 32768)
+	ctx.shortVBarStorage = make([]vBarEntry, 16384)
+	ctx.vBarCursor = 0
+	ctx.shortVBarCursor = 0
 }
 
 type cacheEntry struct {
@@ -1137,6 +1146,7 @@ func (g *GfxHandler) decodePDUs(data []byte) {
 // and progressive decode are skipped to drain the queue quickly.
 // EndFrame (frame ACK) is always processed regardless of skipHeavy.
 func (g *GfxHandler) dispatchDecode(cmdId uint16, data []byte, skipHeavy bool) {
+	slog.Debug("RDPGFX PDU", "cmdId", cmdId, "len", len(data))
 	switch cmdId {
 	case cmdidCapsConfirm:
 		g.onCapsConfirm(data)
@@ -1152,6 +1162,10 @@ func (g *GfxHandler) dispatchDecode(cmdId uint16, data []byte, skipHeavy bool) {
 		// nothing to do
 	case cmdidSurfaceToSurface:
 		g.onSurfaceToSurface(data)
+	case cmdidSurfaceToCache:
+		g.onSurfaceToCache(data)
+	case cmdidDeleteEncodingContext:
+		g.onDeleteEncodingContext(data)
 	case cmdidEndFrame:
 		g.onEndFrame(data) // always ACK, even when skipHeavy
 	case cmdidWireToSurface1:
@@ -1288,6 +1302,14 @@ func (g *GfxHandler) onResetGraphics(data []byte) {
 	g.avc444YPlane = avc444YPlane{}
 	g.avc444IDRYPlane = avc444YPlane{}
 	g.progressive.Reset()
+}
+
+func (g *GfxHandler) onDeleteEncodingContext(data []byte) {
+	if len(data) < 6 {
+		return
+	}
+	ctxId := binary.LittleEndian.Uint32(data[2:])
+	g.progressive.DeleteContext(ctxId)
 }
 
 func (g *GfxHandler) onCreateSurface(data []byte) {
@@ -1456,6 +1478,16 @@ func (g *GfxHandler) onWireToSurface1Decode(data []byte, skipHeavy bool) {
 	case codecPlanar:
 		decoded = decodePlanar(bmpData, w, h)
 		owned = true
+	case codecClearCodec:
+		decoded = g.clearCtx.decode(bmpData, w, h)
+		owned = false
+	case codecProgressive:
+		if skipHeavy {
+			return
+		}
+		rects := g.progressive.Decode(bmpData, s.data, int(s.width), int(s.height))
+		g.emitCaVideoRects(s, rects)
+		return
 	case codecAVC420:
 		destX := int(s.outputX) + int(left)
 		destY := int(s.outputY) + int(top)
@@ -1613,6 +1645,10 @@ func (g *GfxHandler) onWireToSurface2Decode(data []byte, skipHeavy bool) {
 		decoded = decodePlanar(bmpData, w, h)
 		blitToSurface(s, 0, 0, w, h, decoded)
 		g.emitBitmapPooled(s, 0, 0, w, h, decoded)
+	case codecClearCodec:
+		decoded = g.clearCtx.decode(bmpData, w, h)
+		blitToSurface(s, 0, 0, w, h, decoded)
+		g.emitBitmap(s, 0, 0, w, h, decoded)
 	case codecCaVideo:
 		if skipHeavy {
 			break // frame drop
@@ -1771,26 +1807,7 @@ func (g *GfxHandler) onWireToSurface2Decode(data []byte, skipHeavy bool) {
 		}
 		// Decode tiles directly onto the persistent surface buffer.
 		rects := g.progressive.Decode(bmpData, s.data, w, h)
-		for _, rc := range rects {
-			needed := rc.w * rc.h * 4
-			region := regionPool.Get().([]byte)
-			if cap(region) < needed {
-				region = make([]byte, needed)
-			} else {
-				region = region[:needed]
-			}
-			stride := w * 4
-			rowBytes := rc.w * 4
-			for row := 0; row < rc.h; row++ {
-				srcOff := (rc.y+row)*stride + rc.x*4
-				dstOff := row * rowBytes
-				if srcOff+rowBytes <= len(s.data) {
-					copy(region[dstOff:dstOff+rowBytes], s.data[srcOff:srcOff+rowBytes])
-				}
-			}
-			g.emitBitmap(s, rc.x, rc.y, rc.w, rc.h, region)
-			regionPool.Put(region)
-		}
+		g.emitCaVideoRects(s, rects)
 	default:
 		slog.Debug("RDPGFX: WTS2 unsupported codec", "codecId", codecId, "ctxId", codecCtxId)
 		return
@@ -1884,19 +1901,19 @@ func (g *GfxHandler) onSolidFill(data []byte) {
 }
 
 // onSurfaceToSurface handles RDPGFX_SURFACE_TO_SURFACE_PDU (MS-RDPEGFX 2.2.2.5).
-// It blits one or more source rectangles from srcSurface to destSurface.
-// For each rect r, pixels at (r.left, r.top, r.right, r.bottom) in the source
-// are copied to (destPt.x+r.left, destPt.y+r.top) in the destination.
+// It copies a single source rectangle (rcSrc) from srcSurface to multiple destination points (destPts).
 func (g *GfxHandler) onSurfaceToSurface(data []byte) {
-	// Header: srcSurfaceId(2) + destSurfaceId(2) + destPt.x(2) + destPt.y(2) + rectCount(2) = 10 bytes
-	if len(data) < 10 {
+	// Header: srcSurfaceId(2) + destSurfaceId(2) + rcSrc(8) + destPtsCount(2) = 14 bytes
+	if len(data) < 14 {
 		return
 	}
 	srcId := binary.LittleEndian.Uint16(data[0:])
 	dstId := binary.LittleEndian.Uint16(data[2:])
-	destPtX := int(binary.LittleEndian.Uint16(data[4:]))
-	destPtY := int(binary.LittleEndian.Uint16(data[6:]))
-	rectCount := int(binary.LittleEndian.Uint16(data[8:]))
+	left := int(binary.LittleEndian.Uint16(data[4:]))
+	top := int(binary.LittleEndian.Uint16(data[6:]))
+	right := int(binary.LittleEndian.Uint16(data[8:]))
+	bottom := int(binary.LittleEndian.Uint16(data[10:]))
+	destPtsCount := int(binary.LittleEndian.Uint16(data[12:]))
 
 	src, srcOk := g.surfaces[srcId]
 	dst, dstOk := g.surfaces[dstId]
@@ -1904,43 +1921,113 @@ func (g *GfxHandler) onSurfaceToSurface(data []byte) {
 		return
 	}
 
+	w := right - left
+	h := bottom - top
+	if w <= 0 || h <= 0 {
+		return
+	}
+
 	srcStride := int(src.width) * 4
 	dstStride := int(dst.width) * 4
-	offset := 10
-	for i := 0; i < rectCount; i++ {
-		if offset+8 > len(data) {
-			break
-		}
-		left := int(binary.LittleEndian.Uint16(data[offset:]))
-		top := int(binary.LittleEndian.Uint16(data[offset+2:]))
-		right := int(binary.LittleEndian.Uint16(data[offset+4:]))
-		bottom := int(binary.LittleEndian.Uint16(data[offset+6:]))
-		offset += 8
+	rowBytes := w * 4
 
-		w := right - left
-		h := bottom - top
-		if w <= 0 || h <= 0 {
+	// Read source rect into temporary buffer
+	srcBuf := make([]byte, w*h*4)
+	for row := 0; row < h; row++ {
+		srcRow := top + row
+		if srcRow < 0 || srcRow >= int(src.height) {
 			continue
 		}
-		dstX := destPtX + left
-		dstY := destPtY + top
-		rowBytes := w * 4
-		for row := 0; row < h; row++ {
-			srcRow := top + row
-			dstRow := dstY + row
-			if srcRow < 0 || srcRow >= int(src.height) ||
-				dstRow < 0 || dstRow >= int(dst.height) {
-				continue
-			}
-			srcOff := srcRow*srcStride + left*4
-			dstOff := dstRow*dstStride + dstX*4
-			if srcOff < 0 || srcOff+rowBytes > len(src.data) ||
-				dstOff < 0 || dstOff+rowBytes > len(dst.data) {
-				continue
-			}
-			copy(dst.data[dstOff:dstOff+rowBytes], src.data[srcOff:srcOff+rowBytes])
+		srcOff := srcRow*srcStride + left*4
+		dstOff := row * rowBytes
+		if srcOff >= 0 && srcOff+rowBytes <= len(src.data) {
+			copy(srcBuf[dstOff:dstOff+rowBytes], src.data[srcOff:srcOff+rowBytes])
 		}
-		g.emitBitmap(dst, dstX, dstY, w, h, dst.data)
+	}
+
+	g.updatesBuf = g.updatesBuf[:0]
+	offset := 14
+
+	for i := 0; i < destPtsCount; i++ {
+		if offset+4 > len(data) {
+			break
+		}
+		destX := int(binary.LittleEndian.Uint16(data[offset:]))
+		destY := int(binary.LittleEndian.Uint16(data[offset+2:]))
+		offset += 4
+
+		// Copy srcBuf to dst.data at (destX, destY)
+		for row := 0; row < h; row++ {
+			dstRow := destY + row
+			if dstRow < 0 || dstRow >= int(dst.height) {
+				continue
+			}
+			srcOff := row * rowBytes
+			dstOff := dstRow*dstStride + destX*4
+			if dstOff >= 0 && dstOff+rowBytes <= len(dst.data) {
+				copy(dst.data[dstOff:dstOff+rowBytes], srcBuf[srcOff:srcOff+rowBytes])
+			}
+		}
+
+		if dst.mapped && g.onBitmap != nil {
+			needed := w * h * 4
+			region := acquireBitmapBuf(needed)
+			copy(region, srcBuf)
+			destL := int(dst.outputX) + destX
+			destT := int(dst.outputY) + destY
+			g.updatesBuf = append(g.updatesBuf, BitmapUpdate{
+				DestLeft: destL, DestTop: destT,
+				DestRight: destL + w - 1, DestBottom: destT + h - 1,
+				Width: w, Height: h, Bpp: 4, Data: region,
+			})
+		}
+	}
+	if len(g.updatesBuf) > 0 {
+		g.emitAndReleaseUpdates(g.updatesBuf)
+	}
+}
+
+// onSurfaceToCache handles RDPGFX_SURFACE_TO_CACHE_PDU (MS-RDPEGFX 2.2.2.6).
+func (g *GfxHandler) onSurfaceToCache(data []byte) {
+	if len(data) < 20 {
+		return
+	}
+	surfId := binary.LittleEndian.Uint16(data[0:])
+	// cacheKey := binary.LittleEndian.Uint64(data[2:10])
+	cacheSlot := binary.LittleEndian.Uint16(data[10:])
+	left := int(binary.LittleEndian.Uint16(data[12:]))
+	top := int(binary.LittleEndian.Uint16(data[14:]))
+	right := int(binary.LittleEndian.Uint16(data[16:]))
+	bottom := int(binary.LittleEndian.Uint16(data[18:]))
+
+	s, ok := g.surfaces[surfId]
+	if !ok {
+		return
+	}
+	w := right - left
+	h := bottom - top
+	if w <= 0 || h <= 0 {
+		return
+	}
+
+	stride := int(s.width) * 4
+	buf := make([]byte, w*h*4)
+	for row := 0; row < h; row++ {
+		sy := top + row
+		if sy < 0 || sy >= int(s.height) {
+			continue
+		}
+		srcOff := sy*stride + left*4
+		dstOff := row * w * 4
+		n := w * 4
+		if srcOff >= 0 && srcOff+n <= len(s.data) {
+			copy(buf[dstOff:dstOff+n], s.data[srcOff:srcOff+n])
+		}
+	}
+	g.cacheEntries[cacheSlot] = cacheEntry{
+		data:   buf,
+		width:  w,
+		height: h,
 	}
 }
 
@@ -1954,19 +2041,37 @@ func (g *GfxHandler) onCacheToSurface(data []byte) {
 
 	ce, hasCE := g.cacheEntries[cacheSlot]
 	s, hasSurf := g.surfaces[surfId]
+	if !hasCE || !hasSurf {
+		return
+	}
 
+	g.updatesBuf = g.updatesBuf[:0]
 	offset := 6
-	for range destCount {
+	for i := 0; i < int(destCount); i++ {
 		if offset+4 > len(data) {
 			break
 		}
-		dx := binary.LittleEndian.Uint16(data[offset:])
-		dy := binary.LittleEndian.Uint16(data[offset+2:])
+		dx := int(binary.LittleEndian.Uint16(data[offset:]))
+		dy := int(binary.LittleEndian.Uint16(data[offset+2:]))
 		offset += 4
-		if hasCE && hasSurf {
-			blitToSurface(s, int(dx), int(dy), ce.width, ce.height, ce.data)
-			g.emitBitmap(s, int(dx), int(dy), ce.width, ce.height, ce.data)
+
+		blitToSurface(s, dx, dy, ce.width, ce.height, ce.data)
+
+		if s.mapped && g.onBitmap != nil {
+			needed := ce.width * ce.height * 4
+			region := acquireBitmapBuf(needed)
+			copy(region, ce.data)
+			destL := int(s.outputX) + dx
+			destT := int(s.outputY) + dy
+			g.updatesBuf = append(g.updatesBuf, BitmapUpdate{
+				DestLeft: destL, DestTop: destT,
+				DestRight: destL + ce.width - 1, DestBottom: destT + ce.height - 1,
+				Width: ce.width, Height: ce.height, Bpp: 4, Data: region,
+			})
 		}
+	}
+	if len(g.updatesBuf) > 0 {
+		g.emitAndReleaseUpdates(g.updatesBuf)
 	}
 }
 
@@ -2260,181 +2365,232 @@ func applyDelta(plane []byte, w, h int) {
 
 // --- Codec: ClearCodec (MS-RDPEGFX 2.2.4) ---
 
+var clearLog2Floor = [256]int{
+	0, 0, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+	5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
+	6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
+	6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
+	7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+	7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+	7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+	7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+}
+
 func (ctx *clearCodecCtx) decode(data []byte, w, h int) []byte {
-	if len(data) < 12 {
+	if len(data) < 2 {
 		return make([]byte, w*h*4)
 	}
-	// Direct binary indexing — avoids bytes.NewReader and per-field interface dispatch.
-	residualLen := int(binary.LittleEndian.Uint32(data[0:]))
-	bandsLen := int(binary.LittleEndian.Uint32(data[4:]))
-	subcodecLen := int(binary.LittleEndian.Uint32(data[8:]))
-	off := 12
+	flags := data[0]
+	// seqNumber := data[1]
+	off := 2
+
+	if flags&0x04 != 0 { // CLEARCODEC_FLAG_CACHE_RESET
+		ctx.Reset()
+	}
 
 	out := make([]byte, w*h*4)
+	var glyphIndex uint16
+	hasGlyphIndex := false
+	isGlyphHit := false
+
+	if flags&0x01 != 0 { // CLEARCODEC_FLAG_GLYPH_INDEX
+		if off+2 <= len(data) {
+			glyphIndex = binary.LittleEndian.Uint16(data[off:])
+			hasGlyphIndex = true
+			off += 2
+		}
+	}
+
+	if flags&0x02 != 0 { // CLEARCODEC_FLAG_GLYPH_HIT
+		isGlyphHit = true
+		if hasGlyphIndex {
+			if cached, ok := ctx.glyphStorage[glyphIndex]; ok && len(cached) == w*h*4 {
+				copy(out, cached)
+			}
+		}
+		if off+12 > len(data) {
+			return out
+		}
+	}
+
+	if off+12 > len(data) {
+		return out
+	}
+
+	residualLen := int(binary.LittleEndian.Uint32(data[off:]))
+	bandsLen := int(binary.LittleEndian.Uint32(data[off+4:]))
+	subcodecLen := int(binary.LittleEndian.Uint32(data[off+8:]))
+	off += 12
+
 	if residualLen > 0 && off+residualLen <= len(data) {
 		decodeResidual(data[off:off+residualLen], w, h, out)
 	}
 	off += residualLen
 	if bandsLen > 0 && off >= 0 && off+bandsLen <= len(data) {
-		ctx.decodeBands(data[off:off+bandsLen], w, out)
+		ctx.decodeBands(data[off:off+bandsLen], w, h, out)
 	}
 	off += bandsLen
 	if subcodecLen > 0 && off >= 0 && off+subcodecLen <= len(data) {
-		decodeSubcodec(data[off:off+subcodecLen], w, out)
+		ctx.decodeSubcodec(data[off:off+subcodecLen], w, h, out)
 	}
+
+	if hasGlyphIndex && !isGlyphHit {
+		cached := make([]byte, len(out))
+		copy(cached, out)
+		ctx.glyphStorage[glyphIndex] = cached
+	}
+
 	return out
 }
 
 func decodeResidual(data []byte, w, h int, out []byte) {
-	for y := range h {
-		rowDstStart := y * w * 4
-		rowSrcStart := y * w * 3
-		rowDstEnd := rowDstStart + w*4
-		rowSrcEnd := rowSrcStart + w*3
-		if rowDstEnd > len(out) || rowSrcEnd > len(data) {
-			return
+	totalPixels := w * h
+	pixelIndex := 0
+	off := 0
+	for off+4 <= len(data) && pixelIndex < totalPixels {
+		b := data[off]
+		g := data[off+1]
+		r := data[off+2]
+		runLen := int(data[off+3])
+		off += 4
+		if runLen >= 0xFF {
+			if off+2 > len(data) {
+				break
+			}
+			runLen = int(binary.LittleEndian.Uint16(data[off:]))
+			off += 2
+			if runLen >= 0xFFFF {
+				if off+4 > len(data) {
+					break
+				}
+				runLen = int(binary.LittleEndian.Uint32(data[off:]))
+				off += 4
+			}
 		}
-		dst := out[rowDstStart:rowDstEnd:rowDstEnd]
-		src := data[rowSrcStart:rowSrcEnd:rowSrcEnd]
-		for x := range w {
-			si := x * 3
-			di := x * 4
-			dst[di] = src[si]
-			dst[di+1] = src[si+1]
-			dst[di+2] = src[si+2]
-			dst[di+3] = 0xFF
+		pixelU32 := uint32(b) | uint32(g)<<8 | uint32(r)<<16 | uint32(0xFF)<<24
+		end := min(pixelIndex+runLen, totalPixels)
+		for i := pixelIndex; i < end; i++ {
+			binary.LittleEndian.PutUint32(out[i*4:], pixelU32)
 		}
+		pixelIndex = end
 	}
 }
 
-func (ctx *clearCodecCtx) decodeBands(data []byte, surfW int, out []byte) {
-	// Direct slice indexing — avoids bytes.NewReader and per-field interface dispatch.
+func (ctx *clearCodecCtx) decodeBands(data []byte, surfW, surfH int, out []byte) {
 	off := 0
 	for off+11 <= len(data) {
-		xStart := binary.LittleEndian.Uint16(data[off:])
-		yStart := binary.LittleEndian.Uint16(data[off+2:])
-		xEnd := binary.LittleEndian.Uint16(data[off+4:])
-		yEnd := binary.LittleEndian.Uint16(data[off+6:])
+		xStart := int(binary.LittleEndian.Uint16(data[off:]))
+		xEnd := int(binary.LittleEndian.Uint16(data[off+2:]))
+		yStart := int(binary.LittleEndian.Uint16(data[off+4:]))
+		yEnd := int(binary.LittleEndian.Uint16(data[off+6:]))
 		blueBg := data[off+8]
 		greenBg := data[off+9]
 		redBg := data[off+10]
 		off += 11
 
-		bandHeight := int(yEnd - yStart)
-		colCount := int(xEnd - xStart)
-		if bandHeight <= 0 || colCount <= 0 {
+		if xEnd < xStart || yEnd < yStart {
 			continue
 		}
+		bandHeight := yEnd - yStart + 1
+		vBarCount := xEnd - xStart + 1
+		colorBkg := uint32(blueBg) | uint32(greenBg)<<8 | uint32(redBg)<<16 | uint32(0xFF)<<24
 
-		for col := range colCount {
+		for i := 0; i < vBarCount; i++ {
 			if off+2 > len(data) {
 				return
 			}
 			vBarHeader := binary.LittleEndian.Uint16(data[off:])
 			off += 2
-			x := int(xStart) + col
 
-			if (vBarHeader & 0xC000) == 0xC000 {
-				// SHORT_VBAR_CACHE_HIT
-				idx := int(vBarHeader & 0x3FFF)
-				if idx < len(ctx.shortVBarStorage) {
-					entry := ctx.shortVBarStorage[idx]
-					paintColumnBg(out, surfW, x, int(yStart), bandHeight, redBg, greenBg, blueBg)
-					paintVBarPixels(out, surfW, x, int(yStart), 0, entry)
+			var curVBar vBarEntry
+			var vBarShortEntry vBarEntry
+			vBarUpdate := false
+			var vBarYOn, vBarShortPixelCount int
+
+			if (vBarHeader & 0xC000) == 0x4000 { // SHORT_VBAR_CACHE_HIT
+				vBarIndex := int(vBarHeader & 0x3FFF)
+				if vBarIndex < len(ctx.shortVBarStorage) {
+					vBarShortEntry = ctx.shortVBarStorage[vBarIndex]
 				}
-			} else if (vBarHeader & 0xC000) == 0x4000 {
-				// SHORT_VBAR_CACHE_MISS
-				pixCount := int(vBarHeader & 0x3FFF)
 				if off >= len(data) {
 					return
 				}
-				yOn := data[off]
+				vBarYOn = int(data[off])
 				off++
-				n := pixCount * 3
-				pixels := make([]byte, n)
-				available := min(n, len(data)-off)
-				copy(pixels, data[off:off+available])
-				off += available
-				entry := vBarEntry{pixels: pixels, count: pixCount}
+				vBarShortPixelCount = len(vBarShortEntry.pixels)
+				vBarUpdate = true
+			} else if (vBarHeader & 0xC000) == 0x0000 { // SHORT_VBAR_CACHE_MISS
+				vBarYOn = int(vBarHeader & 0xFF)
+				vBarYOff := int((vBarHeader >> 8) & 0x3F)
+				if vBarYOff >= vBarYOn {
+					vBarShortPixelCount = vBarYOff - vBarYOn
+				}
+				if off+vBarShortPixelCount*3 > len(data) {
+					return
+				}
+				shortPixels := make([]uint32, vBarShortPixelCount)
+				for p := 0; p < vBarShortPixelCount; p++ {
+					b := data[off]
+					g := data[off+1]
+					r := data[off+2]
+					off += 3
+					shortPixels[p] = uint32(b) | uint32(g)<<8 | uint32(r)<<16 | uint32(0xFF)<<24
+				}
+				vBarShortEntry = vBarEntry{pixels: shortPixels}
 				if ctx.shortVBarCursor < len(ctx.shortVBarStorage) {
-					ctx.shortVBarStorage[ctx.shortVBarCursor] = entry
+					ctx.shortVBarStorage[ctx.shortVBarCursor] = vBarShortEntry
 				}
 				ctx.shortVBarCursor = (ctx.shortVBarCursor + 1) % len(ctx.shortVBarStorage)
-				paintColumnBg(out, surfW, x, int(yStart), bandHeight, redBg, greenBg, blueBg)
-				paintVBarPixels(out, surfW, x, int(yStart), int(yOn), entry)
-			} else if (vBarHeader & 0x8000) == 0x8000 {
-				// VBAR_CACHE_HIT
-				idx := int(vBarHeader & 0x7FFF)
-				if idx < len(ctx.vBarStorage) {
-					entry := ctx.vBarStorage[idx]
-					paintVBarPixels(out, surfW, x, int(yStart), 0, entry)
+				vBarUpdate = true
+			} else if (vBarHeader & 0x8000) == 0x8000 { // VBAR_CACHE_HIT
+				vBarIndex := int(vBarHeader & 0x7FFF)
+				if vBarIndex < len(ctx.vBarStorage) {
+					curVBar = ctx.vBarStorage[vBarIndex]
 				}
 			} else {
-				// VBAR_CACHE_MISS
-				pixCount := int(vBarHeader & 0x7FFF)
-				n := pixCount * 3
-				pixels := make([]byte, n)
-				available := min(n, len(data)-off)
-				copy(pixels, data[off:off+available])
-				off += available
-				entry := vBarEntry{pixels: pixels, count: pixCount}
+				return
+			}
+
+			if vBarUpdate {
+				vBarPixels := make([]uint32, bandHeight)
+				for y := 0; y < bandHeight; y++ {
+					if y < vBarYOn || y >= vBarYOn+vBarShortPixelCount {
+						vBarPixels[y] = colorBkg
+					} else {
+						vBarPixels[y] = vBarShortEntry.pixels[y-vBarYOn]
+					}
+				}
+				curVBar = vBarEntry{pixels: vBarPixels}
 				if ctx.vBarCursor < len(ctx.vBarStorage) {
-					ctx.vBarStorage[ctx.vBarCursor] = entry
+					ctx.vBarStorage[ctx.vBarCursor] = curVBar
 				}
 				ctx.vBarCursor = (ctx.vBarCursor + 1) % len(ctx.vBarStorage)
-				paintVBarPixels(out, surfW, x, int(yStart), 0, entry)
+			}
+
+			// Render column x = xStart + i
+			dstX := xStart + i
+			if dstX >= 0 && dstX < surfW {
+				for y := 0; y < len(curVBar.pixels); y++ {
+					dstY := yStart + y
+					if dstY >= 0 && dstY < surfH {
+						dstIdx := (dstY*surfW + dstX) * 4
+						if dstIdx+4 <= len(out) {
+							binary.LittleEndian.PutUint32(out[dstIdx:], curVBar.pixels[y])
+						}
+					}
+				}
 			}
 		}
 	}
 }
 
-func paintColumnBg(out []byte, surfW, x, yStart, height int, r, g, b uint8) {
-	if x < 0 || surfW <= 0 || x >= surfW {
-		return
-	}
-	for y := range height {
-		dy := yStart + y
-		idx := (dy*surfW + x) * 4
-		if idx < 0 || idx+4 > len(out) {
-			continue
-		}
-		px := out[idx : idx+4 : idx+4]
-		px[0] = b
-		px[1] = g
-		px[2] = r
-		px[3] = 0xFF
-	}
-}
-
-func paintVBarPixels(out []byte, surfW, x, yStart, yOn int, entry vBarEntry) {
-	if x < 0 || surfW <= 0 || x >= surfW {
-		return
-	}
-	pixels := entry.pixels
-	for y := 0; y < entry.count; y++ {
-		si := y * 3
-		dy := yStart + yOn + y
-		di := (dy*surfW + x) * 4
-		if si+3 > len(pixels) || di < 0 || di+4 > len(out) {
-			continue
-		}
-		src := pixels[si : si+3 : si+3]
-		px := out[di : di+4 : di+4]
-		px[0] = src[0]
-		px[1] = src[1]
-		px[2] = src[2]
-		px[3] = 0xFF
-	}
-}
-
-func decodeSubcodec(data []byte, surfW int, out []byte) {
-	// Direct slice indexing — avoids bytes.NewReader and per-field interface dispatch.
+func (ctx *clearCodecCtx) decodeSubcodec(data []byte, surfW, surfH int, out []byte) {
 	off := 0
 	for off+13 <= len(data) {
-		xStart := binary.LittleEndian.Uint16(data[off:])
-		yStart := binary.LittleEndian.Uint16(data[off+2:])
-		width := binary.LittleEndian.Uint16(data[off+4:])
-		height := binary.LittleEndian.Uint16(data[off+6:])
+		xStart := int(binary.LittleEndian.Uint16(data[off:]))
+		yStart := int(binary.LittleEndian.Uint16(data[off+2:]))
+		width := int(binary.LittleEndian.Uint16(data[off+4:]))
+		height := int(binary.LittleEndian.Uint16(data[off+6:]))
 		bmpLen := int(binary.LittleEndian.Uint32(data[off+8:]))
 		subcodecId := data[off+12]
 		off += 13
@@ -2444,31 +2600,126 @@ func decodeSubcodec(data []byte, surfW int, out []byte) {
 		bmpData := data[off : off+bmpLen]
 		off += bmpLen
 
-		if subcodecId == 0 {
-			// RAW BGR
-			rowSrc := int(width) * 3
-			rowDst := surfW * 4
-			for y := 0; y < int(height); y++ {
-				srcStart := y * rowSrc
-				srcEnd := srcStart + rowSrc
-				dy := int(yStart) + y
-				dstStart := dy*rowDst + int(xStart)*4
-				dstEnd := dstStart + int(width)*4
-				if srcEnd > len(bmpData) || dstStart < 0 || dstEnd > len(out) {
-					continue
+		if subcodecId == 0 { // Uncompressed BGR24
+			srcOff := 0
+			for y := 0; y < height; y++ {
+				dstY := yStart + y
+				for x := 0; x < width; x++ {
+					if srcOff+3 > len(bmpData) {
+						break
+					}
+					b := bmpData[srcOff]
+					g := bmpData[srcOff+1]
+					r := bmpData[srcOff+2]
+					srcOff += 3
+					dstX := xStart + x
+					if dstX >= 0 && dstX < surfW && dstY >= 0 && dstY < surfH {
+						dstIdx := (dstY*surfW + dstX) * 4
+						if dstIdx+4 <= len(out) {
+							out[dstIdx] = b
+							out[dstIdx+1] = g
+							out[dstIdx+2] = r
+							out[dstIdx+3] = 0xFF
+						}
+					}
 				}
-				src := bmpData[srcStart:srcEnd:srcEnd]
-				dst := out[dstStart:dstEnd:dstEnd]
-				for x := 0; x < int(width); x++ {
-					si := x * 3
-					di := x * 4
-					dst[di] = src[si]
-					dst[di+1] = src[si+1]
-					dst[di+2] = src[si+2]
-					dst[di+3] = 0xFF
+			}
+		} else if subcodecId == 2 { // CLEARCODEC_SUBCODEC_RLEX
+			if len(bmpData) < 1 {
+				continue
+			}
+			paletteCount := int(bmpData[0])
+			if paletteCount < 1 || paletteCount > 127 || 1+paletteCount*3 > len(bmpData) {
+				continue
+			}
+			palette := make([]uint32, paletteCount)
+			pOff := 1
+			for p := 0; p < paletteCount; p++ {
+				b := bmpData[pOff]
+				g := bmpData[pOff+1]
+				r := bmpData[pOff+2]
+				pOff += 3
+				palette[p] = uint32(b) | uint32(g)<<8 | uint32(r)<<16 | uint32(0xFF)<<24
+			}
+			numBits := clearLog2Floor[paletteCount-1] + 1
+			depthMask := (1 << (8 - numBits)) - 1
+			stopMask := (1 << numBits) - 1
+
+			pixelCount := width * height
+			pixelIndex := 0
+			x := 0
+			y := 0
+
+			for pOff < len(bmpData) && pixelIndex < pixelCount {
+				if pOff+2 > len(bmpData) {
+					break
+				}
+				tmp := int(bmpData[pOff])
+				runLengthFactor := int(bmpData[pOff+1])
+				pOff += 2
+
+				suiteDepth := (tmp >> numBits) & depthMask
+				stopIndex := tmp & stopMask
+				startIndex := stopIndex - suiteDepth
+
+				if runLengthFactor >= 0xFF {
+					if pOff+2 > len(bmpData) {
+						break
+					}
+					runLengthFactor = int(binary.LittleEndian.Uint16(bmpData[pOff:]))
+					pOff += 2
+					if runLengthFactor >= 0xFFFF {
+						if pOff+4 > len(bmpData) {
+							break
+						}
+						runLengthFactor = int(binary.LittleEndian.Uint32(bmpData[pOff:]))
+						pOff += 4
+					}
+				}
+
+				if startIndex < 0 || startIndex >= paletteCount || stopIndex >= paletteCount {
+					break
+				}
+
+				color := palette[startIndex]
+				for r := 0; r < runLengthFactor && pixelIndex < pixelCount; r++ {
+					dstX := xStart + x
+					dstY := yStart + y
+					if dstX >= 0 && dstX < surfW && dstY >= 0 && dstY < surfH {
+						dstIdx := (dstY*surfW + dstX) * 4
+						if dstIdx+4 <= len(out) {
+							binary.LittleEndian.PutUint32(out[dstIdx:], color)
+						}
+					}
+					x++
+					if x >= width {
+						x = 0
+						y++
+					}
+					pixelIndex++
+				}
+
+				for s := 0; s <= suiteDepth && pixelIndex < pixelCount; s++ {
+					idx := startIndex + s
+					if idx < paletteCount {
+						ccolor := palette[idx]
+						dstX := xStart + x
+						dstY := yStart + y
+						if dstX >= 0 && dstX < surfW && dstY >= 0 && dstY < surfH {
+							dstIdx := (dstY*surfW + dstX) * 4
+							if dstIdx+4 <= len(out) {
+								binary.LittleEndian.PutUint32(out[dstIdx:], ccolor)
+							}
+						}
+					}
+					x++
+					if x >= width {
+						x = 0
+						y++
+					}
+					pixelIndex++
 				}
 			}
 		}
-		// Skip NSCodec (1) and glyph (2) subcodecs
 	}
 }
