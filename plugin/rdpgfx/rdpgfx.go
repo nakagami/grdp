@@ -196,6 +196,14 @@ func newClearCodecCtx() *clearCodecCtx {
 func (ctx *clearCodecCtx) Reset() {
 	ctx.vBarStorage = make([]vBarEntry, 32768)
 	ctx.shortVBarStorage = make([]vBarEntry, 16384)
+	ctx.glyphStorage = make(map[uint16][]byte)
+	ctx.vBarCursor = 0
+	ctx.shortVBarCursor = 0
+}
+
+func (ctx *clearCodecCtx) resetVBar() {
+	ctx.vBarStorage = make([]vBarEntry, 32768)
+	ctx.shortVBarStorage = make([]vBarEntry, 16384)
 	ctx.vBarCursor = 0
 	ctx.shortVBarCursor = 0
 }
@@ -1271,6 +1279,7 @@ func (g *GfxHandler) onResetGraphics(data []byte) {
 	h := binary.LittleEndian.Uint32(data[4:])
 	slog.Debug("RDPGFX: RESET_GRAPHICS", "w", w, "h", h)
 	g.surfaces = make(map[uint16]*surface)
+	g.cacheEntries = make(map[uint16]cacheEntry)
 	g.clearCtx = newClearCodecCtx()
 	g.framesDecoded.Store(0)
 	g.softResetCount = 0
@@ -1834,6 +1843,7 @@ func (g *GfxHandler) onSolidFill(data []byte) {
 	// Pre-compose a single BGRA pixel as a uint32 for one-shot writes.
 	pixelU32 := uint32(cb) | uint32(cg)<<8 | uint32(cr)<<16 | uint32(0xFF)<<24
 
+	g.updatesBuf = g.updatesBuf[:0]
 	offset := 8
 	for range fillCount {
 		if offset+8 > len(data) {
@@ -1890,13 +1900,15 @@ func (g *GfxHandler) onSolidFill(data []byte) {
 			}
 			destL := int(s.outputX) + int(left)
 			destT := int(s.outputY) + int(top)
-			g.singleUpdate[0] = BitmapUpdate{
+			g.updatesBuf = append(g.updatesBuf, BitmapUpdate{
 				DestLeft: destL, DestTop: destT,
 				DestRight: destL + w - 1, DestBottom: destT + h - 1,
 				Width: w, Height: h, Bpp: 4, Data: fillData,
-			}
-			g.emitAndReleaseUpdates(g.singleUpdate[:])
+			})
 		}
+	}
+	if len(g.updatesBuf) > 0 {
+		g.emitAndReleaseUpdates(g.updatesBuf)
 	}
 }
 
@@ -2198,14 +2210,26 @@ func decodeUncompressed(data []byte, w, h int, pixFmt uint8) []byte {
 
 // --- Codec: Planar (RDP 6.0 Bitmap Codec, MS-RDPEGDI 2.2.2.5) ---
 
+const (
+	planarHeaderCLLMask = 0x07
+	planarHeaderCS      = 0x08
+	planarHeaderRLE     = 0x10
+	planarHeaderNA      = 0x20
+)
+
 func decodePlanar(data []byte, w, h int) []byte {
-	if len(data) < 1 {
+	if len(data) < 1 || w <= 0 || h <= 0 {
 		return acquireBitmapBuf(w * h * 4)
 	}
 	header := data[0]
-	rle := (header >> 5) & 1
-	noAlpha := (header >> 6) & 1
+	cll := header & planarHeaderCLLMask
+	cs := (header & planarHeaderCS) != 0
+	rle := (header & planarHeaderRLE) != 0
+	noAlpha := (header & planarHeaderNA) != 0
 	planeSize := w * h
+	subW := (w + 1) / 2
+	subH := (h + 1) / 2
+	subSize := subW * subH
 	offset := 1
 
 	var alphaPlane, redPlane, greenPlane, bluePlane []byte
@@ -2215,53 +2239,94 @@ func decodePlanar(data []byte, w, h int) []byte {
 		releasePlaneBuf(greenPlane)
 		releasePlaneBuf(bluePlane)
 	}()
-	if rle == 0 {
-		if noAlpha == 0 {
+	if !rle {
+		if !noAlpha {
 			alphaPlane, offset = readRawPlane(data, offset, planeSize)
 		}
 		redPlane, offset = readRawPlane(data, offset, planeSize)
-		greenPlane, offset = readRawPlane(data, offset, planeSize)
-		bluePlane, offset = readRawPlane(data, offset, planeSize)
-	} else {
-		if noAlpha == 0 {
-			alphaPlane, offset = decodeNRLE(data, offset, planeSize)
+		if cs {
+			greenPlane, offset = readRawPlane(data, offset, subSize)
+			bluePlane, offset = readRawPlane(data, offset, subSize)
+		} else {
+			greenPlane, offset = readRawPlane(data, offset, planeSize)
+			bluePlane, offset = readRawPlane(data, offset, planeSize)
 		}
-		redPlane, offset = decodeNRLE(data, offset, planeSize)
-		greenPlane, offset = decodeNRLE(data, offset, planeSize)
-		bluePlane, offset = decodeNRLE(data, offset, planeSize)
+	} else {
+		if !noAlpha {
+			alphaPlane, offset = decodePlaneRLE(data, offset, w, h)
+		}
+		redPlane, offset = decodePlaneRLE(data, offset, w, h)
+		if cs {
+			greenPlane, offset = decodePlaneRLE(data, offset, subW, subH)
+			bluePlane, offset = decodePlaneRLE(data, offset, subW, subH)
+		} else {
+			greenPlane, offset = decodePlaneRLE(data, offset, w, h)
+			bluePlane, offset = decodePlaneRLE(data, offset, w, h)
+		}
 	}
 	_ = offset
 
-	applyDelta(alphaPlane, w, h)
-	applyDelta(redPlane, w, h)
-	applyDelta(greenPlane, w, h)
-	applyDelta(bluePlane, w, h)
-
 	out := acquireBitmapBuf(planeSize * 4)
-	// Hoist the per-pixel nil/length checks: clamp each plane to
-	// `planeSize` (zero-fill missing planes) so the inner loop has no
-	// branches and the bounds checks are eliminated.
-	rp := planeOrZero(redPlane, planeSize)
-	gp := planeOrZero(greenPlane, planeSize)
-	bp := planeOrZero(bluePlane, planeSize)
-	ap := alphaPlane
-	hasAlpha := ap != nil && len(ap) >= planeSize
-	if hasAlpha {
-		ap = ap[:planeSize]
-		for i := range planeSize {
-			j := i * 4
-			out[j] = bp[i]
-			out[j+1] = gp[i]
-			out[j+2] = rp[i]
-			out[j+3] = ap[i]
+	if cll == 0 {
+		// Standard RGB
+		rp := planeOrZero(redPlane, planeSize)
+		gp := planeOrZero(greenPlane, planeSize)
+		bp := planeOrZero(bluePlane, planeSize)
+		ap := alphaPlane
+		hasAlpha := !noAlpha && ap != nil && len(ap) >= planeSize
+		if hasAlpha {
+			ap = ap[:planeSize]
+			for i := range planeSize {
+				j := i * 4
+				out[j] = bp[i]
+				out[j+1] = gp[i]
+				out[j+2] = rp[i]
+				out[j+3] = ap[i]
+			}
+		} else {
+			for i := range planeSize {
+				j := i * 4
+				out[j] = bp[i]
+				out[j+1] = gp[i]
+				out[j+2] = rp[i]
+				out[j+3] = 0xFF
+			}
 		}
 	} else {
-		for i := range planeSize {
-			j := i * 4
-			out[j] = bp[i]
-			out[j+1] = gp[i]
-			out[j+2] = rp[i]
-			out[j+3] = 0xFF
+		// YCoCg
+		yp := planeOrZero(redPlane, planeSize)
+		gp := planeOrZero(greenPlane, subSize)
+		bp := planeOrZero(bluePlane, subSize)
+		ap := alphaPlane
+		hasAlpha := !noAlpha && ap != nil && len(ap) >= planeSize
+		cllShift := cll - 1
+		for y := 0; y < h; y++ {
+			for x := 0; x < w; x++ {
+				i := y*w + x
+				var coVal, cgVal byte
+				if cs {
+					coVal = gp[(y/2)*subW+(x/2)]
+					cgVal = bp[(y/2)*subW+(x/2)]
+				} else {
+					coVal = gp[i]
+					cgVal = bp[i]
+				}
+				yVal := int(yp[i])
+				co := int(int8(coVal)) << cllShift
+				cg := int(int8(cgVal)) << cllShift
+				r := clampByte(yVal + co - cg)
+				g := clampByte(yVal + cg)
+				b := clampByte(yVal - co - cg)
+				a := byte(0xFF)
+				if hasAlpha {
+					a = ap[i]
+				}
+				j := i * 4
+				out[j] = b
+				out[j+1] = g
+				out[j+2] = r
+				out[j+3] = a
+			}
 		}
 	}
 	return out
@@ -2293,74 +2358,77 @@ func readRawPlane(data []byte, offset, size int) ([]byte, int) {
 	return plane, offset + size
 }
 
-func decodeNRLE(data []byte, offset, planeSize int) ([]byte, int) {
+// decodePlaneRLE decodes one plane using RDP 6.0 RLE decompression (MS-RDPEGDI 2.2.2.5.1.2).
+func decodePlaneRLE(data []byte, offset, w, h int) ([]byte, int) {
+	planeSize := w * h
 	out := acquirePlaneBuf(planeSize)
-	pos := 0
-	for pos < planeSize && offset < len(data) {
-		ctrl := data[offset]
-		offset++
-		runLen := int((ctrl >> 4) & 0x0F)
-		rawLen := int(ctrl & 0x0F)
+	if offset >= len(data) || planeSize == 0 {
+		clear(out)
+		return out, offset
+	}
 
-		if runLen == 15 {
-			if offset >= len(data) {
-				break
-			}
-			ext := int(data[offset])
+	for y := 0; y < h; y++ {
+		dstRow := out[y*w : (y+1)*w]
+		var prevRow []byte
+		if y > 0 {
+			prevRow = out[(y-1)*w : y*w]
+		}
+
+		x := 0
+		var pixel int16
+
+		for x < w && offset < len(data) {
+			ctrl := data[offset]
 			offset++
-			runLen += ext
-			if ext == 0xFF {
-				if offset+1 >= len(data) {
-					break
+
+			runLen := int(ctrl & 0x0F)
+			rawBytes := int((ctrl >> 4) & 0x0F)
+
+			if runLen == 1 {
+				runLen = rawBytes + 16
+				rawBytes = 0
+			} else if runLen == 2 {
+				runLen = rawBytes + 32
+				rawBytes = 0
+			}
+
+			if prevRow == nil {
+				// Scanline 0: absolute values
+				for rawBytes > 0 && x < w && offset < len(data) {
+					pixel = int16(data[offset])
+					offset++
+					dstRow[x] = byte(pixel)
+					x++
+					rawBytes--
 				}
-				runLen += int(binary.LittleEndian.Uint16(data[offset:]))
-				offset += 2
+				for runLen > 0 && x < w {
+					dstRow[x] = byte(pixel)
+					x++
+					runLen--
+				}
+			} else {
+				// Scanline > 0: delta values relative to previous scanline
+				for rawBytes > 0 && x < w && offset < len(data) {
+					deltaValue := int16(data[offset])
+					offset++
+					if deltaValue&1 != 0 {
+						pixel = -((deltaValue >> 1) + 1)
+					} else {
+						pixel = deltaValue >> 1
+					}
+					dstRow[x] = byte(int16(prevRow[x]) + pixel)
+					x++
+					rawBytes--
+				}
+				for runLen > 0 && x < w {
+					dstRow[x] = byte(int16(prevRow[x]) + pixel)
+					x++
+					runLen--
+				}
 			}
 		}
-		// Bulk-zero the run (clear is a runtime intrinsic; much faster than byte-by-byte).
-		end := min(pos+runLen, planeSize)
-		clear(out[pos:end])
-		pos = end
-
-		if rawLen == 15 {
-			if offset >= len(data) {
-				break
-			}
-			ext := int(data[offset])
-			offset++
-			rawLen += ext
-			if ext == 0xFF {
-				if offset+1 >= len(data) {
-					break
-				}
-				rawLen += int(binary.LittleEndian.Uint16(data[offset:]))
-				offset += 2
-			}
-		}
-		// Bulk-copy the raw run (copy is a runtime intrinsic; much faster than byte-by-byte).
-		n := min(rawLen, min(planeSize-pos, len(data)-offset))
-		copy(out[pos:pos+n], data[offset:offset+n])
-		pos += n
-		offset += n
 	}
 	return out, offset
-}
-
-func applyDelta(plane []byte, w, h int) {
-	if plane == nil || len(plane) < w*h {
-		return
-	}
-	// Process row-by-row: previous row XORs into current row using
-	// fixed-length slices so the compiler eliminates per-element
-	// bounds checks and the index multiplications hoist.
-	for y := 1; y < h; y++ {
-		base := y * w
-		prev := plane[base-w : base : base]
-		cur := plane[base : base+w : base+w]
-		for x := range w {
-			cur[x] ^= prev[x]
-		}
-	}
 }
 
 // --- Codec: ClearCodec (MS-RDPEGFX 2.2.4) ---
@@ -2385,15 +2453,14 @@ func (ctx *clearCodecCtx) decode(data []byte, w, h int) []byte {
 	off := 2
 
 	if flags&0x04 != 0 { // CLEARCODEC_FLAG_CACHE_RESET
-		ctx.Reset()
+		ctx.resetVBar()
 	}
 
 	out := make([]byte, w*h*4)
 	var glyphIndex uint16
 	hasGlyphIndex := false
-	isGlyphHit := false
 
-	if flags&0x01 != 0 { // CLEARCODEC_FLAG_GLYPH_INDEX
+	if flags&(0x01|0x02) != 0 { // CLEARCODEC_FLAG_GLYPH_INDEX | CLEARCODEC_FLAG_GLYPH_HIT
 		if off+2 <= len(data) {
 			glyphIndex = binary.LittleEndian.Uint16(data[off:])
 			hasGlyphIndex = true
@@ -2402,15 +2469,12 @@ func (ctx *clearCodecCtx) decode(data []byte, w, h int) []byte {
 	}
 
 	if flags&0x02 != 0 { // CLEARCODEC_FLAG_GLYPH_HIT
-		isGlyphHit = true
 		if hasGlyphIndex {
 			if cached, ok := ctx.glyphStorage[glyphIndex]; ok && len(cached) == w*h*4 {
 				copy(out, cached)
 			}
 		}
-		if off+12 > len(data) {
-			return out
-		}
+		return out
 	}
 
 	if off+12 > len(data) {
@@ -2434,7 +2498,7 @@ func (ctx *clearCodecCtx) decode(data []byte, w, h int) []byte {
 		ctx.decodeSubcodec(data[off:off+subcodecLen], w, h, out)
 	}
 
-	if hasGlyphIndex && !isGlyphHit {
+	if (flags&0x01 != 0) && hasGlyphIndex {
 		cached := make([]byte, len(out))
 		copy(cached, out)
 		ctx.glyphStorage[glyphIndex] = cached
@@ -2547,6 +2611,13 @@ func (ctx *clearCodecCtx) decodeBands(data []byte, surfW, surfH int, out []byte)
 				if vBarIndex < len(ctx.vBarStorage) {
 					curVBar = ctx.vBarStorage[vBarIndex]
 				}
+				if len(curVBar.pixels) == 0 {
+					vBarPixels := make([]uint32, bandHeight)
+					for y := 0; y < bandHeight; y++ {
+						vBarPixels[y] = colorBkg
+					}
+					curVBar = vBarEntry{pixels: vBarPixels}
+				}
 			} else {
 				return
 			}
@@ -2624,6 +2695,8 @@ func (ctx *clearCodecCtx) decodeSubcodec(data []byte, surfW, surfH int, out []by
 					}
 				}
 			}
+		} else if subcodecId == 1 { // CLEARCODEC_SUBCODEC_NSCODEC
+			decodeNSCodec(bmpData, width, height, out, xStart, yStart, surfW, surfH)
 		} else if subcodecId == 2 { // CLEARCODEC_SUBCODEC_RLEX
 			if len(bmpData) < 1 {
 				continue
