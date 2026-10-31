@@ -2187,12 +2187,15 @@ func (g *GfxHandler) blitAndEmitAVCRegions(s *surface, left, top, frameW, frameH
 			continue
 		}
 		rowBytes := rw * 4
+		if (ry+rh-1)*frameStride+rx*4+rowBytes > len(decoded) {
+			// The decoded buffer is shorter than the advertised frame
+			// dimensions (corrupt/truncated decode).  Emitting the region
+			// would paint zero-filled rows, so drop it entirely.
+			continue
+		}
 		region := acquireBitmapBuf(rw * rh * 4)
 		for row := 0; row < rh; row++ {
 			srcOff := (ry+row)*frameStride + rx*4
-			if srcOff+rowBytes > len(decoded) {
-				break
-			}
 			copy(region[row*rowBytes:row*rowBytes+rowBytes],
 				decoded[srcOff:srcOff+rowBytes])
 

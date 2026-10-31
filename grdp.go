@@ -154,7 +154,12 @@ type Bitmap struct {
 	Width        int
 	Height       int
 	BitsPerPixel int
-	Data         []byte
+	// SrcBitsPerPixel is the bit depth on the wire (15/16/24/32), as opposed
+	// to BitsPerPixel which is the byte count per pixel.  It matters only for
+	// 2-byte pixels: 15 bpp means RGB555, 16 bpp means RGB565.  Zero is
+	// treated as BitsPerPixel*8.
+	SrcBitsPerPixel int
+	Data            []byte
 }
 
 // FillRGBA converts the bitmap's pixel data to RGBA format, writing into dst.
@@ -174,23 +179,27 @@ func (bm *Bitmap) FillRGBA(dst *image.RGBA) *image.RGBA {
 	// Per-format specialised loops avoid a per-pixel switch and let the
 	// compiler hoist bounds checks and emit tight, branch-free inner code.
 	switch bm.BitsPerPixel {
-	case 1:
-		// 16-bit RGB555 stored big-endian in two bytes.
-		n := len(pix) >> 2
-		if len(data) < n*2 {
-			n = len(data) / 2
-		}
-		rgb555BatchToRGBA(pix, data, n)
 	case 2:
-		// 16-bit RGB565 stored big-endian in two bytes.
+		// 16-bit pixels stored big-endian in two bytes: RGB555 when the
+		// wire format is 15 bpp, RGB565 when it is 16 bpp.
 		n := len(pix) >> 2
 		if len(data) < n*2 {
 			n = len(data) / 2
 		}
-		rgb565BatchToRGBA(pix, data, n)
+		if bm.SrcBitsPerPixel == 15 {
+			rgb555BatchToRGBA(pix, data, n)
+		} else {
+			rgb565BatchToRGBA(pix, data, n)
+		}
 	default:
 		// 24/32-bit BGR(A) → RGBA with stride = bm.BitsPerPixel.
 		stride := bm.BitsPerPixel
+		if stride != 3 && stride != 4 {
+			// Unsupported depth (e.g. 1/4/8 bpp indexed formats carry a
+			// palette this client does not negotiate): leave dst untouched
+			// instead of reading out of bounds or dividing by zero.
+			return dst
+		}
 		n := len(pix) >> 2
 		if len(data) < n*stride {
 			n = len(data) / stride
@@ -250,16 +259,23 @@ func (bm *Bitmap) FillBGRA(dst []byte) []byte {
 
 	switch bm.BitsPerPixel {
 	case 2:
-		// 16-bit RGB565: convert to RGBA then swap R↔B in-place → BGRA.
+		// 16-bit pixels (RGB555 for 15 bpp sources, RGB565 for 16 bpp):
+		// convert to RGBA then swap R↔B in-place → BGRA.
 		if len(data) < n*2 {
 			n = len(data) / 2
 		}
-		rgb565BatchToRGBA(dst, data, n)
+		if bm.SrcBitsPerPixel == 15 {
+			rgb555BatchToRGBA(dst, data, n)
+		} else {
+			rgb565BatchToRGBA(dst, data, n)
+		}
 		bgr32BatchToRGBA(dst, dst, n)
 	default:
 		stride := bm.BitsPerPixel
-		if stride < 3 {
-			stride = 4 // treat unknown as BGRA32
+		if stride != 3 && stride != 4 {
+			// Unsupported depth (e.g. 1/4/8 bpp indexed formats): leave dst
+			// zeroed instead of misreading the data as BGRA32.
+			return dst
 		}
 		if stride == 4 {
 			// BGRA32 source — already in the target format; bulk copy.
@@ -746,6 +762,13 @@ func (g *RdpClient) OnBitmap(paint func([]Bitmap)) *RdpClient {
 		for _, v := range rectangles {
 			data := v.BitmapDataStream
 			Bpp := bpp(v.BitsPerPixel)
+			if Bpp == 0 {
+				// 1/4/8 bpp indexed formats reference a palette this client
+				// does not negotiate (it advertises 24 bpp); skip the update
+				// instead of emitting undecodable data.
+				slog.Warn("skipping bitmap with unsupported bit depth", "bpp", v.BitsPerPixel)
+				continue
+			}
 
 			if v.Flags&pdu.BITMAP_NO_PROCESSING != 0 {
 				// Surface command: data is already decoded top-down BGRA
@@ -758,6 +781,12 @@ func (g *RdpClient) OnBitmap(paint func([]Bitmap)) *RdpClient {
 				// Uncompressed bitmaps are bottom-up; flip to top-down.
 				stride := int(v.Width) * Bpp
 				h := int(v.Height)
+				if len(data) < stride*h {
+					// Truncated/malformed stream: flipping in place would
+					// read/write out of bounds.
+					slog.Warn("skipping truncated bitmap", "len", len(data), "need", stride*h)
+					continue
+				}
 				tmp := g.flipLinePool.Get().([]byte)
 				if cap(tmp) < stride {
 					tmp = make([]byte, stride)
@@ -775,7 +804,7 @@ func (g *RdpClient) OnBitmap(paint func([]Bitmap)) *RdpClient {
 			}
 
 			b := Bitmap{int(v.DestLeft), int(v.DestTop), int(v.DestRight), int(v.DestBottom),
-				int(v.Width), int(v.Height), Bpp, data}
+				int(v.Width), int(v.Height), Bpp, int(v.BitsPerPixel), data}
 			bs = append(bs, b)
 		}
 		paint(bs)

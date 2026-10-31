@@ -299,7 +299,10 @@ func (z *zgfxContext) outputLiteral(b byte, out *[]byte) {
 // matches (count > distance) are handled via byte-wise copy after the first
 // pass, since the pattern grows as it is written.
 func (z *zgfxContext) outputMatch(distance, count int, out *[]byte) {
-	if distance <= 0 || count <= 0 {
+	// Reject distances beyond the history window: adding zgfxHistorySize only
+	// once would leave srcIdx negative and cause invalid slice bounds on
+	// malformed/hostile input.
+	if distance <= 0 || distance > zgfxHistorySize || count <= 0 {
 		return
 	}
 	o := *out
@@ -402,7 +405,10 @@ func (z *zgfxContext) Decompress(data []byte, buf []byte) []byte {
 
 			if distance != 0 {
 				// Match: copy from history
-				count := z.decodeMatchCount(br)
+				count, ok := z.decodeMatchCount(br)
+				if !ok {
+					break
+				}
 				z.outputMatch(distance, count, &out)
 			} else {
 				// Unencoded: read raw bytes
@@ -465,29 +471,40 @@ func (z *zgfxContext) decodeToken(br *bitReader) (zgfxToken, bool) {
 //	110 + 3 bits → 8 + value  (8..15)
 //	1110 + 4 bits → 16 + value (16..31)
 //	... and so on (each additional leading 1 doubles the base and adds 1 extra bit)
-func (z *zgfxContext) decodeMatchCount(br *bitReader) int {
+func (z *zgfxContext) decodeMatchCount(br *bitReader) (int, bool) {
+	if br.bitsRemaining < 1 {
+		return 0, false
+	}
 	bit := br.getBit()
 	br.bitsRemaining--
 	if bit == 0 {
-		return 3
+		return 3, true
 	}
 
 	count := 4
 	extra := uint8(2)
 
+	if br.bitsRemaining < 1 {
+		return 0, false
+	}
 	bit = br.getBit()
 	br.bitsRemaining--
 	for bit == 1 {
 		count <<= 1
 		extra++
+		// extra caps the number of leading 1 bits; without it a truncated
+		// stream underflows bitsRemaining and overflows count.
+		if extra >= 32 || br.bitsRemaining < 1 {
+			return 0, false
+		}
 		bit = br.getBit()
 		br.bitsRemaining--
 	}
 
 	if br.bitsRemaining < uint32(extra) {
-		return count
+		return 0, false
 	}
 	count += int(br.getBits(extra))
 	br.bitsRemaining -= uint32(extra)
-	return count
+	return count, true
 }
